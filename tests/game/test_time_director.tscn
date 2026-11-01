@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/game/test_time_director.gd" id="1"]
+
+[node name="TestTimeDirector" type="Node"]
+script = ExtResource("1")

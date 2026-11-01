@@ -1,0 +1,29 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Local project overrides (the showcase writes one into scratch copies)
+override.cfg
+
+# Export output
+/build/
+/export/
+*.pck
+*.zip
+*.dmg
+*.app/
+*.exe
+
+# Test and soak logs
+_logs/
+*.log
+
+# macOS
+.DS_Store
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~

@@ -1,0 +1,245 @@
+extends "res://tests/combat/combat_test_base.gd"
+## Round 2 cross-module APIs: CombatController.start_counter (AI teleport
+## counter), pick_up_debris, ThrownChunk.launch_body, the player's debris kick
+## and the pursuit Focus refund.
+
+var _x := 0.0
+const PEAK_LIMIT := 20.0
+## body -> [peak reported speed, peak speed from position change, last pos, last parent]
+var _peaks := {}
+
+## Sampled on SceneTree.physics_frame, before any _physics_process (and before
+## ProjectileProbe's clamp), so a solver spike would show up here.
+func _sample_peaks() -> void:
+	for b: RigidBody3D in _peaks:
+		if not is_instance_valid(b):
+			continue
+		var rec: Array = _peaks[b]
+		rec[0] = maxf(rec[0], b.linear_velocity.length())
+		var par := b.get_parent()
+		var in_hand := par is BoneAttachment3D
+		if par == rec[3] and not in_hand:
+			rec[1] = maxf(rec[1], (b.global_position - (rec[2] as Vector3)).length() * Engine.physics_ticks_per_second)
+		rec[2] = b.global_position
+		rec[3] = par
+
+func _track(b: RigidBody3D) -> void:
+	_peaks[b] = [0.0, 0.0, b.global_position, b.get_parent()]
+
+func _lane() -> float:
+	_x += 10.0
+	return _x
+
+func _landed(move_id: StringName, victim: Fighter = null) -> HitInfo:
+	for i in range(events.size() - 1, -1, -1):
+		var ev: Array = events[i]
+		if ev[0] == &"hit_landed" and (ev[1] as HitInfo).move_id == move_id \
+				and (victim == null or (ev[1] as HitInfo).victim == victim):
+			return ev[1]
+	return null
+
+func _chunk(pos: Vector3) -> RigidBody3D:
+	var b := RigidBody3D.new()
+	b.mass = 8.0
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(0.4, 0.3, 0.4)
+	cs.shape = box
+	b.add_child(cs)
+	add_child(b)
+	b.global_position = pos
+	DebrisManager.register(b, false)
+	return b
+
+func run() -> void:
+	get_tree().physics_frame.connect(_sample_peaks)
+	print("AI teleport counter")
+	var x := _lane()
+	var p := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var du := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
+	await ticks(15)
+	check(is_equal_approx(du.focus, float(du.config["focus"])), "duelist starts with config focus %.1f" % du.focus)
+	clear_events()
+	var hp0 := p.hp
+	check(du.combat.start_counter(p, 0.4), "start_counter accepted")
+	var behind := p.get_ground_position() - p.get_forward() * Tuning.COUNTER_BEHIND_DIST
+	check(du.global_position.distance_to(behind) < 0.3, "duelist reappears behind the player (%.2f m)" % du.global_position.distance_to(behind))
+	var tell := last_event(&"attack_tell")
+	check(not tell.is_empty() and tell[2] == &"counter" and absf(tell[3] - 0.4) < 0.01, "blue counter tell 0.4 s")
+	check(is_equal_approx(du.focus, float(du.config["focus"]) - Tuning.FOCUS_COST), "costs 1 focus (%.1f)" % du.focus)
+	var ok := await wait_until(func() -> bool: return _landed(&"back_kick", p) != null, 1.5)
+	check(ok, "AI back_kick landed on the player")
+	if ok:
+		var info := _landed(&"back_kick", p)
+		check(absf(info.launch_velocity.length() - Tuning.COUNTER_LAUNCH) < 0.3, "fixed %.1f m/s launch" % info.launch_velocity.length())
+		var want := Tuning.DMG_COUNTER * float(du.config["damage_mult"])
+		check(is_equal_approx(hp0 - p.hp, want), "damage %.1f = DMG_COUNTER x damage_mult" % (hp0 - p.hp))
+
+	print("AI counter: no focus, no counter")
+	x = _lane()
+	var p2 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var du2 := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
+	await ticks(15)
+	du2.spend_focus(du2.focus)
+	check(not du2.combat.start_counter(p2, 0.4), "start_counter refused without focus")
+
+	print("vanish exchange: the player dodges the AI counter and counters back")
+	x = _lane()
+	var p3 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var du3 := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
+	await ticks(15)
+	clear_events()
+	check(du3.combat.start_counter(p3, 0.5), "AI counter started")
+	await wait_until(func() -> bool: return du3.combat.time_to_active() <= 0.08, 2.0)
+	p3.combat.press(CombatController.Action.BLOCK)
+	p3.combat.release(CombatController.Action.BLOCK)
+	ok = await wait_until(func() -> bool: return count_events(&"perfect_dodge") > 0, 1.0)
+	check(ok and last_event(&"perfect_dodge")[1] == p3, "player perfect-dodged the AI counter")
+	await ticks(2)
+	p3.combat.press(CombatController.Action.LIGHT)
+	p3.combat.release(CombatController.Action.LIGHT)
+	var tc := last_event(&"teleport_counter")
+	check(not tc.is_empty() and tc[1] == p3 and tc[2] == du3, "player counters the duelist back")
+	ok = await wait_until(func() -> bool: return _landed(&"back_kick", du3) != null, 1.5)
+	check(ok, "player's back_kick lands on the duelist")
+
+	print("AI counter requested during its own vanish waits for the reappear")
+	x = _lane()
+	var p4 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var du4 := spawn(&"duelist", Vector3(x, 0, -1.1), Vector3.BACK)
+	await ticks(15)
+	clear_events()
+	var counter_result := [false, 0.0]
+	GameEvents.perfect_dodge.connect(func(d: Node3D, a: Node3D) -> void:
+		if d == du4:
+			counter_result[0] = du4.combat.start_counter(a as Fighter, 0.4)
+			counter_result[1] = TimeDirector.now(), CONNECT_ONE_SHOT)
+	p4.combat.press(CombatController.Action.LIGHT)
+	await wait_until(func() -> bool: return p4.combat.time_to_active() <= 0.05, 1.0)
+	du4.combat.press(CombatController.Action.BLOCK)
+	du4.combat.release(CombatController.Action.BLOCK)
+	ok = await wait_until(func() -> bool:
+		for ev in events:
+			if ev[0] == &"attack_tell" and ev[1] == du4 and ev[2] == &"counter":
+				return true
+		return false, 1.5)
+	check(counter_result[0], "start_counter during the vanish returns true (queued)")
+	check(ok, "counter tell came")
+	if ok:
+		var t_tell := TimeDirector.now()
+		check(t_tell - counter_result[1] >= Tuning.VANISH_INVULN - 0.02,
+			"tell started after the vanish (%.3f s after the dodge)" % (t_tell - counter_result[1]))
+		check(not du4.combat.is_vanished(), "visible during the tell")
+
+	print("Thrower: pick up a real chunk and throw it")
+	x = _lane()
+	var p5 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var th := spawn(&"thrower", Vector3(x, 0, -7.0), Vector3.BACK)
+	await ticks(15)
+	var chunk := _chunk(Vector3(x + 0.6, 0.2, -7.0))
+	await ticks(5)
+	var n0 := DebrisManager.count()
+	_track(chunk)
+	check(th.combat.pick_up_debris(chunk), "pick_up_debris accepted")
+	check(DebrisManager.count() == n0 - 1, "chunk released from DebrisManager")
+	check(chunk.get_parent() == th.rig.get_attachment(&"RightHand"), "chunk rides the right hand")
+	check(not th.combat.pick_up_debris(_chunk(Vector3(x - 0.6, 0.2, -7.0))), "one chunk at a time")
+	clear_events()
+	var hp5 := p5.hp
+	check(th.combat.start_enemy_attack(&"e_throw_debris", 0.4), "throw started")
+	ok = await wait_until(func() -> bool: return _landed(&"e_throw_debris", p5) != null, 3.0)
+	check(ok, "the carried chunk hit the player")
+	check(ok and chunk.get_parent() != th.rig.get_attachment(&"RightHand"), "it was the real chunk (left the hand)")
+	check(is_equal_approx(hp5 - p5.hp, Tuning.DMG_ENEMY[&"e_throw_debris"]), "projectile damage %.0f" % (hp5 - p5.hp))
+	var spawned := 0
+	for c in get_children():
+		if c is ThrownChunk:
+			spawned += 1
+	check(spawned == 0, "no box spawned when a chunk was carried")
+	await wait_real(1.0)
+	var pk: Array = _peaks[chunk]
+	check(pk[0] <= PEAK_LIMIT and pk[1] <= PEAK_LIMIT,
+		"picked-up chunk peak %.1f m/s (velocity), %.1f m/s (moved) from pickup to landing <= %.0f" % [pk[0], pk[1], PEAK_LIMIT])
+
+	print("Thrower: carried chunk survives a fast windup and a throw from beside a wall")
+	x = _lane()
+	var p5b := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var th2 := spawn(&"thrower", Vector3(x, 0, -7.0), Vector3.BACK)
+	var wall := StaticBody3D.new()
+	wall.collision_layer = Layers.WORLD
+	var wcs := CollisionShape3D.new()
+	var wbox := BoxShape3D.new()
+	wbox.size = Vector3(4.0, 3.0, 0.3)
+	wcs.shape = wbox
+	wall.add_child(wcs)
+	add_child(wall)
+	wall.global_position = Vector3(x, 1.5, -6.35)  # 0.65 m in front of the thrower
+	await ticks(15)
+	var big := _chunk(Vector3(x + 0.8, 0.3, -7.2))
+	await wait_real(0.3)
+	_track(big)
+	check(th2.combat.pick_up_debris(big), "picked up a chunk next to a wall")
+	await wait_real(0.3)
+	th2.combat.start_enemy_attack(&"e_throw_debris", 0.35)
+	await wait_real(2.0)
+	pk = _peaks[big]
+	check(pk[0] <= PEAK_LIMIT and pk[1] <= PEAK_LIMIT,
+		"chunk thrown beside a wall: peak %.1f / %.1f m/s <= %.0f" % [pk[0], pk[1], PEAK_LIMIT])
+
+	print("ThrownChunk.launch_body on any RigidBody")
+	x = _lane()
+	var p6 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var g6 := spawn(&"grunt", Vector3(x, 0, -6.0), Vector3.BACK)
+	await ticks(15)
+	var b6 := _chunk(Vector3(x, 1.2, -1.0))
+	DebrisManager.release(b6)
+	clear_events()
+	var probe := ThrownChunk.launch_body(b6, ThrownChunk.ballistic_velocity(b6.global_position, g6.get_aim_point(), 14.0), p6, 33.0, &"debris_kick")
+	check(probe != null, "probe attached")
+	ok = await wait_until(func() -> bool: return _landed(&"debris_kick", g6) != null, 2.0)
+	check(ok, "launched body hit the grunt")
+	if ok:
+		check(_landed(&"debris_kick", g6).kind == &"projectile" and _landed(&"debris_kick", g6).attacker == p6, "projectile from the player")
+	await wait_real(0.3)
+	check(DebrisManager.get_bodies().has(b6), "body returned to DebrisManager after the hit")
+
+	print("debris kick")
+	x = _lane()
+	var p7 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var g7 := spawn(&"grunt", Vector3(x, 0, -6.0), Vector3.BACK)
+	await ticks(15)
+	var b7 := _chunk(Vector3(x, 0.15, -0.8))
+	await wait_real(0.5)
+	_track(b7)
+	clear_events()
+	p7.combat.press(CombatController.Action.KICK)
+	p7.combat.release(CombatController.Action.KICK)
+	ok = await wait_until(func() -> bool: return b7.linear_velocity.length() > 8.0, 1.0)
+	check(ok, "kick launched the chunk (%.1f m/s)" % b7.linear_velocity.length())
+	ok = await wait_until(func() -> bool: return _landed(&"debris_kick", g7) != null, 2.0)
+	check(ok, "kicked chunk hit the grunt 6 m away")
+	await wait_real(1.0)
+	pk = _peaks[b7]
+	check(pk[0] <= PEAK_LIMIT and pk[1] <= PEAK_LIMIT,
+		"debris-kicked chunk peak %.1f m/s (velocity), %.1f m/s (moved) <= %.0f" % [pk[0], pk[1], PEAK_LIMIT])
+
+	print("pursuit refund")
+	x = _lane()
+	var p8 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var g8 := spawn(&"grunt", Vector3(x, 0, -1.3), Vector3.BACK)
+	await ticks(15)
+	p8.add_focus(2.0)
+	p8.combat.press(CombatController.Action.KICK)
+	await wait_until(func() -> bool: return g8.is_launched(), 1.0)
+	await wait_real(0.1)
+	p8.combat.press(CombatController.Action.DASH)
+	clear_events()
+	p8.combat.press(CombatController.Action.KICK)
+	ok = await wait_until(func() -> bool: return _landed(&"sparta_kick", g8) != null, 1.0)
+	check(ok, "pursuit follow-up landed")
+	var f8 := p8.focus
+	GameEvents.wall_cracked.emit(null, g8.get_center_of_mass() + Vector3(0, 0, -0.5), 3000.0)
+	check(is_equal_approx(p8.focus, f8 + 0.5), "wall crack during the follow-up flight refunds 0.5 focus (%.2f -> %.2f)" % [f8, p8.focus])
+	GameEvents.wall_broken.emit(null, g8.get_center_of_mass(), 3000.0, Vector3.ZERO)
+	check(is_equal_approx(p8.focus, f8 + 0.5), "refund only once per pursuit")
+	done()

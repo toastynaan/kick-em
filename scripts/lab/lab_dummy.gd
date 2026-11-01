@@ -1,0 +1,67 @@
+class_name LabDummy
+extends CharacterBody3D
+## Minimal fighter host for the ragdoll lab and rig tests: a capsule
+## ("Capsule" child, as the Fighter contract requires) with HumanoidRig,
+## PoseAnimator and RagdollController, without agent B's Fighter.
+## OWNER: agent A.
+
+var archetype: StringName = &"player"
+var rig: HumanoidRig
+var ragdoll: RagdollController
+var animator: PoseAnimator
+var profile: RagdollProfile
+var active_muscles := true
+## World XZ movement intent, 0..1 (lab keys / tests).
+var move_input := Vector3.ZERO
+var walk_speed := Tuning.WALK_SPEED
+
+## Call before add_child().
+func setup(p_archetype: StringName, p_profile: RagdollProfile = null, p_active := true) -> void:
+	archetype = p_archetype
+	profile = p_profile
+	active_muscles = p_active
+
+func _ready() -> void:
+	var cfg: Dictionary = Tuning.ARCHETYPES.get(archetype, Tuning.ARCHETYPES[&"player"])
+	var app: Dictionary = cfg["appearance"]
+	var h := float(app.get("height", 1.0))
+	var w := float(app.get("width", 1.0))
+	collision_layer = Layers.CAPSULE
+	collision_mask = Layers.MASK_CAPSULE
+	var cap := CollisionShape3D.new()
+	cap.name = "Capsule"
+	var cs := CapsuleShape3D.new()
+	cs.radius = 0.3 * w
+	cs.height = 1.8 * h
+	cap.shape = cs
+	cap.position = Vector3(0, 0.9 * h, 0)
+	add_child(cap)
+	rig = HumanoidRig.new()
+	rig.name = "Rig"
+	add_child(rig)
+	rig.build(app, float(cfg["mass"]))
+	animator = PoseAnimator.new()
+	animator.name = "PoseAnimator"
+	add_child(animator)
+	animator.setup(rig)
+	ragdoll = RagdollController.new()
+	ragdoll.name = "RagdollController"
+	ragdoll.profile = profile
+	add_child(ragdoll)
+	ragdoll.setup(self, rig, animator, active_muscles)
+
+func _physics_process(delta: float) -> void:
+	if ragdoll == null or ragdoll.is_simulating():
+		return
+	if ragdoll.state == RagdollController.State.GETUP:
+		velocity = Vector3.ZERO
+		return
+	var v := move_input.limit_length(1.0) * walk_speed
+	velocity.x = v.x
+	velocity.z = v.z
+	velocity.y = -0.5 if is_on_floor() else velocity.y - Tuning.GRAVITY * delta
+	move_and_slide()
+	if v.length() > 0.1:
+		var target := Basis.looking_at(Vector3(v.x, 0, v.z).normalized(), Vector3.UP)
+		global_basis = global_basis.slerp(target, clampf(Tuning.TURN_SPEED * delta, 0.0, 1.0)).orthonormalized()
+	animator.set_locomotion(global_basis.inverse() * velocity, walk_speed)

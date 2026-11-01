@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/ai/test_glint.gd" id="1"]
+
+[node name="TestGlint" type="Node"]
+script = ExtResource("1")

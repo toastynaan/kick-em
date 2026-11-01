@@ -1,0 +1,71 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Ragdoll Brawler"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.8", "Forward Plus")
+config/icon="res://icon.svg"
+
+[autoload]
+
+Controls="*res://scripts/core/controls.gd"
+GameEvents="*res://scripts/core/game_events.gd"
+TimeDirector="*res://scripts/core/time_director.gd"
+DebrisManager="*res://scripts/world/debris_manager.gd"
+ImpactResolver="*res://scripts/world/impact_resolver.gd"
+AttackDirector="*res://scripts/ai/attack_director.gd"
+BloodFX="*res://scripts/fx/blood_fx.gd"
+AudioFX="*res://scripts/fx/audio_fx.gd"
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+window/size/mode=3
+window/size/enable_toggle_fullscreen_shortcut=false
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+
+[gui]
+
+common/auto_focus_strategy=1
+
+[input_devices]
+
+joypads/ignore_joypad_on_unfocused_application=true
+
+[layer_names]
+
+3d_render/layer_1="world"
+3d_render/layer_2="characters"
+3d_render/layer_3="fx"
+3d_physics/layer_1="world"
+3d_physics/layer_2="destructible"
+3d_physics/layer_3="capsule"
+3d_physics/layer_4="ragdoll"
+3d_physics/layer_5="hitbox"
+3d_physics/layer_6="hurtbox"
+3d_physics/layer_7="debris"
+3d_physics/layer_8="debris_small"
+
+[physics]
+
+common/physics_ticks_per_second=120
+common/max_physics_steps_per_frame=12
+common/physics_interpolation=true
+3d/physics_engine="Jolt Physics"
+
+[rendering]
+
+rendering_device/driver.windows="d3d12"
+lights_and_shadows/multi_bounce_occlusion/enabled=true
+anti_aliasing/quality/msaa_3d=2
