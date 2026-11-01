@@ -130,21 +130,21 @@ func request_token(enemy: Fighter, urgent := false) -> bool:
 		return false
 	if not enemy in _enemies:
 		register_enemy(enemy)
-	var now := _now()
-	var reason := _denial(enemy, urgent, now)
+	var t_now := _now()
+	var reason := _denial(enemy, urgent, t_now)
 	_last_denial[enemy] = reason
 	if reason != "":
 		return false
-	_holders[enemy] = {"granted": now, "active_at": INF, "attacking": false, "started": INF}
-	_last_grant = now
+	_holders[enemy] = {"granted": t_now, "active_at": INF, "attacking": false, "started": INF}
+	_last_grant = t_now
 	var pace: float = CROWD_PACE[clampi(Tuning.difficulty, 0, CROWD_PACE.size() - 1)]
-	_next_paced_grant = now + _rng.randf_range(Tuning.ATTACK_INTERVAL.x, Tuning.ATTACK_INTERVAL.y) * pace
+	_next_paced_grant = t_now + _rng.randf_range(Tuning.ATTACK_INTERVAL.x, Tuning.ATTACK_INTERVAL.y) * pace
 	_line.erase(enemy)
 	token_granted.emit(enemy)
 	return true
 
 ## Why request_token() would refuse `enemy` now ("" = it would grant).
-func _denial(enemy: Fighter, urgent: bool, now: float) -> String:
+func _denial(enemy: Fighter, urgent: bool, t_now: float) -> String:
 	if not _enemy_can_attack(enemy):
 		return "enemy busy"
 	var p := get_player()
@@ -160,11 +160,11 @@ func _denial(enemy: Fighter, urgent: bool, now: float) -> String:
 		return "camera busy"
 	if _holders.size() >= get_token_count():
 		return "no free token"
-	if now - _last_grant < GRANT_GAP:
+	if t_now - _last_grant < GRANT_GAP:
 		return "grant gap"
-	if not urgent and live_enemy_count() > 1 and now < _next_paced_grant:
-		return "pacing %.1fs" % (_next_paced_grant - now)
-	if not _onscreen_long_enough(enemy, now):
+	if not urgent and live_enemy_count() > 1 and t_now < _next_paced_grant:
+		return "pacing %.1fs" % (_next_paced_grant - t_now)
+	if not _onscreen_long_enough(enemy, t_now):
 		return "off screen" if _onscreen_since.get(enemy, -1.0) < 0.0 else "on screen < %.1fs" % Tuning.ONSCREEN_BEFORE_TOKEN
 	return ""
 
@@ -306,7 +306,7 @@ func onscreen_time(enemy: Fighter) -> float:
 func request_swing(enemy: Fighter, preferred_tell: float, extra_startup := 0.0) -> float:
 	if not _holders.has(enemy) or not is_player_open():
 		return -1.0
-	var now := _now()
+	var t_now := _now()
 	var pref := clampf(preferred_tell, Tuning.TELL_MIN, Tuning.TELL_MAX)
 	var candidates: Array[float] = [pref]
 	var step := TELL_SEARCH_STEP
@@ -319,7 +319,7 @@ func request_swing(enemy: Fighter, preferred_tell: float, extra_startup := 0.0) 
 		candidates.append(maxf(down, Tuning.TELL_MIN))
 		down -= step
 	for tell in candidates:
-		var active_at := now + tell + extra_startup
+		var active_at := t_now + tell + extra_startup
 		if _swing_is_spaced(enemy, active_at):
 			_holders[enemy]["active_at"] = active_at
 			return tell
@@ -331,11 +331,11 @@ func notify_attack_started(enemy: Fighter, time_to_active: float) -> void:
 	if not _holders.has(enemy):
 		return
 	var entry: Dictionary = _holders[enemy]
-	var now := _now()
+	var t_now := _now()
 	entry["attacking"] = true
-	entry["started"] = now
+	entry["started"] = t_now
 	if is_finite(time_to_active):
-		entry["active_at"] = now + time_to_active
+		entry["active_at"] = t_now + time_to_active
 
 ## The brain could not start the attack it reserved a slot for.
 func cancel_swing(enemy: Fighter) -> void:
@@ -366,11 +366,11 @@ func _enemy_can_attack(enemy: Fighter) -> bool:
 		return false
 	return true
 
-func _onscreen_long_enough(enemy: Fighter, now: float) -> bool:
+func _onscreen_long_enough(enemy: Fighter, t_now: float) -> bool:
 	if _camera() == null:
 		return true
 	var since: float = _onscreen_since.get(enemy, -1.0)
-	return since >= 0.0 and now - since >= Tuning.ONSCREEN_BEFORE_TOKEN
+	return since >= 0.0 and t_now - since >= Tuning.ONSCREEN_BEFORE_TOKEN
 
 func _swing_is_spaced(enemy: Fighter, active_at: float) -> bool:
 	for other in _holders:
@@ -384,20 +384,20 @@ func _swing_is_spaced(enemy: Fighter, active_at: float) -> bool:
 func _process(_delta: float) -> void:
 	# Rule 4 bookkeeping, per rendered frame (the camera moves in _process).
 	var cam := _camera()
-	var now := _now()
+	var t_now := _now()
 	for e in _enemies:
 		if not is_instance_valid(e):
 			continue
 		var inside := cam == null or cam.is_position_in_frustum(e.get_aim_point())
 		if inside:
 			if _onscreen_since.get(e, -1.0) < 0.0:
-				_onscreen_since[e] = now
+				_onscreen_since[e] = t_now
 		else:
 			_onscreen_since[e] = -1.0
 
 func _physics_process(_delta: float) -> void:
 	_nav_tick()
-	var now := _now()
+	var t_now := _now()
 	var player_gone := is_player_down_or_held()
 	for e in _holders.keys():
 		if not is_instance_valid(e):
@@ -411,10 +411,10 @@ func _physics_process(_delta: float) -> void:
 			# Rule 3: an approaching holder does not keep its token while the
 			# player is down or held; it asks again later, keeping its place.
 			release_token(e, true)
-		elif not attacking and now - float(entry["granted"]) > HOLD_TIMEOUT:
+		elif not attacking and t_now - float(entry["granted"]) > HOLD_TIMEOUT:
 			release_token(e)
 		elif attacking and e.combat and not e.combat.is_attacking() \
-				and now - float(entry["started"]) > ATTACK_LOST_GRACE:
+				and t_now - float(entry["started"]) > ATTACK_LOST_GRACE:
 			release_token(e)
 	for e in _enemies.duplicate():
 		if not is_instance_valid(e):
@@ -513,10 +513,10 @@ func _nav_tick() -> void:
 		return
 	if _nav_refresh.is_empty():
 		return
-	var now := _now()
+	var t_now := _now()
 	var keep: Array = []
 	for r: Array in _nav_refresh:
-		if now >= float(r[0]):
+		if t_now >= float(r[0]):
 			nav.refresh(r[1], r[2])
 		else:
 			keep.append(r)

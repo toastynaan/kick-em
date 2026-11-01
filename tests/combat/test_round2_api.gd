@@ -163,7 +163,7 @@ func run() -> void:
 
 	print("Thrower: carried chunk survives a fast windup and a throw from beside a wall")
 	x = _lane()
-	var p5b := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var _p5b := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var th2 := spawn(&"thrower", Vector3(x, 0, -7.0), Vector3.BACK)
 	var wall := StaticBody3D.new()
 	wall.collision_layer = Layers.WORLD

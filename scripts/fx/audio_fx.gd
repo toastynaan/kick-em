@@ -295,6 +295,7 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 ## Milliseconds on the physics-tick clock (TimeDirector.now() uses the same
 ## source; read directly so this autoload has no script dependency).
 static func clock_ms() -> int:
+	@warning_ignore("integer_division")
 	return int(Engine.get_physics_frames() * 1000 / maxi(Engine.physics_ticks_per_second, 1))
 
 func _pick(id: StringName) -> AudioStreamWAV:

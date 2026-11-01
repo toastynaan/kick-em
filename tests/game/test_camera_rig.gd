@@ -256,6 +256,7 @@ func _run() -> void:
 		var vp := get_viewport().get_visible_rect()
 		if rig.camera.is_position_in_frustum(com) and vp.grow(-20.0).has_point(rig.camera.unproject_position(com)):
 			on_screen_frames += 1
+	@warning_ignore("integer_division")
 	_check(down_frames > frames / 2, "player was down against the wall (%d/%d frames)" % [down_frames, frames])
 	_check(worst_pitch >= CameraRig.PITCH_FLOOR - 0.01, "pitch never steeper than -55 deg (worst %.0f deg)" % rad_to_deg(worst_pitch))
 	var com_end := player.get_center_of_mass()

@@ -13,6 +13,7 @@ func _ready() -> void:
 	get_tree().create_timer(_timeout, true, false, true).timeout.connect(func() -> void:
 		print("FAIL timeout after %.0f s" % _timeout)
 		get_tree().quit(1))
+	@warning_ignore("redundant_await")
 	await run()
 	if not _completed:
 		failures.append("run() did not complete (script error or early abort)")
@@ -51,16 +52,16 @@ func _capture_events() -> void:
 		GameEvents.connect(s, func(a = null, b = null, c = null, d = null) -> void:
 			events.append([s, a, b, c, d]))
 
-func count_events(name: StringName) -> int:
+func count_events(what: StringName) -> int:
 	var n := 0
 	for e in events:
-		if e[0] == name:
+		if e[0] == what:
 			n += 1
 	return n
 
-func last_event(name: StringName) -> Array:
+func last_event(what: StringName) -> Array:
 	for i in range(events.size() - 1, -1, -1):
-		if events[i][0] == name:
+		if events[i][0] == what:
 			return events[i]
 	return []
 

@@ -254,7 +254,7 @@ func get_debug_text() -> String:
 	var mode := "orbit" if is_instance_valid(_orbit) else ("follow" if _follow_active else "frame")
 	var soft := get_soft_target()
 	return "cam %s  dist %.1f/%.1f  soft %s  trauma %.2f" % [mode, _dist, _arm_len,
-		soft.name if soft else "-", _trauma]
+		String(soft.name) if soft else "-", _trauma]
 
 # --- Input -------------------------------------------------------------------
 func _unhandled_input(event: InputEvent) -> void:
@@ -467,19 +467,19 @@ func _update_follow(t: float, real_dt: float) -> Array:
 
 func _place_camera(real_dt: float) -> void:
 	_trauma = maxf(_trauma - TRAUMA_DECAY * real_dt, 0.0)
-	var basis := Basis.from_euler(Vector3(_view_pitch(), _yaw, 0.0))
-	var pos := _look + basis.z * _arm_len
+	var view_basis := Basis.from_euler(Vector3(_view_pitch(), _yaw, 0.0))
+	var pos := _look + view_basis.z * _arm_len
 	var shake := _trauma  # linear: a 0.1-trauma jab still moves the view ~3 cm
 	if shake > 0.0001:
 		_noise_t += real_dt * SHAKE_FREQ
 		var ox := clampf(_noise.get_noise_2d(_noise_t, 0.0) * 1.4, -1.0, 1.0)
 		var oy := clampf(_noise.get_noise_2d(_noise_t, 100.0) * 1.4, -1.0, 1.0)
 		var orr := clampf(_noise.get_noise_2d(_noise_t, 200.0) * 1.4, -1.0, 1.0)
-		pos += (basis.x * ox + basis.y * oy) * SHAKE_OFFSET * shake
-		basis = basis * Basis(Vector3.BACK, orr * SHAKE_ROLL * shake)
+		pos += (view_basis.x * ox + view_basis.y * oy) * SHAKE_OFFSET * shake
+		view_basis = view_basis * Basis(Vector3.BACK, orr * SHAKE_ROLL * shake)
 	_kick *= exp(-KICK_DECAY * real_dt)
 	pos += _kick
-	camera.global_transform = Transform3D(basis, pos)
+	camera.global_transform = Transform3D(view_basis, pos)
 	# FOV punch envelope (real time): rise, hold, smooth fall.
 	_fov_age += real_dt
 	var k := 0.0
@@ -660,8 +660,8 @@ func _update_ring(real_dt: float) -> void:
 	if _ring == null:
 		return
 	var soft := get_soft_target()
-	var show := soft != null and not _follow_active and not is_instance_valid(_orbit)
-	if show:
+	var show_ring := soft != null and not _follow_active and not is_instance_valid(_orbit)
+	if show_ring:
 		var p := soft.get_ground_position() + Vector3.UP * 0.04
 		if soft != _ring_for:
 			_ring_pulse = 1.0
@@ -669,7 +669,7 @@ func _update_ring(real_dt: float) -> void:
 				_ring.global_position = p  # appear in place; slide only between live targets
 			_ring_for = soft
 		_ring.global_position = _ring.global_position.lerp(p, 1.0 - exp(-20.0 * real_dt))
-	_ring_alpha = move_toward(_ring_alpha, RING_ALPHA if show else 0.0, real_dt * 3.0)
+	_ring_alpha = move_toward(_ring_alpha, RING_ALPHA if show_ring else 0.0, real_dt * 3.0)
 	_ring_pulse = move_toward(_ring_pulse, 0.0, real_dt * 4.0)
 	var sc := 1.0 + 0.35 * _ring_pulse
 	_ring.scale = Vector3(sc, 0.06, sc)

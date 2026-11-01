@@ -98,7 +98,7 @@ func _prop(kind: StringName, at: Vector3, size: Vector3, energy: float, yaw: flo
 func _fly(prop: Destructible, speed: float, z: float, keep_debris := false) -> Dictionary:
 	_decisions.clear()
 	var face_x := prop.global_position.x + prop.get_half_extent_along(Vector3.RIGHT)
-	var r := await _fly_at(Vector3(face_x, 0, z), speed, keep_debris)
+	var _r := await _fly_at(Vector3(face_x, 0, z), speed, keep_debris)
 	var mine := _decisions.filter(func(d: Dictionary) -> bool: return d["wall"] == prop)
 	return {"outcome": mine[0]["outcome"] if mine.size() > 0 else &"none",
 		"energy": mine[0]["energy"] if mine.size() > 0 else -1.0}

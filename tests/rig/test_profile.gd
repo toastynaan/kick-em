@@ -34,14 +34,12 @@ func _ready() -> void:
 				d.ragdoll.launch(Vector3(0, 9, -3), d.global_position + Vector3.UP, Bones.CHEST)
 		var ctrl_us := 0.0
 		var anim_us := 0.0
-		var phys_ms := 0.0
 		var frames := 0
 		var tw := Time.get_ticks_usec()
 		for f in FRAMES:
 			await get_tree().physics_frame
 			for d in ds:
 				ctrl_us += d.ragdoll.last_tick_ms * 1000.0
-			phys_ms += Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
 			frames += 1
 		var wall_ms := (Time.get_ticks_usec() - tw) / 1000.0 / FRAMES
 		# Animator cost: time a direct evaluation.

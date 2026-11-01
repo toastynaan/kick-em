@@ -358,6 +358,7 @@ func _build() -> void:
 	_refresh_mode_labels()
 
 func _centered_label(size: int, y_frac: float) -> Label:
+	@warning_ignore("integer_division")
 	var l := UIKit.label("", size, Color.WHITE, true, maxi(6, size / 9))
 	l.set_anchors_preset(Control.PRESET_FULL_RECT)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -842,16 +843,17 @@ class _Popups extends Control:
 		var font := UIKit.heavy_font()
 		for it: Dictionary in items:
 			var text: String = it["text"]
-			var size: int = it["size"]
+			var font_size: int = it["size"]
 			var col: Color = it["color"]
 			var sc: float = it["scale"]
-			var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+			var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
 			var pos: Vector2 = it["pos"]
 			draw_set_transform(pos, 0.0, Vector2(sc, sc))
-			var at := Vector2(-w * 0.5, size * 0.35)
-			draw_string_outline(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, maxi(6, size / 6),
+			var at := Vector2(-w * 0.5, font_size * 0.35)
+			@warning_ignore("integer_division")
+			draw_string_outline(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, maxi(6, font_size / 6),
 				Color(0, 0, 0, 0.85 * col.a))
-			draw_string(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+			draw_string(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, col)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 ## Off-screen attack arrows: white = strike (Block), red = grab (Grab).

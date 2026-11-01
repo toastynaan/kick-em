@@ -203,10 +203,10 @@ static func _shared_segment(p: PackedVector2Array, q: PackedVector2Array) -> Arr
 		var a := p[k]
 		var b := p[(k + 1) % p.size()]
 		var d := b - a
-		var len := d.length()
-		if len < 0.02:
+		var seg_len := d.length()
+		if seg_len < 0.02:
 			continue
-		var u := d / len
+		var u := d / seg_len
 		for m in q.size():
 			var c := q[m]
 			var e := q[(m + 1) % q.size()]
@@ -216,7 +216,7 @@ static func _shared_segment(p: PackedVector2Array, q: PackedVector2Array) -> Arr
 			var t0 := u.dot(c - a)
 			var t1 := u.dot(e - a)
 			var lo := maxf(0.0, minf(t0, t1))
-			var hi := minf(len, maxf(t0, t1))
+			var hi := minf(seg_len, maxf(t0, t1))
 			if hi - lo > 0.02:
 				return [a + u * lo, a + u * hi]
 	return []
@@ -496,8 +496,8 @@ static func _prism_shape(poly: PackedVector2Array, t: float, center: Vector2, in
 		var r := p - center
 		var q := r
 		if inset:
-			var len := r.length()
-			q = r * (maxf(len - SHAPE_INSET, len * 0.6) / len) if len > 1e-5 else r
+			var r_len := r.length()
+			q = r * (maxf(r_len - SHAPE_INSET, r_len * 0.6) / r_len) if r_len > 1e-5 else r
 		pts.append(Vector3(q.x, q.y, hz))
 		pts.append(Vector3(q.x, q.y, -hz))
 	var shape := ConvexPolygonShape3D.new()
@@ -508,9 +508,9 @@ static func _prism_shape(poly: PackedVector2Array, t: float, center: Vector2, in
 static func _build_crack_strip(e: CrackEdge, t: float, rng: RandomNumberGenerator) -> void:
 	var hz := t * 0.5 + CRACK_OFFSET
 	var d := e.b - e.a
-	var len := d.length()
-	var perp := Vector2(-d.y, d.x) / len
-	var segs := maxi(2, int(len / 0.16))
+	var seg_len := d.length()
+	var perp := Vector2(-d.y, d.x) / seg_len
+	var segs := maxi(2, int(seg_len / 0.16))
 	var pts := PackedVector2Array()
 	for i in segs + 1:
 		var f := float(i) / float(segs)

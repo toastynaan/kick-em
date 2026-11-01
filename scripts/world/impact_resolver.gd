@@ -128,8 +128,8 @@ func is_tracking(fighter: Node3D) -> bool:
 func get_chain(fighter: Node3D) -> int:
 	if fighter == null or not _tracks.has(fighter.get_instance_id()):
 		return 0
-	var tr: Track = _tracks[fighter.get_instance_id()]
-	return tr.chain.count if tr.chain else 0
+	var track: Track = _tracks[fighter.get_instance_id()]
+	return track.chain.count if track.chain else 0
 
 # --- Events -------------------------------------------------------------------
 
@@ -137,14 +137,14 @@ func _on_fighter_launched(fighter: Node3D, _velocity: Vector3) -> void:
 	var f := fighter as Fighter
 	if f == null:
 		return
-	var tr := _track_for(f)
-	tr.decided.clear()
-	tr.idle = 0.0
-	tr.still = 0.0
-	_reset_history(tr)
+	var track := _track_for(f)
+	track.decided.clear()
+	track.idle = 0.0
+	track.still = 0.0
+	_reset_history(track)
 	var id := f.get_instance_id()
 	if _pending_chain.has(id):
-		tr.chain = _pending_chain[id]
+		track.chain = _pending_chain[id]
 
 func _on_fighter_recovered(fighter: Node3D) -> void:
 	if fighter and _tracks.has(fighter.get_instance_id()):
@@ -161,9 +161,9 @@ func _on_hit_landed(info: HitInfo) -> void:
 	else:
 		_thrown.erase(id)
 	if _tracks.has(id):
-		var tr: Track = _tracks[id]
-		tr.suspend_until = TimeDirector.now() + info.hitstop + 0.05
-		_reset_history(tr)
+		var track: Track = _tracks[id]
+		track.suspend_until = TimeDirector.now() + info.hitstop + 0.05
+		_reset_history(track)
 
 func _on_thrown(grabber: Node3D, victim: Node3D, _velocity: Vector3) -> void:
 	if victim == null or not is_instance_valid(victim):
@@ -177,18 +177,18 @@ func _track_for(f: Fighter) -> Track:
 	var id := f.get_instance_id()
 	if _tracks.has(id):
 		return _tracks[id]
-	var tr := Track.new()
-	tr.fighter = f
-	tr.chain = _pending_chain.get(id, Chain.new())
-	_tracks[id] = tr
+	var track := Track.new()
+	track.fighter = f
+	track.chain = _pending_chain.get(id, Chain.new())
+	_tracks[id] = track
 	if not tracked.has(f):
 		tracked.append(f)
-	return tr
+	return track
 
-func _stop(tr: Track) -> void:
-	var f := tr.fighter
+func _stop(track: Track) -> void:
+	var f := track.fighter
 	if is_instance_valid(f):
-		if tr.ignoring and f.ragdoll:
+		if track.ignoring and f.ragdoll:
 			f.ragdoll.set_ignore_breakables(false)
 		tracked.erase(f)
 		_tracks.erase(f.get_instance_id())
@@ -196,11 +196,11 @@ func _stop(tr: Track) -> void:
 		_launcher.erase(f.get_instance_id())
 	else:
 		for id in _tracks.keys():
-			if _tracks[id] == tr:
+			if _tracks[id] == track:
 				_tracks.erase(id)
 				break
 		tracked = tracked.filter(func(o: Variant) -> bool: return is_instance_valid(o))
-	tr.ignoring = false
+	track.ignoring = false
 
 # --- Tick ---------------------------------------------------------------------
 
@@ -210,11 +210,11 @@ func _physics_process(delta: float) -> void:
 	_time += delta
 	_scan_fighters()
 	for id in _tracks.keys():
-		var tr: Track = _tracks.get(id)
-		if tr == null:
+		var track: Track = _tracks.get(id)
+		if track == null:
 			continue
-		if not _update(tr, delta):
-			_stop(tr)
+		if not _update(track, delta):
+			_stop(track)
 
 ## Picks up launched bodies whose launch event we missed (stagger tipping over,
 ## a corpse sent flying).
@@ -230,42 +230,42 @@ func _scan_fighters() -> void:
 				and f.get_com_velocity().length() > 2.0:
 			_track_for(f)
 
-func _update(tr: Track, delta: float) -> bool:
-	var f := tr.fighter
+func _update(track: Track, delta: float) -> bool:
+	var f := track.fighter
 	if not is_instance_valid(f) or f.is_queued_for_deletion() or not f.is_inside_tree():
 		return false
 	var st := f.get_state()
 	var flying := st == RagdollController.State.LAUNCHED or st == RagdollController.State.DEAD
 	if not flying:
-		tr.idle += delta
-		if tr.ignoring and f.ragdoll:
+		track.idle += delta
+		if track.ignoring and f.ragdoll:
 			f.ragdoll.set_ignore_breakables(false)
-			tr.ignoring = false
-		return tr.idle <= STOP_GRACE
-	tr.idle = 0.0
+			track.ignoring = false
+		return track.idle <= STOP_GRACE
+	track.idle = 0.0
 	var M := maxf(f.get_total_mass(), 1.0)
 	var v := f.get_com_velocity()
 	var com := f.get_center_of_mass()
 	if st == RagdollController.State.DEAD:
 		if v.length() < DEAD_SETTLE_SPEED:
-			tr.still += delta
-			if tr.still > DEAD_SETTLE_TIME:
+			track.still += delta
+			if track.still > DEAD_SETTLE_TIME:
 				return false
 		else:
-			tr.still = 0.0
+			track.still = 0.0
 	var bounds: AABB
 	if f.ragdoll:
 		bounds = f.ragdoll.get_bounds()
 	else:
 		bounds = AABB(com - Vector3(0.3, 0.9, 0.3), Vector3(0.6, 1.8, 0.6))
-	for wid in tr.decided.keys():
-		if _time - float(tr.decided[wid]["seen"]) > DECISION_FORGET:
-			tr.decided.erase(wid)
-	_sweep(tr, f, M, v, com, bounds, delta)
+	for wid in track.decided.keys():
+		if _time - float(track.decided[wid]["seen"]) > DECISION_FORGET:
+			track.decided.erase(wid)
+	_sweep(track, f, M, v, com, bounds, delta)
 	if not is_instance_valid(f):
 		return false
-	_detect_impact(tr, f, M, v, com, bounds)
-	tr.last_v = v
+	_detect_impact(track, f, M, v, com, bounds)
+	track.last_v = v
 	return true
 
 ## Set by _sweep when the resolver itself changed the body's velocity this tick.
@@ -273,17 +273,17 @@ var _vel_changed := false
 
 # --- Sweep: walls and bodies ahead ---------------------------------------------
 
-func _sweep(tr: Track, f: Fighter, M: float, v: Vector3, com: Vector3, bounds: AABB, delta: float) -> void:
+func _sweep(track: Track, f: Fighter, M: float, v: Vector3, com: Vector3, bounds: AABB, delta: float) -> void:
 	_want_ignore = false
 	_need_collide = false
 	_vel_changed = false
 	var speed := v.length()
 	# Keep bones off breakables while passing through a hole this body just
 	# broke, until its centre has crossed the wall.
-	for wid in tr.passing.keys():
-		var pw: Dictionary = tr.passing[wid]
+	for wid in track.passing.keys():
+		var pw: Dictionary = track.passing[wid]
 		if (com - (pw["point"] as Vector3)).dot(pw["into"]) > 0.05 or _time > float(pw["until"]):
-			tr.passing.erase(wid)
+			track.passing.erase(wid)
 		else:
 			_want_ignore = true
 	if speed > MIN_SWEEP_SPEED:
@@ -319,15 +319,15 @@ func _sweep(tr: Track, f: Fighter, M: float, v: Vector3, com: Vector3, bounds: A
 			if col is Destructible:
 				var w := col as Destructible
 				if not w.is_broken:
-					_consider_wall(tr, f, w, M, v, com, center, half, raw_half, speed, look, decide_dist)
+					_consider_wall(track, f, w, M, v, com, center, half, raw_half, speed, look, decide_dist)
 			elif col is Fighter and col != f:
-				_consider_bowl(tr, f, col as Fighter, M, v, com, center, half, delta)
+				_consider_bowl(track, f, col as Fighter, M, v, com, center, half, delta)
 			if not is_instance_valid(f):
 				return
 	var ignore := _want_ignore and not _need_collide
-	if ignore != tr.ignoring and f.ragdoll:
+	if ignore != track.ignoring and f.ragdoll:
 		f.ragdoll.set_ignore_breakables(ignore)
-		tr.ignoring = ignore
+		track.ignoring = ignore
 
 var _static_cache: Array[RID] = []
 var _static_frame := -1
@@ -342,7 +342,7 @@ func _static_rids() -> Array[RID]:
 				_static_cache.append((n as CollisionObject3D).get_rid())
 	return _static_cache
 
-func _consider_wall(tr: Track, f: Fighter, w: Destructible, M: float, v: Vector3, com: Vector3,
+func _consider_wall(track: Track, f: Fighter, w: Destructible, M: float, v: Vector3, com: Vector3,
 		center: Vector3, half: Vector3, raw_half: Vector3, speed: float, look: float, decide_dist: float) -> void:
 	var t_hit := time_to_contact_obb(center, half, v, w.global_transform, w.size * 0.5)
 	if is_inf(t_hit) or t_hit * speed > look:
@@ -353,8 +353,8 @@ func _consider_wall(tr: Track, f: Fighter, w: Destructible, M: float, v: Vector3
 		return
 	var dist := t_hit * speed
 	var wid := w.get_instance_id()
-	if tr.decided.has(wid):
-		var dec: Dictionary = tr.decided[wid]
+	if track.decided.has(wid):
+		var dec: Dictionary = track.decided[wid]
 		dec["seen"] = _time
 		if dec["outcome"] != &"break" and dist <= decide_dist * 2.0:
 			_need_collide = true
@@ -365,7 +365,7 @@ func _consider_wall(tr: Track, f: Fighter, w: Destructible, M: float, v: Vector3
 		return
 	var energy := 0.5 * M * vin * vin
 	if dist <= decide_dist:
-		_decide(tr, f, w, energy, n, v, com, t_hit, footprint)
+		_decide(track, f, w, energy, n, v, com, t_hit, footprint)
 	elif energy >= w.get_crack_threshold():
 		_want_ignore = true
 
@@ -378,13 +378,13 @@ static func footprint_on(w: Destructible, c: Vector3, h: Vector3) -> Rect2:
 	var hy := _ext(xf.basis.y.normalized(), h)
 	return Rect2(lc.x - hx, lc.y - hy, hx * 2.0, hy * 2.0)
 
-func _decide(tr: Track, f: Fighter, w: Destructible, energy: float, n: Vector3, v: Vector3,
+func _decide(track: Track, f: Fighter, w: Destructible, energy: float, n: Vector3, v: Vector3,
 		com: Vector3, t_hit: float, footprint: Rect2) -> void:
 	var pos := _contact_point(com, v, t_hit, w, n)
 	var crack_threshold := w.get_crack_threshold()
 	var outcome := w.receive_impact(energy, pos, v, footprint)
 	var wid := w.get_instance_id()
-	tr.decided[wid] = {"outcome": outcome, "seen": _time}
+	track.decided[wid] = {"outcome": outcome, "seen": _time}
 	match outcome:
 		&"break":
 			if f.ragdoll:
@@ -397,11 +397,11 @@ func _decide(tr: Track, f: Fighter, w: Destructible, energy: float, n: Vector3, 
 			# Keep bones off breakables until the centre has crossed the wall.
 			_want_ignore = true
 			if not w.is_broken:
-				tr.passing[wid] = {"point": w.global_position - n * w.get_half_extent_along(n),
+				track.passing[wid] = {"point": w.global_position - n * w.get_half_extent_along(n),
 					"into": -n, "until": _time + PASS_TIMEOUT}
-			tr.walls_broken += 1
-			if tr.walls_broken >= 2:
-				GameEvents.wall_chain.emit(f, tr.walls_broken)
+			track.walls_broken += 1
+			if track.walls_broken >= 2:
+				GameEvents.wall_chain.emit(f, track.walls_broken)
 		&"crack":
 			_need_collide = true
 			if f.ragdoll:
@@ -413,8 +413,8 @@ func _decide(tr: Track, f: Fighter, w: Destructible, energy: float, n: Vector3, 
 			if energy > Tuning.IMPACT_MIN_ENERGY:
 				_impact_feel(f, energy, WALL_HITSTOP)
 	wall_decided.emit(f, w, outcome, energy, pos)
-	_reset_history(tr)
-	tr.cooldown_until = _time + IMPACT_COOLDOWN
+	_reset_history(track)
+	track.cooldown_until = _time + IMPACT_COOLDOWN
 	_deal(f, energy, pos, n, w.surface, &"wall", null)
 
 ## Screen shake by energy plus a short local hitstop on the body.
@@ -495,14 +495,14 @@ static func _slab(c: Vector3, u: Vector3, b: Vector3) -> float:
 
 # --- Human bowling --------------------------------------------------------------
 
-func _consider_bowl(tr: Track, f: Fighter, victim: Fighter, M: float, v: Vector3, com: Vector3,
+func _consider_bowl(track: Track, f: Fighter, victim: Fighter, M: float, v: Vector3, com: Vector3,
 		center: Vector3, half: Vector3, delta: float) -> void:
 	# A flying body only ever bowls enemies: a launched player bowls enemies, an
 	# enemy bowls other enemies, and nobody bowls the player.
 	if victim.team != Fighter.TEAM_ENEMY or victim.is_down() or victim.is_dead():
 		return
 	var vid := victim.get_instance_id()
-	if tr.bowled.has(vid) or tr.chain.count >= Tuning.BOWL_CHAIN_MAX:
+	if track.bowled.has(vid) or track.chain.count >= Tuning.BOWL_CHAIN_MAX:
 		return
 	var launcher: Dictionary = _launcher.get(f.get_instance_id(), {})
 	if not launcher.is_empty() and launcher["attacker"] == vid and _time - float(launcher["t"]) < BOWL_ATTACKER_GRACE:
@@ -526,13 +526,13 @@ func _consider_bowl(tr: Track, f: Fighter, victim: Fighter, M: float, v: Vector3
 	if vin < MIN_SWEEP_SPEED:
 		return  # overlapping but separating (e.g. thrown away from the grabber): no bowl
 	var energy := 0.5 * M * vin * vin
-	tr.bowled[vid] = true
+	track.bowled[vid] = true
 	var pos := com + v * t_hit + d * minf(half.x, half.z)
-	_bowl(tr, f, victim, energy, v, vin, pos, d)
+	_bowl(track, f, victim, energy, v, vin, pos, d)
 
-func _bowl(tr: Track, f: Fighter, victim: Fighter, energy: float, v: Vector3, vin: float,
+func _bowl(track: Track, f: Fighter, victim: Fighter, energy: float, v: Vector3, vin: float,
 		pos: Vector3, d: Vector3) -> void:
-	var chain := tr.chain
+	var chain := track.chain
 	chain.count += 1
 	var victim_energy := 0.0
 	if energy < Tuning.BOWL_FLINCH_BELOW:
@@ -572,49 +572,49 @@ func _capsule_box(f: Fighter) -> AABB:
 
 # --- Impact detection from COM deceleration ------------------------------------
 
-func _reset_history(tr: Track) -> void:
-	tr.hist_t.clear()
-	tr.hist_v.clear()
-	tr.peak_dv = Vector3.ZERO
+func _reset_history(track: Track) -> void:
+	track.hist_t.clear()
+	track.hist_v.clear()
+	track.peak_dv = Vector3.ZERO
 
-func _detect_impact(tr: Track, f: Fighter, M: float, v: Vector3, com: Vector3, bounds: AABB) -> void:
+func _detect_impact(track: Track, f: Fighter, M: float, v: Vector3, com: Vector3, bounds: AABB) -> void:
 	if _vel_changed:
-		_reset_history(tr)
+		_reset_history(track)
 		return
-	if TimeDirector.now() < tr.suspend_until or (f.has_method(&"is_frozen") and f.call(&"is_frozen")):
-		_reset_history(tr)
+	if TimeDirector.now() < track.suspend_until or (f.has_method(&"is_frozen") and f.call(&"is_frozen")):
+		_reset_history(track)
 		return
 	# Hitstop on a ragdoll zeroes every bone velocity: not an impact.
-	if v.length_squared() < 1e-6 and tr.last_v.length_squared() > 1.0:
-		_reset_history(tr)
+	if v.length_squared() < 1e-6 and track.last_v.length_squared() > 1.0:
+		_reset_history(track)
 		return
-	tr.hist_t.append(_time)
-	tr.hist_v.append(v)
-	while tr.hist_t.size() > 2 and _time - tr.hist_t[1] >= IMPACT_WINDOW:
-		tr.hist_t.remove_at(0)
-		tr.hist_v.remove_at(0)
-	if _time < tr.cooldown_until or tr.hist_t.size() < 2:
+	track.hist_t.append(_time)
+	track.hist_v.append(v)
+	while track.hist_t.size() > 2 and _time - track.hist_t[1] >= IMPACT_WINDOW:
+		track.hist_t.remove_at(0)
+		track.hist_v.remove_at(0)
+	if _time < track.cooldown_until or track.hist_t.size() < 2:
 		return
-	var dt := _time - tr.hist_t[0]
-	var v0 := tr.hist_v[0]
+	var dt := _time - track.hist_t[0]
+	var v0 := track.hist_v[0]
 	var dv := v - v0 - _gravity * dt
 	var threshold := sqrt(2.0 * Tuning.IMPACT_MIN_ENERGY / M) * 0.85
 	var in_impact := dv.length() >= threshold and dv.dot(v0) < 0.0
 	if in_impact:
-		if dv.length_squared() > tr.peak_dv.length_squared():
-			tr.peak_dv = dv
-			tr.peak_com = com
-			tr.peak_time = _time
+		if dv.length_squared() > track.peak_dv.length_squared():
+			track.peak_dv = dv
+			track.peak_com = com
+			track.peak_time = _time
 			return
-		if dv.length() > tr.peak_dv.length() * 0.8 and _time - tr.peak_time < IMPACT_WINDOW:
+		if dv.length() > track.peak_dv.length() * 0.8 and _time - track.peak_time < IMPACT_WINDOW:
 			return
-	if tr.peak_dv != Vector3.ZERO:
-		_commit_impact(tr, f, M, bounds)
+	if track.peak_dv != Vector3.ZERO:
+		_commit_impact(track, f, M, bounds)
 
-func _commit_impact(tr: Track, f: Fighter, M: float, bounds: AABB) -> void:
-	var dv := tr.peak_dv
-	var com := tr.peak_com
-	tr.peak_dv = Vector3.ZERO
+func _commit_impact(track: Track, f: Fighter, M: float, bounds: AABB) -> void:
+	var dv := track.peak_dv
+	var com := track.peak_com
+	track.peak_dv = Vector3.ZERO
 	var dvn := dv.normalized()
 	var reach := bounds.size.length() * 0.5 + 0.4
 	var n := dvn
@@ -639,8 +639,8 @@ func _commit_impact(tr: Track, f: Fighter, M: float, bounds: AABB) -> void:
 	var energy := 0.5 * M * dvn_mag * dvn_mag
 	if energy <= Tuning.IMPACT_MIN_ENERGY:
 		return
-	tr.cooldown_until = _time + IMPACT_COOLDOWN
-	_reset_history(tr)
+	track.cooldown_until = _time + IMPACT_COOLDOWN
+	_reset_history(track)
 	var move := &"floor" if n.y > 0.7 else (&"body" if surface == &"body" else &"wall")
 	_deal(f, energy, pos, n, surface, move, null)
 	if energy >= SHAKE_IMPACT_FROM:
@@ -692,15 +692,15 @@ func _deal(f: Fighter, energy: float, pos: Vector3, n: Vector3, surface: StringN
 	if dmg <= 0.0:
 		return
 	# Per-flight rules: 2nd+ impact x IMPACT_REPEAT_MULT, flight total capped.
-	var tr: Track = _tracks.get(f.get_instance_id())
-	if tr != null:
-		if tr.flight_hits >= 1:
+	var track: Track = _tracks.get(f.get_instance_id())
+	if track != null:
+		if track.flight_hits >= 1:
 			dmg *= Tuning.IMPACT_REPEAT_MULT
-		dmg = minf(dmg, maxf(Tuning.IMPACT_FLIGHT_CAP - tr.flight_damage, 0.0))
+		dmg = minf(dmg, maxf(Tuning.IMPACT_FLIGHT_CAP - track.flight_damage, 0.0))
 		if dmg <= 0.0:
 			return
-		tr.flight_hits += 1
-		tr.flight_damage += dmg
+		track.flight_hits += 1
+		track.flight_damage += dmg
 	var info := HitInfo.new()
 	info.attacker = attacker
 	info.victim = f

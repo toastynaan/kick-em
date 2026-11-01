@@ -32,6 +32,7 @@ func _run() -> void:
 	var tex := TellGlint.get_star_texture()
 	check(tex != null and tex.get_width() == TellGlint.TEXTURE_SIZE, "star texture generated in code")
 	var img := tex.get_image()
+	@warning_ignore("integer_division")
 	var c := TellGlint.TEXTURE_SIZE / 2
 	check(img.get_pixel(c, c).a > 0.9 and img.get_pixel(1, 1).a < 0.05, "star: opaque core, clear corners")
 

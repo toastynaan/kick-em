@@ -22,11 +22,11 @@ func build_body() -> void:
 	add_part(Bones.R_UPPER_LEG, Vector3(0.14, 0.4, 0.14), Vector3(0.1, 0.65, 0))
 	add_part(Bones.R_LOWER_LEG, Vector3(0.11, 0.4, 0.11), Vector3(0.1, 0.25, 0))
 
-func add_part(bone: StringName, size: Vector3, pos: Vector3, basis := Basis(),
+func add_part(bone: StringName, size: Vector3, pos: Vector3, part_basis := Basis(),
 		shared: ShaderMaterial = null) -> MeshInstance3D:
 	var att := Node3D.new()
 	att.name = String(bone)
-	att.transform = Transform3D(basis, pos)
+	att.transform = Transform3D(part_basis, pos)
 	add_child(att)
 	var mi := MeshInstance3D.new()
 	mi.name = "Mesh"

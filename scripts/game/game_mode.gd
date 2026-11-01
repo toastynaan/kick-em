@@ -397,13 +397,13 @@ func _stage_breach() -> void:
 func _pick_breach_wall(walls: Array) -> Node3D:
 	if walls.is_empty():
 		return null
-	var visible: Array = []
+	var on_screen: Array = []
 	if camera_rig:
-		visible = walls.filter(func(w: Node3D) -> bool:
+		on_screen = walls.filter(func(w: Node3D) -> bool:
 			return camera_rig.is_on_screen(w.global_position) or camera_rig.is_on_screen(w.global_position + Vector3.UP))
 	var offices := func(list: Array) -> Array:
 		return list.filter(func(w: Node3D) -> bool: return w.global_position.x < -10.0)
-	for pool: Array in [offices.call(visible), visible, offices.call(walls), walls]:
+	for pool: Array in [offices.call(on_screen), on_screen, offices.call(walls), walls]:
 		if not pool.is_empty():
 			return pool.pick_random()
 	return null
@@ -534,6 +534,7 @@ func _show_round_over(gen: int) -> void:
 
 func _stats_text() -> String:
 	var secs := int(TimeDirector.now() - _round_started_at)
+	@warning_ignore("integer_division")
 	var time_s := "%d:%02d" % [secs / 60, secs % 60]
 	if mode == &"waves":
 		var reached := "all %d waves" % wave_total if _won else "wave %d of %d" % [wave_index + 1, wave_total]

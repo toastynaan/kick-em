@@ -22,6 +22,7 @@ func save(path: String) -> void:
 	var rows := ceili(frames.size() / float(COLS))
 	var sheet := Image.create(CELL.x * COLS, CELL.y * rows, false, frames[0].get_format())
 	for i in frames.size():
+		@warning_ignore("integer_division")
 		var at := Vector2i((i % COLS) * CELL.x, (i / COLS) * CELL.y)
 		sheet.blit_rect(frames[i], Rect2i(Vector2i.ZERO, CELL), at)
 	sheet.save_png(path)

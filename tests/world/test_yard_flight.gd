@@ -126,7 +126,7 @@ func _fly(com_xz: Vector3, vel: Vector3, seconds: float) -> Dictionary:
 		"imp": _impacts.filter(func(x: Dictionary) -> bool: return x["fighter"] == f),
 		"end": f.get_center_of_mass(),
 		"hp_lost": 2000.0 - f.hp,
-		"chain": _chains.filter(func(c: Array) -> bool: return c[0] == f).map(func(c: Array) -> int: return c[1]),
+		"chain": _chains.filter(func(entry: Array) -> bool: return entry[0] == f).map(func(entry: Array) -> int: return entry[1]),
 	}
 	f.queue_free()
 	ImpactResolver.reset()

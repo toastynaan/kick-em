@@ -320,7 +320,7 @@ func stagger(direction: Vector3, strength: float = 1.0) -> void:
 ## of the last two animated poses), then `velocity` as a velocity change
 ## (impulse = bone mass * velocity), extra impulse at hit_bone, then limb spin.
 ## Calling launch() while already LAUNCHED re-launches (adds velocity).
-func launch(velocity: Vector3, hit_point: Vector3, hit_bone: StringName = &"Chest") -> void:
+func launch(velocity: Vector3, _hit_point: Vector3, hit_bone: StringName = &"Chest") -> void:
 	if rig == null:
 		return
 	if not _full:

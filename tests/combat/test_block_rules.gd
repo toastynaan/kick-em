@@ -82,7 +82,7 @@ func run() -> void:
 
 	print("heavy brute: standing kick staggers, dash kick launches")
 	var p5 := spawn(&"player", Vector3(32, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var br := spawn(&"brute", Vector3(32, 0, -1.4), Vector3.BACK)
+	var _br := spawn(&"brute", Vector3(32, 0, -1.4), Vector3.BACK)
 	await ticks(20)
 	clear_events()
 	p5.combat.press(CombatController.Action.KICK)
@@ -90,7 +90,7 @@ func run() -> void:
 	var inf: HitInfo = last_event(&"hit_landed")[1] if count_events(&"hit_landed") > 0 else null
 	check(inf != null and inf.reaction == HitInfo.Reaction.STAGGER, "standing kick only staggers the brute")
 	var p6 := spawn(&"player", Vector3(40, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var br2 := spawn(&"brute", Vector3(40, 0, -3.8), Vector3.BACK)
+	var _br2 := spawn(&"brute", Vector3(40, 0, -3.8), Vector3.BACK)
 	await ticks(20)
 	clear_events()
 	p6.move_input = Vector3.FORWARD

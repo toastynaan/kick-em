@@ -3,6 +3,9 @@ extends Node
 ## it; anyone may listen. Fighters are typed Node3D to keep this file free of
 ## module dependencies. OWNER: core (contract). Add signals, never rename.
 
+# Other modules emit these signals, so none is used inside this file.
+@warning_ignore_start("unused_signal")
+
 # Combat
 signal hit_landed(info: HitInfo)        ## After damage and reaction were applied.
 signal hit_blocked(info: HitInfo)

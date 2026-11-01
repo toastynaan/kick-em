@@ -7,8 +7,8 @@ extends Node3D
 
 var _ok := true
 
-func _check(name: String, cond: bool, info := "") -> void:
-	print("  %-34s %s %s" % [name, "ok" if cond else "FAILED", info])
+func _check(what: String, cond: bool, info := "") -> void:
+	print("  %-34s %s %s" % [what, "ok" if cond else "FAILED", info])
 	_ok = _ok and cond
 
 func _frames(n: int) -> void:

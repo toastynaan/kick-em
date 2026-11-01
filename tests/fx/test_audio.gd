@@ -17,6 +17,7 @@ func _ready() -> void:
 				fails += 1
 				continue
 			var data := wav.data
+			@warning_ignore("integer_division")
 			var n := data.size() / 2
 			total_samples += n
 			var seconds := float(n) / wav.mix_rate

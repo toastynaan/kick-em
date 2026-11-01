@@ -20,6 +20,7 @@ func _ready() -> void:
 
 	# 1. Landings.
 	for i in 25:
+		@warning_ignore("integer_division")
 		var b := _chunk(Vector3(-60 + (i % 5) * 1.5, 1.5 + i * 0.35, -60 + (i / 5) * 1.5), false)
 		b.linear_velocity = Vector3(0, -6, 0)
 		DebrisManager.register(b, false)
@@ -34,6 +35,7 @@ func _ready() -> void:
 	var max_large := 0
 	for batch in 8:
 		for i in 30:
+			@warning_ignore("integer_division")
 			var b := _chunk(Vector3(-40 + (i % 6) * 1.6 + batch * 10.0, 0.6 + (i / 6) * 0.7, 0), false)
 			b.linear_velocity = Vector3(randf_range(-1, 1), 0, randf_range(-1, 1))
 			DebrisManager.register(b, false)
@@ -50,6 +52,7 @@ func _ready() -> void:
 	# 3. Small chunks fade, large persist past DEBRIS_FADE_AFTER.
 	var smalls: Array[RigidBody3D] = []
 	for i in 20:
+		@warning_ignore("integer_division")
 		var b := _chunk(Vector3(60 + (i % 5) * 0.8, 0.3, 60 + (i / 5) * 0.8), true)
 		DebrisManager.register(b, true)
 		smalls.append(b)

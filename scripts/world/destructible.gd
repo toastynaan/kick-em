@@ -217,9 +217,9 @@ func get_half_extent_along(n: Vector3) -> float:
 
 ## Called by ImpactResolver BEFORE contact. Decides break / crack / bounce by
 ## energy and returns &"break", &"crack" or &"bounce". `footprint` is the
-## body's outline in panel-local XY (empty: an upright body at `position`).
+## body's outline in panel-local XY (empty: an upright body at `hit_pos`).
 ## A break of a wall panel punches a hole of that size; props break whole.
-func receive_impact(energy: float, position: Vector3, velocity: Vector3, footprint := Rect2()) -> StringName:
+func receive_impact(energy: float, hit_pos: Vector3, velocity: Vector3, footprint := Rect2()) -> StringName:
 	if not _built:
 		_build()
 	if is_broken:
@@ -228,52 +228,52 @@ func receive_impact(energy: float, position: Vector3, velocity: Vector3, footpri
 		var from: float = Tuning.SURFACES.get(surface, {}).get("decal_from", INF)
 		if energy >= from:
 			is_cracked = true
-			spawn_crack_decal(self, position, get_face_normal(position - velocity), energy)
+			spawn_crack_decal(self, hit_pos, get_face_normal(hit_pos - velocity), energy)
 		return &"bounce"
 	if energy >= break_energy:
 		if kind != &"panel":
-			_break_all(position, velocity, energy)
+			_break_all(hit_pos, velocity, energy)
 		else:
-			var lp := to_local2(position)
+			var lp := to_local2(hit_pos)
 			var fp := footprint if footprint.has_area() else Rect2(lp - DEFAULT_FOOTPRINT * 0.5, DEFAULT_FOOTPRINT)
-			_break_cells(position, velocity, energy, fp)
+			_break_cells(hit_pos, velocity, energy, fp)
 		return &"break"
 	if energy >= Tuning.CRACK_FRACTION * break_energy:
-		_crack(position, energy, velocity)
+		_crack(hit_pos, energy, velocity)
 		return &"crack"
 	return &"bounce"
 
 ## Scripted full break (the whole panel goes).
-func force_break(position: Vector3, velocity: Vector3) -> void:
+func force_break(hit_pos: Vector3, velocity: Vector3) -> void:
 	if not _built:
 		_build()
 	if is_broken or is_unbreakable():
 		return
-	_break_all(position, velocity, maxf(break_energy, 0.0))
+	_break_all(hit_pos, velocity, maxf(break_energy, 0.0))
 
 ## Scripted local hole: removes the cells under `footprint` (panel-local XY).
-func break_hole(position: Vector3, velocity: Vector3, footprint: Rect2) -> void:
+func break_hole(hit_pos: Vector3, velocity: Vector3, footprint: Rect2) -> void:
 	if not _built:
 		_build()
 	if is_broken or is_unbreakable():
 		return
 	if kind != &"panel":
-		_break_all(position, velocity, break_energy)
+		_break_all(hit_pos, velocity, break_energy)
 	else:
-		_break_cells(position, velocity, break_energy, footprint)
+		_break_cells(hit_pos, velocity, break_energy, footprint)
 
 ## Scripted crack (the telegraph before an enemy bursts through): reveals
-## cracks within `radius` of `position`, accumulating.
-func force_crack(position: Vector3, radius := CRACK_RADIUS) -> void:
+## cracks within `radius` of `hit_pos`, accumulating.
+func force_crack(hit_pos: Vector3, radius := CRACK_RADIUS) -> void:
 	if not _built:
 		_build()
 	if is_broken or is_unbreakable():
 		return
 	is_cracked = true
-	_reveal_cracks(to_local2(position), radius)
+	_reveal_cracks(to_local2(hit_pos), radius)
 	_update_crack_mesh()
-	cracked.emit(position, 0.0)
-	GameEvents.wall_cracked.emit(self, position, 0.0)
+	cracked.emit(hit_pos, 0.0)
+	GameEvents.wall_cracked.emit(self, hit_pos, 0.0)
 
 ## True where the panel's cells are gone (holes, or the whole panel broken).
 ## Points outside the panel's face rectangle (or more than 0.5 m off its
@@ -345,20 +345,20 @@ func to_local2(world_pos: Vector3) -> Vector2:
 
 # --- Crack ----------------------------------------------------------------------
 
-func _crack(position: Vector3, energy: float, velocity := Vector3.ZERO) -> void:
+func _crack(hit_pos: Vector3, energy: float, velocity := Vector3.ZERO) -> void:
 	is_cracked = true
-	var lp := to_local2(position)
+	var lp := to_local2(hit_pos)
 	var radius := CRACK_RADIUS * clampf(0.6 + 0.4 * energy / maxf(break_energy, 1.0), 0.6, 1.0)
 	_reveal_cracks(lp, radius)
 	break_energy = maxf(break_energy - 0.5 * energy, 0.0)
 	if style == &"rolldoor":
-		var side := -1.0 if (global_transform.affine_inverse() * (position - velocity * 0.1)).z >= 0.0 else 1.0
+		var side := -1.0 if (global_transform.affine_inverse() * (hit_pos - velocity * 0.1)).z >= 0.0 else 1.0
 		_dents.append([lp, DENT_DEPTH * clampf(energy / maxf(original_break_energy, 1.0), 0.4, 1.2), side])
 		_rebuild()
 	else:
 		_update_crack_mesh()
-	cracked.emit(position, energy)
-	GameEvents.wall_cracked.emit(self, position, energy)
+	cracked.emit(hit_pos, energy)
+	GameEvents.wall_cracked.emit(self, hit_pos, energy)
 
 func _reveal_cracks(lp: Vector2, radius: float) -> void:
 	for i in _fs.edges.size():
@@ -383,8 +383,8 @@ func _update_crack_mesh() -> void:
 
 ## Local hole: remove the cells under the padded footprint, then every cell
 ## that lost its connection to a supported side (left, right, floor).
-func _break_cells(position: Vector3, velocity: Vector3, energy: float, footprint: Rect2) -> void:
-	var lp := to_local2(position)
+func _break_cells(hit_pos: Vector3, velocity: Vector3, energy: float, footprint: Rect2) -> void:
+	var lp := to_local2(hit_pos)
 	var padded := footprint.grow(FOOTPRINT_PAD)
 	var hit := PackedInt32Array()
 	var nearest := -1
@@ -421,16 +421,16 @@ func _break_cells(position: Vector3, velocity: Vector3, energy: float, footprint
 		is_broken = true
 	is_cracked = true
 	_reveal_cracks(lp, CRACK_RADIUS)
-	_spawn_chunks(hit, dropped, position, velocity)
+	_spawn_chunks(hit, dropped, hit_pos, velocity)
 	last_removed = hit.duplicate()
 	last_removed.append_array(dropped)
 	_rebuild()
-	holed.emit(position, last_removed.size(), is_broken)
-	broken.emit(position, energy)
-	GameEvents.wall_broken.emit(self, position, energy, velocity)
+	holed.emit(hit_pos, last_removed.size(), is_broken)
+	broken.emit(hit_pos, energy)
+	GameEvents.wall_broken.emit(self, hit_pos, energy, velocity)
 
 ## Every remaining cell becomes a chunk.
-func _break_all(position: Vector3, velocity: Vector3, energy: float) -> void:
+func _break_all(hit_pos: Vector3, velocity: Vector3, energy: float) -> void:
 	var all := PackedInt32Array()
 	for i in _alive.size():
 		if _alive[i] == 1:
@@ -439,12 +439,12 @@ func _break_all(position: Vector3, velocity: Vector3, energy: float) -> void:
 	_alive_count = 0
 	is_broken = true
 	is_cracked = true
-	_spawn_chunks(all, PackedInt32Array(), position, velocity)
+	_spawn_chunks(all, PackedInt32Array(), hit_pos, velocity)
 	last_removed = all
 	_rebuild()
-	holed.emit(position, all.size(), true)
-	broken.emit(position, energy)
-	GameEvents.wall_broken.emit(self, position, energy, velocity)
+	holed.emit(hit_pos, all.size(), true)
+	broken.emit(hit_pos, energy)
+	GameEvents.wall_broken.emit(self, hit_pos, energy, velocity)
 	if kind == &"crate" or kind == &"desk":
 		_break_props_above()
 
@@ -483,12 +483,12 @@ func _unsupported_cells() -> PackedInt32Array:
 			out.append(i)
 	return out
 
-func _spawn_chunks(blast: PackedInt32Array, drop: PackedInt32Array, position: Vector3, velocity: Vector3) -> void:
+func _spawn_chunks(blast: PackedInt32Array, drop: PackedInt32Array, hit_pos: Vector3, velocity: Vector3) -> void:
 	last_chunks.clear()
 	var xf := global_transform
-	var lp := to_local2(position)
+	var lp := to_local2(hit_pos)
 	var speed := velocity.length()
-	var dir := velocity / speed if speed > 0.01 else -get_face_normal(position)
+	var dir := velocity / speed if speed > 0.01 else -get_face_normal(hit_pos)
 	var exit_speed := speed * sqrt(maxf(1.0 - absorption, 0.0))
 	for i in blast:
 		_spawn_chunk(i, xf, lp, dir, exit_speed, false)
@@ -612,7 +612,7 @@ func _apply_dents(mesh: ArrayMesh) -> ArrayMesh:
 
 ## Concrete impact crack decal (also used by ImpactResolver for WORLD walls and
 ## pillars). `normal` points out of the surface. Capped at CRACK_DECAL_MAX.
-static func spawn_crack_decal(context: Node, position: Vector3, normal: Vector3, energy: float) -> Decal:
+static func spawn_crack_decal(context: Node, hit_pos: Vector3, normal: Vector3, energy: float) -> Decal:
 	if context == null or not context.is_inside_tree():
 		return null
 	var d := Decal.new()
@@ -630,7 +630,7 @@ static func spawn_crack_decal(context: Node, position: Vector3, normal: Vector3,
 	var ref := Vector3.FORWARD if absf(n.dot(Vector3.FORWARD)) < 0.9 else Vector3.RIGHT
 	var x := ref.cross(n).normalized()
 	var z := x.cross(n).normalized()
-	d.global_transform = Transform3D(Basis(x, n, z).rotated(n, randf() * TAU), position)
+	d.global_transform = Transform3D(Basis(x, n, z).rotated(n, randf() * TAU), hit_pos)
 	_decals = _decals.filter(func(o: Variant) -> bool: return is_instance_valid(o))
 	_decals.append(d)
 	while _decals.size() > CRACK_DECAL_MAX:

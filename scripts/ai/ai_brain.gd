@@ -746,7 +746,7 @@ func _new_interval() -> float:
 		return _rng.randf_range(LONE_INTERVAL.x, LONE_INTERVAL.y)
 	return _rng.randf_range(Tuning.ATTACK_INTERVAL.x, Tuning.ATTACK_INTERVAL.y) * CROWD_INTERVAL_MULT
 
-func _pick_move(dist: float, player: Fighter) -> StringName:
+func _pick_move(dist: float, _player: Fighter) -> StringName:
 	var moves: Array = fighter.config.get("moves", [&"e_hook"])
 	var pick: StringName = &"e_hook"
 	var roll := _rng.randf()
@@ -1018,6 +1018,7 @@ func find_throw_aim() -> Vector3:
 	var best_wall_d := INF
 	var open_dir := Vector3.ZERO
 	for k in THROW_FAN * 2 + 1:
+		@warning_ignore("integer_division")
 		var i: int = (k + 1) / 2 * (1 if k % 2 == 1 else -1)  # 0, 1, -1, 2, -2, ...
 		var d := fwd.rotated(Vector3.UP, deg_to_rad(15.0) * i)
 		var q := PhysicsRayQueryParameters3D.create(origin, origin + d * THROW_WALL_RANGE,
@@ -1297,6 +1298,7 @@ func _vanish_spot(player: Fighter) -> Vector3:
 	var fwd := _flat(player.get_forward())
 	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3.FORWARD
 	for k in 12:
+		@warning_ignore("integer_division")
 		var i: int = (k + 1) / 2 * (1 if k % 2 == 1 else -1)  # 0, 1, -1, 2, -2, ...
 		var c := center + fwd.rotated(Vector3.UP, deg_to_rad(30.0) * i) * VSTEP_RADIUS
 		if AttackDirector.nav_ready() and not AttackDirector.nav.is_walkable(c):

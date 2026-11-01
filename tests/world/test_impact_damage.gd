@@ -20,14 +20,14 @@ var _shakes: Array = []
 var _ok := true
 
 func _ready() -> void:
-	ImpactResolver.impact_dealt.connect(func(f: Node3D, e: float, dmg: float, surface: StringName, pos: Vector3) -> void:
-		_impacts.append({"fighter": f, "energy": e, "damage": dmg, "surface": surface, "pos": pos}))
-	GameEvents.body_impact.connect(func(f: Node3D, pos: Vector3, n: Vector3, e: float, surface: StringName) -> void:
-		_events.append({"fighter": f, "pos": pos, "normal": n, "energy": e, "surface": surface}))
-	GameEvents.impact_damaged.connect(func(f: Node3D, dmg: float, e: float, surface: StringName, pos: Vector3) -> void:
-		_damaged.append({"fighter": f, "damage": dmg, "energy": e, "surface": surface, "pos": pos}))
-	GameEvents.wall_chain.connect(func(f: Node3D, count: int) -> void: _chains.append([f, count]))
-	GameEvents.screen_shake.connect(func(t: float) -> void: _shakes.append(t))
+	ImpactResolver.impact_dealt.connect(func(fighter: Node3D, e: float, dmg: float, surface: StringName, pos: Vector3) -> void:
+		_impacts.append({"fighter": fighter, "energy": e, "damage": dmg, "surface": surface, "pos": pos}))
+	GameEvents.body_impact.connect(func(fighter: Node3D, pos: Vector3, n: Vector3, e: float, surface: StringName) -> void:
+		_events.append({"fighter": fighter, "pos": pos, "normal": n, "energy": e, "surface": surface}))
+	GameEvents.impact_damaged.connect(func(fighter: Node3D, dmg: float, e: float, surface: StringName, pos: Vector3) -> void:
+		_damaged.append({"fighter": fighter, "damage": dmg, "energy": e, "surface": surface, "pos": pos}))
+	GameEvents.wall_chain.connect(func(fighter: Node3D, count: int) -> void: _chains.append([fighter, count]))
+	GameEvents.screen_shake.connect(func(trauma: float) -> void: _shakes.append(trauma))
 	WorldTestUtil.make_floor(self)
 	await get_tree().physics_frame
 	_use_fake = not await WorldTestUtil.real_ragdoll_available(self)

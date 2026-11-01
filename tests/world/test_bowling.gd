@@ -9,8 +9,8 @@ var _bowls: Array = []
 var _ok := true
 
 func _ready() -> void:
-	GameEvents.body_bowled.connect(func(flyer: Node3D, victim: Node3D, e: float, chain: int) -> void:
-		_bowls.append({"flyer": flyer, "victim": victim, "energy": e, "chain": chain}))
+	GameEvents.body_bowled.connect(func(flyer_body: Node3D, victim_body: Node3D, e: float, chain: int) -> void:
+		_bowls.append({"flyer": flyer_body, "victim": victim_body, "energy": e, "chain": chain}))
 	WorldTestUtil.make_floor(self)
 	await get_tree().physics_frame
 	_use_fake = not await WorldTestUtil.real_ragdoll_available(self)

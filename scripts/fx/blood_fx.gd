@@ -1081,10 +1081,10 @@ func _paint(part: MeshInstance3D, local: Vector3, local_radius: float) -> void:
 	var id := part.get_instance_id()
 	var st: Array = _wounds.get(id, [])
 	if st.is_empty():
-		var pts: Array[Vector4] = []
-		pts.resize(WOUND_POINTS)
-		pts.fill(Vector4.ZERO)
-		st = [pts, 0, 0]
+		var fresh: Array[Vector4] = []
+		fresh.resize(WOUND_POINTS)
+		fresh.fill(Vector4.ZERO)
+		st = [fresh, 0, 0]
 		_wounds[id] = st
 	var pts: Array[Vector4] = st[0]
 	var next: int = st[1]
@@ -1539,6 +1539,7 @@ func _make_splat(r: RandomNumberGenerator) -> ImageTexture:
 ## streaks along the motion, thinning and breaking into drops toward u = 1.
 func _make_smear(r: RandomNumberGenerator) -> ImageTexture:
 	var W := TEX_SIZE
+	@warning_ignore("integer_division")
 	var H := TEX_SIZE / 2
 	var alpha := PackedFloat32Array()
 	var value := PackedFloat32Array()

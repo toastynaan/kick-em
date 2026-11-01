@@ -151,7 +151,6 @@ func _launch_at(panel: Destructible, speed: float, angle_deg: float) -> Dictiona
 	var v_in := speed * cos(a)
 	var v_tan := speed * sin(a)
 	var t_travel := START_DIST / v_in
-	var com_y := 1.05
 	var start := Vector3(face_x + START_DIST, 0.0, panel.global_position.z - v_tan * t_travel)
 	# Facing away from the wall (kicked backwards into it).
 	var f := WorldTestUtil.spawn_body(self, Transform3D(Basis(Vector3.UP, -PI * 0.5), start + Vector3(0, 0.05, 0)), _use_fake)

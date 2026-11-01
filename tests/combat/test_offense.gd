@@ -12,9 +12,9 @@ func _pair(arch: StringName, dist: float) -> Array:
 	return [p, e]
 
 func _started(f: Fighter) -> Array:
-	var log: Array = []
-	f.combat.attack_started.connect(func(id: StringName) -> void: log.append([id, TimeDirector.now()]))
-	return log
+	var starts: Array = []
+	f.combat.attack_started.connect(func(id: StringName) -> void: starts.append([id, TimeDirector.now()]))
+	return starts
 
 func _landed(move_id: StringName, victim: Fighter = null) -> HitInfo:
 	for i in range(events.size() - 1, -1, -1):

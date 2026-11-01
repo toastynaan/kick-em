@@ -10,6 +10,7 @@ func _ready() -> void:
 	add_child(yard)
 	var t0 := Time.get_ticks_usec()
 	yard.build()
+	@warning_ignore("integer_division")
 	print("[yard] build took %d ms" % ((Time.get_ticks_usec() - t0) / 1000))
 	await get_tree().physics_frame
 	await get_tree().physics_frame
