@@ -86,26 +86,33 @@ func _drive_bot() -> void:
 		return
 	var dist := player.get_ground_position().distance_to(target.get_ground_position())
 	var roll := rng.randf()
-	var action: StringName
+	var actions: Array[StringName] = []
 	if dist > 4.0:
-		action = &"dash" if roll < 0.3 else &""
+		if roll < 0.3:
+			actions = [&"dash"]
+		elif roll < 0.38:
+			actions = [&"jump"]
 	elif roll < 0.35:
-		action = &"light"
+		actions = [&"punch"]
 	elif roll < 0.5:
-		action = &"kick"
-	elif roll < 0.6:
-		action = &"heavy"
-	elif roll < 0.7:
-		action = &"sweep"
-	elif roll < 0.8:
-		action = &"grab"
-	elif roll < 0.92:
-		action = &"block"
+		actions = [&"kick"]
+	elif roll < 0.58:
+		actions = [&"crouch", &"kick"]  # sweep
+	elif roll < 0.64:
+		actions = [&"jump", &"kick"]
+	elif roll < 0.74:
+		actions = [&"grab"]
+	elif roll < 0.86:
+		actions = [&"block"]
+	elif roll < 0.93:
+		actions = [&"focus", &"punch"]
 	else:
-		action = &"dash"
-	if action != &"":
-		Input.action_press(action)
-		held.append(action)
+		actions = [&"dash"]
+	# Held 0.15-0.6 s until the next decision: a mix of taps and charges.
+	for action in actions:
+		if InputMap.has_action(action):
+			Input.action_press(action)
+			held.append(action)
 
 func _steer(player: Fighter, target: Fighter) -> void:
 	for a in [&"move_forward", &"move_back", &"move_left", &"move_right"]:

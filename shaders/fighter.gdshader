@@ -8,6 +8,8 @@ shader_type spatial;
 // the body, so an enemy's blood shows how hurt it is. A soft view-dependent rim
 // keeps fighters readable against the floor. BloodFX writes blood_points,
 // blood_count, blood_color, blood_level and flash; GameMode/Fighter tween dissolve.
+// Upgrade 2 (BloodFX): glow (limb-glow tells, charge), highlight (aimed body
+// zone) and view_fade (screen-door fade of a fighter that blocks the camera).
 
 render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 
@@ -27,6 +29,17 @@ uniform float dissolve : hint_range(0.0, 1.0) = 0.0;
 uniform float rim_strength : hint_range(0.0, 1.0) = 0.3;
 uniform vec3 rim_color : source_color = vec3(0.75, 0.82, 1.0);
 uniform float rim_glow : hint_range(0.0, 1.0) = 0.1;
+// Upgrade 2. Emissive glow on this part (BloodFX.limb_glow).
+uniform vec3 glow_color : source_color = vec3(1.0);
+uniform float glow : hint_range(0.0, 8.0) = 0.0;
+// Aimed-zone highlight: tint plus a bright fresnel edge (BloodFX zone highlight).
+uniform vec3 highlight_color : source_color = vec3(1.0, 0.82, 0.35);
+uniform float highlight : hint_range(0.0, 1.0) = 0.0;
+// 0..1 screen-door fade when the fighter blocks the camera (BloodFX.set_fighter_fade).
+uniform float view_fade : hint_range(0.0, 1.0) = 0.0;
+// How far lost-HP grime spreads over the body (BloodFX sets more on the player,
+// whose back faces the camera, so damage taken shows from behind).
+uniform float blood_spread : hint_range(0.0, 3.0) = 1.0;
 
 varying vec3 model_pos;
 
@@ -52,8 +65,22 @@ void vertex() {
 	model_pos = VERTEX;
 }
 
+// 4x4 ordered dither threshold (0..1) for a screen pixel.
+float bayer4(vec2 frag) {
+	int x = int(mod(frag.x, 4.0));
+	int y = int(mod(frag.y, 4.0));
+	int i = y * 4 + x;
+	float m[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+			3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+	return (m[i] + 0.5) / 16.0;
+}
+
 void fragment() {
 	if (dissolve > 0.0 && hash13(floor(model_pos * 60.0)) < dissolve) {
+		discard;
+	}
+	// Keep about 15% of the pixels at full fade so the silhouette still reads.
+	if (view_fade > 0.0 && bayer4(FRAGCOORD.xy) < view_fade * 0.85) {
 		discard;
 	}
 	// Edge breakup (fine) and damage blotches (coarse).
@@ -76,7 +103,11 @@ void fragment() {
 	}
 	// Lost HP: grimy blotches spread over the whole body.
 	float lvl = clamp(blood_level, 0.0, 1.0);
-	float grime = lvl > 0.01 ? smoothstep(1.0 - lvl * 0.55, 1.08 - lvl * 0.5, n_blot) : 0.0;
+	float glvl = clamp(blood_level * blood_spread, 0.0, 1.0);
+	// Value noise sits near 0.5, so the threshold walks down from 0.78: about
+	// 6% coverage at 10% lost, 25% at 50%, most of the body at 100%.
+	float gt = 0.78 - glvl * 0.35;
+	float grime = glvl > 0.01 ? smoothstep(gt, gt + 0.06, n_blot) : 0.0;
 	b = clamp(max(b, grime * 0.7), 0.0, 1.0);
 
 	// Wet blood: dark, darker where thick, slightly lighter at the soaked edge.
@@ -84,12 +115,17 @@ void fragment() {
 	vec3 c = mix(albedo, wet, b * 0.96);
 	c *= 1.0 - lvl * 0.1;
 
+	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
+	c = mix(c, highlight_color, highlight * 0.5);
+	c = mix(c, glow_color, clamp(glow * 0.15, 0.0, 0.6));
+
 	ALBEDO = mix(c, vec3(1.0), flash);
 	ROUGHNESS = mix(roughness, 0.1, b);
 	SPECULAR = mix(0.5, 0.8, b);
 	RIM = rim_strength;
 	RIM_TINT = 0.4;
 
-	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
-	EMISSION = rim_color * fres * rim_glow + vec3(flash * 0.8);
+	EMISSION = rim_color * fres * rim_glow + vec3(flash * 0.8)
+			+ glow_color * glow * (0.6 + 0.4 * fres)
+			+ highlight_color * highlight * (0.5 + fres * 2.2);
 }

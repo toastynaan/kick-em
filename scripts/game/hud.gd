@@ -23,6 +23,11 @@ const POPUP_MARGIN_TOP := 120.0 ## px: popups stay below the top HUD rows
 const POPUP_MARGIN_BOTTOM := 70.0
 const BANNER_CLEAR := 8.0       ## px gap kept between a popup and a banner
 const CHAIN_MERGE_TIME := 1.0   ## s: THROUGH N WALLS replaces a WALL BREAK banner this recent
+const POP_SIZE := 76            ## px, WALL BREAK / PERFECT / COUNTER pop text
+const POP_Y_FRAC := -0.31       ## pop text centre at 19% of the screen height (was 30%)
+const CHARGE_FLASH := 0.35      ## s the charge meter stays up after the release
+const COMBO_HOLD := 1.6         ## s the combo counter stays after the last hit
+const FOCUS_TINT := 0.1         ## alpha of the cold screen tint during Focus
 
 var player: Fighter
 var mode: StringName = &"duel"
@@ -47,6 +52,17 @@ var _debug_label: Label
 var _hint: Label
 var _charge: _Charge
 var _prompt: Label
+var _reticle: _Reticle
+var _focus_tint: ColorRect
+var _combo_label: Label
+var _combo_sub: Label
+var _combo_count := 0
+var _combo_at := -100.0
+var _charging := false
+var _charge_level := 0
+var _charge_t0 := 0.0
+var _charge_move: StringName = &""
+var _charge_release_at := -100.0
 var _popups: _Popups
 var _popup_items: Array[Dictionary] = []   ## {pos, text, color, size, t0, dur}
 var _suppressed_walls := {}                 ## wall instance id -> true (staged breaches)
@@ -96,6 +112,11 @@ func _ready() -> void:
 	GameEvents.wall_chain.connect(_on_wall_chain)
 	GameEvents.armor_absorbed.connect(_on_armor_absorbed)
 	GameEvents.dodge_feedback.connect(_on_dodge_feedback)
+	GameEvents.charge_started.connect(_on_charge_started)
+	GameEvents.charge_level_changed.connect(_on_charge_level_changed)
+	GameEvents.charge_released.connect(_on_charge_released)
+	GameEvents.combo_progress.connect(_on_combo_progress)
+	GameEvents.combo_ended.connect(_on_combo_ended)
 	_hint_until = TimeDirector.now() + HINT_TIME
 
 # --- Public API ----------------------------------------------------------------
@@ -157,7 +178,7 @@ func set_opponent(f: Fighter) -> void:
 	if f:
 		_opp_hp_delayed = f.hp / maxf(f.max_hp, 1.0)
 		_opp_hp_last = f.hp
-	_debug_panel.position.y = 150.0 if f != null else 24.0
+	_debug_panel.position.y = 150.0
 
 ## Do not announce WALL BREAK for this panel (GameMode's staged breach entries).
 func suppress_wall_break(wall: Node3D) -> void:
@@ -273,7 +294,10 @@ func _build() -> void:
 	chain_box.add_child(_chain_sub)
 
 	# Pop text (upper third) and banner (centre).
-	_pop_label = _centered_label(84, -0.2)
+	# Upper band, off the screen centre: when the player faces a wall the hole
+	# is at the centre and must stay visible (anchored by fraction, so it holds
+	# at 1600x900 and 3456x2168 alike).
+	_pop_label = _centered_label(POP_SIZE, POP_Y_FRAC)
 	_banner_label = _centered_label(120, -0.04)
 	_banner_sub = _centered_label(30, 0.08)
 	_banner_sub.add_theme_font_override(&"font", UIKit.heavy_font())
@@ -286,6 +310,38 @@ func _build() -> void:
 	_root.add_child(_hint)
 
 	# Power punch charge meter, bottom-centre (only while Heavy is held).
+	# Focus: faint cold tint over the world while it runs.
+	_focus_tint = ColorRect.new()
+	_focus_tint.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_focus_tint.color = Color(0.35, 0.62, 1.0, 1.0)
+	_focus_tint.modulate.a = 0.0
+	_focus_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(_focus_tint)
+	_root.move_child(_focus_tint, 0)
+
+	# Centre reticle: zone aiming is from the screen centre.
+	_reticle = _Reticle.new()
+	_reticle.set_anchors_preset(Control.PRESET_CENTER)
+	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(_reticle)
+
+	# Combo counter, left of centre: "4 HITS" over "DMG 80%".
+	var combo_box := VBoxContainer.new()
+	combo_box.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	combo_box.offset_left = 40.0
+	combo_box.offset_right = 360.0
+	combo_box.offset_top = -40.0
+	combo_box.offset_bottom = 90.0
+	combo_box.add_theme_constant_override(&"separation", -14)
+	combo_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(combo_box)
+	_combo_label = UIKit.label("", 64, Color.WHITE, true, 10)
+	_combo_label.modulate.a = 0.0
+	combo_box.add_child(_combo_label)
+	_combo_sub = UIKit.label("", 24, UIKit.ACCENT, true, 6)
+	_combo_sub.modulate.a = 0.0
+	combo_box.add_child(_combo_sub)
+
 	_charge = _Charge.new()
 	_charge.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	_charge.offset_left = -_Charge.W * 0.5
@@ -346,7 +402,7 @@ func _build() -> void:
 	_debug_panel = PanelContainer.new()
 	_debug_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	_debug_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	_debug_panel.position = Vector2(-24, 24)
+	_debug_panel.position = Vector2(-24, 150)  # below the wave counter and the opponent bar
 	_debug_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_debug_panel.visible = false
 	_root.add_child(_debug_panel)
@@ -444,12 +500,23 @@ func _update_player_bars(t: float, dt: float) -> void:
 	_bars.hp = _hp_shown
 	_bars.hp_delayed = _hp_delayed
 	_bars.focus = player.focus
+	var focus_on := TimeDirector.is_focus_active()
+	_bars.focus_active = focus_on
+	_focus_tint.modulate.a = move_toward(_focus_tint.modulate.a, FOCUS_TINT if focus_on else 0.0, dt * 0.6)
+	_reticle.visible = not _round_over and not player.is_down()
+	_reticle.focus = focus_on
+	_reticle.queue_redraw()
+	if _combo_count > 0 and t - _combo_at > COMBO_HOLD:
+		_combo_count = 0
+		var tw := _tween()
+		tw.tween_property(_combo_label, ^"modulate:a", 0.0, 0.3)
+		tw.parallel().tween_property(_combo_sub, ^"modulate:a", 0.0, 0.3)
 	_bars.low = frac < 0.25
 	_bars.pulse = t
 	_bars.queue_redraw()
 	_update_combat_cues(t)
 	_hp_label.text = "%d" % ceili(player.hp)
-	_focus_label.text = "FOCUS " + String.num(player.focus, 2)
+	_focus_label.text = ("FOCUS ON " if focus_on else "FOCUS ") + String.num(player.focus, 2)
 
 ## Charge meter and action prompts from the player's CombatController
 ## (called dynamically: these queries are B's additions to the contract).
@@ -459,16 +526,27 @@ func _update_combat_cues(t: float) -> void:
 		_charge.visible = false
 		_prompt.visible = false
 		return
-	var charging: bool = c.has_method(&"is_charging") and c.call(&"is_charging")
-	_charge.visible = charging
-	if charging and c.has_method(&"get_charge"):
-		_charge.value = c.call(&"get_charge")
+	# Charge: events drive it (charge_started / level / released); polling
+	# get_charge_level() covers a missed event.
+	var polled: int = c.call(&"get_charge_level") if c.has_method(&"get_charge_level") else 0
+	if polled > 0 and not _charging:
+		_charging = true
+		_charge_t0 = t - Tuning.CHARGE_LEVELS[clampi(polled - 1, 0, 2)]
+	if _charging:
+		_charge_level = maxi(_charge_level, polled)
+	var show_charge := _charging or t - _charge_release_at < CHARGE_FLASH
+	_charge.visible = show_charge
+	if show_charge:
+		_charge.level = _charge_level
+		_charge.fill = clampf((t - _charge_t0) / Tuning.CHARGE_LEVELS[2], 0.0, 1.0) if _charging else 1.0
+		_charge.released = not _charging
+		_charge.move_name = String(_charge_move).to_upper()
 		_charge.pulse = t
 		_charge.queue_redraw()
 	var text := ""
 	var color := UIKit.ACCENT
 	if c.has_method(&"can_counter") and c.call(&"can_counter"):
-		text = "COUNTER!   Jab / Kick"
+		text = "COUNTER!   Punch / Kick"
 	elif c.has_method(&"can_pursue") and c.call(&"can_pursue"):
 		text = "PURSUIT   Dash"
 		color = UIKit.FOCUS_COLOR
@@ -638,6 +716,8 @@ func _on_teleport_counter(defender: Node3D, _target: Node3D) -> void:
 func _on_wall_broken(wall: Node3D, _position: Vector3, _energy: float, _velocity: Vector3) -> void:
 	if wall != null and _suppressed_walls.has(wall.get_instance_id()):
 		return  # a staged breach entry, not something the player did
+	if not CameraRig.is_headline_break(wall):
+		return  # a jab widening an existing strike hole: no banner every hit
 	var t := TimeDirector.now()
 	if t - _last_chain_at < 0.3 and _last_chain_count >= 2:
 		# The chain was reported first: one banner says it all.
@@ -730,6 +810,52 @@ func _on_attack_tell(attacker: Node3D, kind: StringName, duration: float) -> voi
 		return
 	_tells.append({"fighter": f, "kind": kind, "until": TimeDirector.now() + duration + ARROW_GRACE})
 
+func _on_charge_started(fighter: Node3D, move_id: StringName) -> void:
+	if not _is_player(fighter):
+		return
+	_charging = true
+	_charge_level = 0
+	_charge_move = move_id
+	_charge_t0 = TimeDirector.now()
+
+func _on_charge_level_changed(fighter: Node3D, level: int) -> void:
+	if not _is_player(fighter):
+		return
+	if not _charging:
+		_charging = true
+		_charge_t0 = TimeDirector.now() - Tuning.CHARGE_LEVELS[clampi(level - 1, 0, 2)]
+	_charge_level = level
+	_charge.level_pulse = 1.0
+
+func _on_charge_released(fighter: Node3D, _move_id: StringName, level: int) -> void:
+	if not _is_player(fighter):
+		return
+	_charge_level = level
+	_charging = false
+	_charge_release_at = TimeDirector.now()
+
+func _on_combo_progress(attacker: Node3D, count: int, damage_scale: float) -> void:
+	if not _is_player(attacker) or count < 2:
+		return
+	_combo_count = count
+	_combo_at = TimeDirector.now()
+	_combo_label.text = "%d HITS" % count
+	_combo_sub.text = "DMG %d%%" % roundi(damage_scale * 100.0)
+	_combo_sub.add_theme_color_override(&"font_color", UIKit.TEXT if damage_scale >= 0.99 else UIKit.ACCENT)
+	_combo_sub.modulate.a = 1.0
+	_pop(_combo_label, 1.3, COMBO_HOLD + 1.0)
+
+func _on_combo_ended(attacker: Node3D, _count: int) -> void:
+	if not _is_player(attacker):
+		return
+	_combo_at = minf(_combo_at, TimeDirector.now() - COMBO_HOLD + 0.4)
+
+func get_combo_text() -> String:
+	return _combo_label.text if _combo_label.modulate.a > 0.05 else ""
+
+func get_charge_state() -> Dictionary:
+	return {"visible": _charge.visible, "level": _charge_level, "charging": _charging}
+
 func _on_wave_started(index: int, total: int) -> void:
 	set_wave(index, total)
 
@@ -775,6 +901,7 @@ class _Bars extends Control:
 	const FOCUS_GAP := 8.0
 	var hp_w := HP_W
 	var pips := false   ## Focus as 3 round pips (opponent) instead of bars
+	var focus_active := false
 	var hp := 1.0
 	var hp_delayed := 1.0
 	var focus := 0.0
@@ -809,31 +936,61 @@ class _Bars extends Control:
 			var fill := clampf(focus - i, 0.0, 1.0)
 			if fill > 0.0:
 				var c := UIKit.FOCUS_COLOR if fill >= 1.0 else UIKit.FOCUS_COLOR.darkened(0.35)
+				if focus_active:
+					c = c.lerp(Color.WHITE, 0.25 + 0.2 * sin(pulse * 10.0))
 				draw_rect(Rect2(r.position, Vector2(FOCUS_W * fill, FOCUS_H)), c)
+			if focus_active:
+				draw_rect(r.grow(2.0), Color(UIKit.FOCUS_COLOR, 0.9), false, 2.0)
+		# Mark where Focus can start (Tuning.FOCUS_MIN_START bars).
+		var mx := Tuning.FOCUS_MIN_START * (FOCUS_W + FOCUS_GAP) if Tuning.FOCUS_MIN_START >= 1.0 \
+			else Tuning.FOCUS_MIN_START * FOCUS_W
+		draw_line(Vector2(mx, y - 4.0), Vector2(mx, y + FOCUS_H + 4.0), Color(1, 1, 1, 0.85), 2.0)
 
 ## Power punch charge: 0..1 with marks where it starts to launch and at full.
 class _Charge extends Control:
 	const W := 320.0
 	const H := 16.0
-	var value := 0.0
+	var level := 0          ## 0..3 reached
+	var fill := 0.0         ## 0..1 of the time to level 3
+	var released := false
+	var move_name := ""
 	var pulse := 0.0
+	var level_pulse := 0.0
 
 	func _draw() -> void:
 		var font := get_theme_default_font()
-		var full := value >= 0.999
-		var launches := value >= Tuning.POWER_STAGGER_BELOW
-		var label := "FULL POWER" if full else ("LAUNCH" if launches else "POWER")
-		draw_string(font, Vector2(0, 14), label, HORIZONTAL_ALIGNMENT_CENTER, W, 18,
-			UIKit.ACCENT if launches else UIKit.TEXT)
+		var label := "CHARGE %d" % level if level > 0 else "CHARGE"
+		if move_name != "":
+			label = move_name + "  " + label
+		level_pulse = maxf(level_pulse - 0.05, 0.0)
+		draw_string(font, Vector2(0, 14), label, HORIZONTAL_ALIGNMENT_CENTER, W, 18 + int(6.0 * level_pulse),
+			UIKit.ACCENT if level >= 2 else UIKit.TEXT)
 		var r := Rect2(Vector2(0, 26), Vector2(W, H))
 		draw_rect(r.grow(3.0), Color(0, 0, 0, 0.75))
 		draw_rect(r, Color(0.12, 0.1, 0.08, 0.9))
-		var col := UIKit.TEXT.lerp(UIKit.ACCENT, clampf(value * 1.4, 0.0, 1.0))
-		if full:
+		var col := UIKit.TEXT.lerp(UIKit.ACCENT, clampf(fill * 1.3, 0.0, 1.0))
+		if level >= 3 or released:
 			col = col.lerp(Color.WHITE, 0.5 + 0.5 * sin(pulse * 24.0))
-		draw_rect(Rect2(r.position, Vector2(W * clampf(value, 0.0, 1.0), H)), col)
-		var mx := W * Tuning.POWER_STAGGER_BELOW
-		draw_line(Vector2(mx, 22), Vector2(mx, 26 + H + 4), Color(1, 1, 1, 0.8), 2.0)
+		draw_rect(Rect2(r.position, Vector2(W * fill, H)), col)
+		# Level marks at Tuning.CHARGE_LEVELS (time held, as a share of level 3).
+		for i in 3:
+			var x := W * Tuning.CHARGE_LEVELS[i] / Tuning.CHARGE_LEVELS[2]
+			var reached := level > i
+			draw_line(Vector2(minf(x, W - 1.0), 22), Vector2(minf(x, W - 1.0), 26 + H + 4),
+				UIKit.ACCENT if reached else Color(1, 1, 1, 0.7), 3.0 if reached else 2.0)
+
+## Small centre reticle: strikes and grabs aim at the zone under it.
+class _Reticle extends Control:
+	var focus := false
+
+	func _draw() -> void:
+		var col := Color(1, 1, 1, 0.55) if not focus else Color(UIKit.FOCUS_COLOR, 0.95)
+		var gap := 6.0 if not focus else 4.0
+		var tick := 7.0
+		draw_circle(Vector2.ZERO, 2.0, col)
+		for d: Vector2 in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
+			draw_line(d * gap, d * (gap + tick), Color(0, 0, 0, col.a * 0.6), 4.0)
+			draw_line(d * gap, d * (gap + tick), col, 2.0)
 
 ## World popups projected to the screen: outlined heavy text, pop-in, drift up, fade.
 class _Popups extends Control:

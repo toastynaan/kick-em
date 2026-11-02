@@ -15,8 +15,8 @@ func run() -> void:
 	check(count_events(&"hit_landed") == 1, "one hit_landed for one jab (got %d)" % count_events(&"hit_landed"))
 	check(not p.combat.is_attacking(), "jab finished")
 
-	print("jab: three-jab chain")
-	await wait_real(0.4)
+	print("jab: P, P, P string (jab, cross, hook)")
+	await wait_real(Tuning.COMBO_DROP + 0.2)
 	clear_events()
 	var started: Array[StringName] = []
 	p.combat.attack_started.connect(func(id: StringName) -> void: started.append(id))
@@ -27,9 +27,10 @@ func run() -> void:
 		await wait_real(0.1)
 	await wait_real(0.6)
 	print("  started: ", started)
-	check(started == ([&"jab1", &"jab2", &"jab3"] as Array[StringName]), "chain jab1 -> jab2 -> jab3")
+	check(started == ([&"jab1", &"cross", &"hook"] as Array[StringName]), "string jab1 -> cross -> hook")
 	check(count_events(&"hit_landed") == 3, "three hits landed (got %d)" % count_events(&"hit_landed"))
-	check(is_equal_approx(hp0 - g.hp, Tuning.DMG_JAB * 3.0), "chain dealt %.1f (want %.1f)" % [hp0 - g.hp, Tuning.DMG_JAB * 3.0])
+	var want := Tuning.DMG_JAB + MoveLibrary.DMG[&"cross"] + MoveLibrary.DMG[&"hook"] * CombatController.combo_scale(3)
+	check(is_equal_approx(hp0 - g.hp, want), "string dealt %.1f (want %.1f, 3rd hit scaled)" % [hp0 - g.hp, want])
 
 	print("jab: whiff")
 	clear_events()

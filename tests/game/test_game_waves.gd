@@ -74,7 +74,7 @@ func _run() -> void:
 	_check(_waves_started == [0], "wave_started(0) emitted")
 	_check(gm.wave_total == Tuning.WAVES.size(), "wave total from Tuning.WAVES")
 	_check(not gm.hud._opp_root.visible, "waves show no enemy HP bar")
-	_check(gm.camera_rig.follow_needs_wall and gm.camera_rig.follow_time < 1.0, "waves: short, wall-only follow-cam (%.1f s)" % gm.camera_rig.follow_time)
+	_check(not gm.camera_rig.is_follow_cam_active() and gm.camera_rig.arm.collision_mask == Layers.WORLD, "waves: no follow-cam, WORLD-only spring arm")
 
 	# Make the queue bigger than the field cap to exercise the cap.
 	for i in 5:
@@ -89,12 +89,14 @@ func _run() -> void:
 
 	gm.player.heal_fraction(1.0)
 	gm.player.apply_damage(gm.player.max_hp * 0.5, &"test")
-	var hp_before := gm.player.hp
+	# HP at the moment the wave clears: enemies may land hits while it is being killed.
+	var hp_at_clear := [gm.player.hp]
+	GameEvents.wave_cleared.connect(func(_i: int) -> void: hp_at_clear[0] = gm.player.hp, CONNECT_ONE_SHOT)
 	var cleared := await _kill_wave(gm, int(30.0 * tps))
 	_check(cleared, "wave 1 emptied by kills")
 	await _step(gm, 3, false)
 	_check(_waves_cleared == [0], "wave_cleared(0) emitted")
-	var healed := gm.player.hp - hp_before
+	var healed: float = gm.player.hp - hp_at_clear[0]
 	_check(absf(healed - gm.player.max_hp * Tuning.HEAL_BETWEEN_WAVES) < 1.0, "healed %.0f%% between waves (+%.0f HP)" % [Tuning.HEAL_BETWEEN_WAVES * 100.0, healed])
 	await _wait_real(gm.breather_time + 0.3)
 	_check(gm.wave_index == 1 and _waves_started == [0, 1], "advanced to wave 2")

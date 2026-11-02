@@ -30,6 +30,9 @@ var path_usec := 0
 var refresh_cells := 0
 var refresh_usec := 0
 
+## Whether the last find_path() reached the goal's cell (false: partial path
+## to the closest reachable cell, or no path).
+var last_path_complete := false
 var _next_row := 0
 var _params := PhysicsShapeQueryParameters3D.new()
 var _space: PhysicsDirectSpaceState3D
@@ -134,10 +137,12 @@ func find_path(from: Vector3, to: Vector3) -> PackedVector3Array:
 	var t0 := Time.get_ticks_usec()
 	var a := free_cell_near(cell_of(from))
 	var b := free_cell_near(cell_of(to))
+	last_path_complete = false
 	if a.x >= 0 and b.x >= 0:
 		var pts := astar.get_point_path(a, b, true)
 		for p in pts:
 			out.append(Vector3(p.x, from.y, p.y))
+		last_path_complete = not pts.is_empty() and pts[-1].distance_to(astar.get_point_position(b)) < CELL * 0.5
 	path_queries += 1
 	path_usec += Time.get_ticks_usec() - t0
 	return out

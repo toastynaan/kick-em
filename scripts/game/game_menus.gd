@@ -8,6 +8,7 @@ extends CanvasLayer
 signal duel_pressed
 signal waves_pressed
 signal lab_pressed
+signal grab_lab_pressed
 signal quit_pressed
 signal pause_requested
 signal resume_pressed
@@ -17,6 +18,7 @@ signal menu_pressed
 enum Screen { NONE, TITLE, PAUSE, ROUND_OVER }
 
 const LAB_SCENE := "res://scenes/ragdoll_lab.tscn"
+const GRAB_LAB_SCENE := "res://scenes/grab_lab.tscn"
 
 ## Set by GameMode: true while a round is running and may be paused.
 var can_pause := false
@@ -158,6 +160,10 @@ func _build_title() -> void:
 	if not ResourceLoader.exists(LAB_SCENE):
 		lab.disabled = true
 		lab.text = "RAGDOLL LAB  (not built yet)"
+	var grab_lab := _menu_button(col, "GRAB LAB", grab_lab_pressed.emit)
+	if not ResourceLoader.exists(GRAB_LAB_SCENE):
+		grab_lab.disabled = true
+		grab_lab.text = "GRAB LAB  (not built yet)"
 	_difficulty_btn = _menu_button(col, "", _cycle_difficulty)
 	_gore_btn = _menu_button(col, "", _cycle_gore)
 	_menu_button(col, "QUIT", quit_pressed.emit)
@@ -176,10 +182,10 @@ func _build_title() -> void:
 	box.add_child(UIKit.label("HOW TO FIGHT", 28, UIKit.ACCENT, true, 4))
 	for line: Array in [
 		["Move", "WASD", "Camera", "Mouse"],
-		["Jab", "LMB", "Power punch", "hold RMB"],
-		["Kick", "E", "Sweep", "Q"],
-		["Grab / throw", "F", "Block", "Space"],
-		["Dash", "Shift", "Pause", "Esc"],
+		["Punch", "LMB", "Kick", "RMB"],
+		["Grab / throw", "F", "Block", "Q"],
+		["Jump", "Space", "Crouch", "C"],
+		["Dash", "Shift", "Focus", "hold E"],
 	]:
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override(&"separation", 8)
@@ -193,7 +199,7 @@ func _build_title() -> void:
 			key_l.custom_minimum_size.x = 110
 			row.add_child(key_l)
 	var tips := UIKit.label(
-		"White glint: Block just before the hit to perfect-dodge,\nthen Jab or Kick to teleport behind them.\nRed glint: a grab. Press Grab to break it.\nKick bodies into walls and into each other.",
+		"Tap to string combos, hold any attack to charge it.\nWhite glow: Block just before the hit to perfect-dodge,\nthen Punch or Kick to teleport behind them.\nRed glow: a grab. Press Grab to break it.\nKick bodies into walls and into each other.",
 		18, UIKit.TEXT, false, 3)
 	box.add_child(tips)
 	box.add_child(UIKit.label("Gamepad works too.  F1: every control", 17, UIKit.TEXT_DIM, false, 3))

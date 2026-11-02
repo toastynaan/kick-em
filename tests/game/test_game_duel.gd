@@ -44,7 +44,7 @@ func _run() -> void:
 	var enemies := gm.get_alive_enemies()
 	_check(enemies.size() == 1 and enemies[0].archetype == &"duelist", "one Duelist spawned")
 	_check(gm.hud.opponent == enemies[0] and gm.hud._opp_root.visible, "duel HUD shows the Duelist's HP bar")
-	_check(not gm.camera_rig.follow_needs_wall and is_equal_approx(gm.camera_rig.follow_time, Tuning.FOLLOW_CAM_TIME), "duel keeps the full follow-cam")
+	_check(not gm.camera_rig.is_follow_cam_active(), "duel: no follow-cam in play")
 	var cam := get_viewport().get_camera_3d()
 	_check(cam != null and cam.get_parent() is CameraRig, "rig camera is current")
 
@@ -63,7 +63,7 @@ func _run() -> void:
 	_check(_round_over == [true], "round_over(true) emitted")
 	_check(TimeDirector.get_active_priority() == TimeDirector.PRIO_KO, "final KO slow motion requested")
 	_check(Engine.time_scale < 0.5, "time is slowed (%.2f)" % Engine.time_scale)
-	_check(gm.camera_rig.get_debug_text().begins_with("cam orbit"), "camera orbits the KO")
+	_check(gm.camera_rig.get_mode() in [CameraRig.Mode.CLOSEUP, CameraRig.Mode.KO], "last KO: finisher close-up / KO cam (%s)" % gm.camera_rig.get_mode_name())
 	await _wait_real(Tuning.KO_SLOWMO.y + GameMode.KO_PANEL_DELAY + 0.3)
 	_check(gm.phase == GameMode.Phase.OVER, "round-over phase reached")
 	_check(gm.menus.screen == GameMenus.Screen.ROUND_OVER, "VICTORY panel shown")

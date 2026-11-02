@@ -36,6 +36,30 @@ extends Resource
 @export var reach_radius := 0.38
 @export var height := 1.35          ## m above the feet of the fallback query (x appearance height)
 @export var target_bone: StringName = &"Chest"  ## preferred bone for the launch impulse
+## Upgrade 2: attack height (HitInfo.Level). Not to be confused with `height` above.
+@export var hit_level: int = HitInfo.Level.MID
+
+# Upgrade 2: behaviour flags
+## Player move that charges while its button is held (Tuning.CHARGE_LEVELS).
+@export var chargeable := false
+## Hold pose while charging (falls back to power_charge / kick_chamber).
+@export var charge_hold: StringName = &""
+## Launchers: lift the victim this high (m) instead of a flat launch.
+@export var launch_lift := 0.0
+## Charge level 1 turns its flinch into a stagger (jab, cross).
+@export var stagger_l1 := false
+## Kick-button move (a kick knocks a stumbling enemy down).
+@export var is_kick := false
+## Roundhouse: launches to the attacker's left, spinning.
+@export var sideways := false
+## Backfist: turns to the opponent behind before striking.
+@export var hits_behind := false
+## Hammer fist, mount punch, stomp: built to hit downed and tumbling bodies.
+@export var ground_hit := false
+## Ends its string: on hit it cancels only into its explicit ComboGraph links.
+@export var ender := false
+## Performed on a fighter we hold (knee, headbutt): no hit detection.
+@export var on_held := false
 
 # Feel
 @export var hitstop_key: StringName = &"jab"
@@ -55,7 +79,7 @@ extends Resource
 @export var chain_next: StringName = &""   ## jab chain
 ## Moves this one may cancel into after it HITS, within cancel_window frames of recovery.
 @export var cancel_into: Array[StringName] = []
-@export var cancel_window := 6.0
+@export var cancel_window := 10.0  ## frames of recovery in which a HIT may cancel
 @export var enemy := false
 @export var tell_kind: StringName = &"strike"   ## enemy tell glint: &"strike" | &"grab"
 

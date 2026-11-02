@@ -5,8 +5,8 @@ extends Node
 ## 1. Tuning.TOKENS[difficulty] tokens; an enemy needs one to start an attack.
 ##    It comes back when the attack ends, or the holder is hit, launched,
 ##    grabbed, dies, or sits on it too long.
-## 2. Rings: token holders and the next in line (one per free token, at least
-##    one; on-screen enemies first, then who waited longest) are NEAR, the
+## 2. Rings: token holders and the next in line (one per free token plus one
+##    standby; on-screen enemies first, then who waited longest) are NEAR, the
 ##    rest FAR. Crowd pacing spaces grants by Tuning.ATTACK_INTERVAL x CROWD_PACE.
 ## 3. No grants while the player is in hitstun, down (launched / grounded /
 ##    getting up), held by a grab, or while the camera is busy (follow-cam).
@@ -16,9 +16,10 @@ extends Node
 ## 6. Two holders' first active frames are at least Tuning.SWING_SPACING s
 ##    apart: grants are staggered, and request_swing() picks a tell length
 ##    (inside [TELL_MIN, TELL_MAX]) that keeps the active frames spaced.
-## All timing here uses now() = TimeDirector.now(): physics ticks / tick rate
-## (round 2). In play it equals real time, slow motion does not stretch it,
-## and it stays in step with the simulation under --fixed-fps.
+## Clocks: world_now() (scaled game time, the enemies' time) for token
+## timeouts, grant gaps, pacing and swing spacing; now() = TimeDirector.now()
+## (real time, physics ticks) for the on-screen rule. B reports time to the
+## active frame in real seconds; it is converted to world time here.
 
 enum Ring { NONE, NEAR, FAR }
 
@@ -38,7 +39,9 @@ const TELL_SEARCH_STEP := 0.025
 ## Crowd pacing: after a grant, the next one waits Tuning.ATTACK_INTERVAL x this
 ## (s), so a crowd attacks about every 1-1.5 s on Normal, 2-3 s on Easy.
 ## A lone enemy (duel) and urgent requests (counter, whiff punish) skip it.
-const CROWD_PACE := [1.0, 0.5]  ## [easy, normal]
+const CROWD_PACE := [1.0, 0.45]  ## [easy, normal]
+## s: an enemy that asked within this long counts as waiting in line.
+const LINE_ASK_WINDOW := 0.6
 ## m: enemies further than this from the player go behind closer ones in line.
 const LINE_FAR := 8.0
 ## Navigation (AINavGrid): path queries allowed per physics tick across all
@@ -63,11 +66,13 @@ var _line: Array[Fighter] = []
 var _last_grant := -INF
 var _next_paced_grant := -INF
 var _last_denial: Dictionary = {}  ## Fighter -> String (debugging)
+var _last_request: Dictionary = {} ## Fighter -> world time of its last token request
 ## Shared navigation grid (built at round start, a few rows per tick).
 var nav: AINavGrid = null
 var _nav_budget := 0
 var _nav_refresh: Array = []       ## [due time, centre, radius]
 var _rng := RandomNumberGenerator.new()
+var _world_time := 0.0
 
 func _ready() -> void:
 	GameEvents.hit_landed.connect(_on_hit_landed)
@@ -76,6 +81,9 @@ func _ready() -> void:
 	GameEvents.fighter_died.connect(_on_fighter_died)
 	GameEvents.attack_tell.connect(_on_attack_tell)
 	GameEvents.wall_broken.connect(_on_wall_broken)
+	GameEvents.dazed.connect(func(f: Node3D, _d: float) -> void: _drop(f))
+	GameEvents.stumbled.connect(func(f: Node3D, _d: float) -> void: _drop(f))
+	GameEvents.tripped.connect(func(f: Node3D) -> void: _drop(f))
 
 func _exit_tree() -> void:
 	TellGlint.clear_cache()
@@ -88,7 +96,7 @@ func register_enemy(enemy: Fighter) -> void:
 		return
 	_enemies.append(enemy)
 	_onscreen_since[enemy] = -1.0
-	_last_turn[enemy] = _now()
+	_last_turn[enemy] = world_now()
 	if enemy.combat:
 		var c := enemy.combat
 		if not c.attack_ended.is_connected(_on_enemy_attack_ended):
@@ -106,6 +114,7 @@ func unregister_enemy(enemy: Fighter) -> void:
 	_onscreen_since.erase(enemy)
 	_last_turn.erase(enemy)
 	_last_denial.erase(enemy)
+	_last_request.erase(enemy)
 	_line.erase(enemy)
 	if is_instance_valid(enemy):
 		if enemy.combat and enemy.combat.attack_ended.is_connected(_on_enemy_attack_ended):
@@ -116,9 +125,10 @@ func unregister_enemy(enemy: Fighter) -> void:
 			enemy.tree_exiting.disconnect(unregister_enemy)
 
 ## True if `enemy` may start an attack now; it then holds a token until release_token().
-## `urgent` (Duelist counter / whiff punish) skips the crowd pacing, never
-## the other rules.
-func request_token(enemy: Fighter, urgent := false) -> bool:
+## `urgent` (Duelist counter / whiff punish) skips the crowd pacing and the
+## turn order; `cut_line` (a Brawler punishing a blocker) skips only the turn
+## order. Neither skips rules 1-6.
+func request_token(enemy: Fighter, urgent := false, cut_line := false) -> bool:
 	if enemy == null or not is_instance_valid(enemy):
 		return false
 	if _holders.has(enemy):
@@ -130,8 +140,9 @@ func request_token(enemy: Fighter, urgent := false) -> bool:
 		return false
 	if not enemy in _enemies:
 		register_enemy(enemy)
-	var t_now := _now()
-	var reason := _denial(enemy, urgent, t_now)
+	var t_now := world_now()
+	_last_request[enemy] = t_now
+	var reason := _denial(enemy, urgent, t_now, cut_line)
 	_last_denial[enemy] = reason
 	if reason != "":
 		return false
@@ -144,7 +155,7 @@ func request_token(enemy: Fighter, urgent := false) -> bool:
 	return true
 
 ## Why request_token() would refuse `enemy` now ("" = it would grant).
-func _denial(enemy: Fighter, urgent: bool, t_now: float) -> String:
+func _denial(enemy: Fighter, urgent: bool, t_now: float, cut_line := false) -> String:
 	if not _enemy_can_attack(enemy):
 		return "enemy busy"
 	var p := get_player()
@@ -164,9 +175,28 @@ func _denial(enemy: Fighter, urgent: bool, t_now: float) -> String:
 		return "grant gap"
 	if not urgent and live_enemy_count() > 1 and t_now < _next_paced_grant:
 		return "pacing %.1fs" % (_next_paced_grant - t_now)
-	if not _onscreen_long_enough(enemy, t_now):
+	if not urgent and not cut_line:
+		var first := _waiting_ahead_of(enemy, t_now)
+		if first != null:
+			return "line: %s first" % first.name
+	if not _onscreen_long_enough(enemy, _now()):
 		return "off screen" if _onscreen_since.get(enemy, -1.0) < 0.0 else "on screen < %.1fs" % Tuning.ONSCREEN_BEFORE_TOKEN
 	return ""
+
+## Turn order among enemies that are actually asking: another enemy that
+## waited longer (older last turn) and asked within LINE_ASK_WINDOW goes
+## first, so a slow enemy (Shield, Brute) is not starved by quick ones.
+func _waiting_ahead_of(enemy: Fighter, t_now: float) -> Fighter:
+	var mine: float = _last_turn.get(enemy, 0.0)
+	for e in _enemies:
+		if e == enemy or not is_instance_valid(e) or _holders.has(e):
+			continue
+		if t_now - float(_last_request.get(e, -INF)) > LINE_ASK_WINDOW:
+			continue
+		if float(_last_turn.get(e, 0.0)) < mine - 0.05 and _enemy_can_attack(e) \
+				and _onscreen_long_enough(e, _now()):
+			return e
+	return null
 
 ## Last reason request_token() refused `enemy` ("" if its last request was granted).
 func get_last_denial(enemy: Fighter) -> String:
@@ -181,7 +211,7 @@ func release_token(enemy: Fighter, keep_place := false) -> void:
 	var entry: Dictionary = _holders[enemy]
 	_holders.erase(enemy)
 	if _last_turn.has(enemy) and (not keep_place or entry["attacking"]):
-		_last_turn[enemy] = _now()
+		_last_turn[enemy] = world_now()
 	token_released.emit(enemy)
 
 func has_token(enemy: Fighter) -> bool:
@@ -306,7 +336,7 @@ func onscreen_time(enemy: Fighter) -> float:
 func request_swing(enemy: Fighter, preferred_tell: float, extra_startup := 0.0) -> float:
 	if not _holders.has(enemy) or not is_player_open():
 		return -1.0
-	var t_now := _now()
+	var t_now := world_now()
 	var pref := clampf(preferred_tell, Tuning.TELL_MIN, Tuning.TELL_MAX)
 	var candidates: Array[float] = [pref]
 	var step := TELL_SEARCH_STEP
@@ -331,11 +361,11 @@ func notify_attack_started(enemy: Fighter, time_to_active: float) -> void:
 	if not _holders.has(enemy):
 		return
 	var entry: Dictionary = _holders[enemy]
-	var t_now := _now()
+	var t_now := world_now()
 	entry["attacking"] = true
 	entry["started"] = t_now
 	if is_finite(time_to_active):
-		entry["active_at"] = t_now + time_to_active
+		entry["active_at"] = t_now + time_to_active * Engine.time_scale
 
 ## The brain could not start the attack it reserved a slot for.
 func cancel_swing(enemy: Fighter) -> void:
@@ -351,9 +381,17 @@ func get_scheduled_active(enemy: Fighter) -> float:
 func _now() -> float:
 	return now()
 
-## The director's clock (see the header). AIBrain uses it too.
+## Real (unscaled) clock: what the player perceives (on-screen rule).
 func now() -> float:
 	return TimeDirector.now()
+
+## World clock: scaled game time, the time enemies live in. Token timeouts,
+## grant gaps, pacing and swing spacing use it, so a long Focus (world at
+## 0.3x) neither times out a slowed enemy nor squeezes two swings together
+## when the world speeds up again (a world-time gap is never shorter in real
+## time while time_scale <= 1).
+func world_now() -> float:
+	return _world_time
 
 func _camera() -> Camera3D:
 	var vp := get_viewport()
@@ -362,9 +400,19 @@ func _camera() -> Camera3D:
 func _enemy_can_attack(enemy: Fighter) -> bool:
 	if enemy.is_dead() or enemy.is_down() or enemy.is_in_hitstun():
 		return false
-	if enemy.combat and enemy.combat.held_by != null:
+	return not is_enemy_impaired(enemy)
+
+## Upgrade 2 states that keep an enemy out of the rotation: held by a grab,
+## dazed, stumbling (tripped enemies are down).
+func is_enemy_impaired(enemy: Fighter) -> bool:
+	var c := enemy.combat
+	if c == null:
 		return false
-	return true
+	if c.held_by != null:
+		return true
+	if c.has_method(&"is_dazed") and c.is_dazed():
+		return true
+	return c.has_method(&"is_stumbling") and c.is_stumbling()
 
 func _onscreen_long_enough(enemy: Fighter, t_now: float) -> bool:
 	if _camera() == null:
@@ -395,9 +443,10 @@ func _process(_delta: float) -> void:
 		else:
 			_onscreen_since[e] = -1.0
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
+	_world_time += delta
 	_nav_tick()
-	var t_now := _now()
+	var t_now := world_now()
 	var player_gone := is_player_down_or_held()
 	for e in _holders.keys():
 		if not is_instance_valid(e):
@@ -423,13 +472,17 @@ func _physics_process(_delta: float) -> void:
 			_last_turn.erase(e)
 	_update_line()
 
-## Pick the next in line: one enemy per free token (at least one), the
+## Pick the next in line: one enemy per free token plus one standby (just one
+## when every token is out), the
 ## eligible ones that waited longest (ties: nearest), preferring enemies inside
 ## the camera view. Members keep their place while eligible, unless off screen
 ## while someone else is on screen.
 func _update_line() -> void:
 	var cam := _camera()
-	var size := maxi(1, get_token_count() - _holders.size())
+	# One per free token plus one on standby, so a ready enemy is waiting
+	# when the pacing opens (with every token out: just the next one).
+	var free_tokens := get_token_count() - _holders.size()
+	var size := free_tokens + 1 if free_tokens > 0 else 1
 	var p := get_player()
 	var keep: Array[Fighter] = []
 	for e in _line:
@@ -539,16 +592,21 @@ func _on_enemy_attack_started(_move_id: StringName, enemy: Fighter) -> void:
 		var entry: Dictionary = _holders[enemy]
 		entry["attacking"] = true
 		if not is_finite(float(entry["started"])):
-			entry["started"] = _now()
+			entry["started"] = world_now()
 
 func _on_enemy_attack_incoming(_move_id: StringName, time_to_active: float, enemy: Fighter) -> void:
 	if _holders.has(enemy) and is_finite(time_to_active):
-		_holders[enemy]["active_at"] = _now() + time_to_active
+		_holders[enemy]["active_at"] = world_now() + time_to_active * Engine.time_scale
 
 func _on_enemy_attack_ended(_move_id: StringName, enemy: Fighter) -> void:
 	if _last_turn.has(enemy):
-		_last_turn[enemy] = _now()
+		_last_turn[enemy] = world_now()
 	release_token(enemy)
+
+## Dazed, stumbling or tripped: give the token back at once.
+func _drop(f: Node3D) -> void:
+	if f is Fighter:
+		release_token(f as Fighter)
 
 func _on_hit_landed(info: HitInfo) -> void:
 	if info and info.victim is Fighter:
@@ -570,5 +628,5 @@ func _on_attack_tell(attacker: Node3D, kind: StringName, duration: float) -> voi
 	if attacker is Fighter and _holders.has(attacker):
 		var entry: Dictionary = _holders[attacker]
 		if not is_finite(float(entry["active_at"])):
-			entry["active_at"] = _now() + duration
+			entry["active_at"] = world_now() + duration
 	TellGlint.spawn(attacker, kind, duration)

@@ -46,7 +46,7 @@ func run() -> void:
 	await _expect(&"brawler", true, false, K, BLK, "guard blocks a front kick")
 	await _expect(&"brawler", true, false, S, HIT, "sweep gets through the guard")
 	await _expect(&"brawler", true, false, H, HIT, "full-charge power punch gets through", 1.05)
-	await _expect(&"brawler", true, false, H, HIT, "tap power punch gets through (Brawler guard stops jabs and kicks only)")
+	await _expect(&"brawler", true, false, CombatController.Action.SWEEP, HIT, "a low sweep gets under the guard")
 	await _expect(&"brawler", true, true, L, HIT, "jab to the back gets through")
 	await _expect(&"brawler", false, false, L, BLK, "innate block still stops front jabs")
 	await _expect(&"brawler", false, true, L, HIT, "innate block does not cover the back")
@@ -59,7 +59,7 @@ func run() -> void:
 	await _expect(&"shield", false, false, H, HIT, "full-charge power punch gets through", 1.05)
 	await _expect(&"shield", false, true, L, HIT, "jab to the back gets through")
 
-	print("player guard covers every side")
+	print("player guard covers the front only")
 	_x += 7.0
 	var pb := spawn(&"player", Vector3(_x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var eb := spawn(&"grunt", Vector3(_x, 0, 1.2), Vector3.FORWARD)  # behind the player
@@ -69,7 +69,7 @@ func run() -> void:
 	clear_events()
 	eb.combat.start_enemy_attack(&"e_hook", 0.4)
 	await wait_until(func() -> bool: return pb.combat.last_result != -1, 2.0)
-	check(pb.combat.last_result == BLK, "e_hook from behind is blocked by the player's guard")
+	check(pb.combat.last_result == HitInfo.Result.HIT, "the player's guard is a front cone: e_hook from behind lands")
 	pb.combat.release(CombatController.Action.BLOCK)
 
 	print("tell armor")

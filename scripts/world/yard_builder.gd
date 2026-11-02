@@ -36,14 +36,26 @@ const JAMB := 0.3
 const OFFSETS: Array[float] = [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0]
 const PILLARS: Array[Vector2] = [Vector2(-6, -6), Vector2(6, -6), Vector2(-6, 6), Vector2(6, 6)]
 const SPAWN_Y := 0.05
-## Staged breach: thumps before the burst, and the hole (width, height) from the floor.
+## Staged breach: thumps before the burst, and the hole width from the floor.
+## The hole height is the tallest non-Brute capsule + BREACH_HEADROOM
+## (breach_hole_size); the Brute bursts the whole roll door.
 const BREACH_THUMPS := 3
-const BREACH_HOLE := Vector2(1.2, 2.05)
+const BREACH_HOLE_WIDTH := 1.2
+const BREACH_HEADROOM := 0.3
+## Where GameMode puts a breaching enemy: this far behind the panel on the
+## interior side (matches GameMode.BREACH_BEHIND), and the clear radius a spawn
+## spot and its walk to the panel need.
+const BREACH_BEHIND := 1.4
+const BREACH_CLEARANCE := 0.5
 ## Lamp posts on the south strip (x positions), topple at LAMP_BREAK J.
 const LAMPS: Array[float] = [-7.5, 0.0, 7.5]
 const LAMP_BREAK := 3000.0
 const DESK_BREAK := 900.0
 const CRATE_BREAK := 600.0
+## Strike power that breaks a loose prop (round 3): chair 1 kick, drum 3, cabinet 4.
+const CHAIR_STRIKE_HP := 60.0
+const DRUM_STRIKE_HP := 180.0
+const CABINET_STRIKE_HP := 240.0
 
 var _structure: StaticBody3D
 var _walls: Node3D
@@ -64,7 +76,7 @@ func build() -> void:
 	_roll_door = null
 	_build_environment()
 	_build_floor()
-	_structure = StaticBody3D.new()
+	_structure = ConcreteWall.new()
 	_structure.name = "Structure"
 	_structure.collision_layer = Layers.WORLD
 	_structure.collision_mask = 0
@@ -119,26 +131,78 @@ func get_roll_door() -> Destructible:
 
 ## Intact courtyard-facing panels an enemy can burst through (spec: enemies
 ## arrive through walls). Use breach() to stage it.
+## Only panels whose breach spawn spot (BREACH_BEHIND behind, interior side)
+## and walk to the panel are clear of props and structure (BREACH_CLEARANCE).
 func get_breach_walls() -> Array[Destructible]:
 	var out: Array[Destructible] = []
 	for d in get_destructibles():
-		if not d.is_broken and d.has_meta(&"facade"):
+		if not d.is_broken and d.has_meta(&"facade") and is_breach_spot_clear(d):
 			out.append(d)
 	return out
 
+## Where a breaching enemy waits behind `wall` (floor level).
+func breach_spot(wall: Destructible) -> Vector3:
+	var into := wall.global_basis.z
+	into.y = 0.0
+	var p := wall.global_position - into.normalized() * BREACH_BEHIND
+	p.y = 0.0
+	return p
+
+## True when the spawn spot behind `wall` and the lane from it to the wall are
+## free of props, rubble and structure.
+func is_breach_spot_clear(wall: Destructible) -> bool:
+	if not is_inside_tree():
+		return true
+	var space := get_world_3d().direct_space_state
+	var into := wall.global_basis.z
+	into.y = 0.0
+	into = into.normalized()
+	var spot := breach_spot(wall)
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.collision_mask = Layers.WORLD | Layers.DESTRUCTIBLE | Layers.DEBRIS
+	q.exclude = [wall.get_rid()]
+	var cyl := CylinderShape3D.new()
+	cyl.radius = BREACH_CLEARANCE
+	cyl.height = 1.8
+	q.shape = cyl
+	q.transform = Transform3D(Basis(), spot + Vector3.UP * 1.05)
+	if not space.intersect_shape(q, 1).is_empty():
+		return false
+	# The walk from the spot to the panel's back face.
+	var lane_len := BREACH_BEHIND - wall.size.z * 0.5 - 0.1
+	var box := BoxShape3D.new()
+	box.size = Vector3(BREACH_CLEARANCE * 1.8, 1.8, lane_len)
+	q.shape = box
+	q.transform = Transform3D(Basis.looking_at(into, Vector3.UP), spot + into * lane_len * 0.5 + Vector3.UP * 1.05)
+	return space.intersect_shape(q, 1).is_empty()
+
+## Breach hole (width, height from the floor): fits the tallest non-Brute
+## archetype's capsule (Fighter.CAPSULE_HEIGHT x appearance height) plus
+## BREACH_HEADROOM.
+static func breach_hole_size() -> Vector2:
+	var tallest := 0.0
+	for id: StringName in Tuning.ARCHETYPES:
+		if id == &"brute":
+			continue
+		var app: Dictionary = (Tuning.ARCHETYPES[id] as Dictionary).get("appearance", {})
+		tallest = maxf(tallest, Fighter.CAPSULE_HEIGHT * float(app.get("height", 1.0)))
+	return Vector2(BREACH_HOLE_WIDTH, tallest + BREACH_HEADROOM)
+
 ## Staged entry (spec: enemies arrive through walls). Three thumps from the
-## room side with growing local cracks over `delay` s (each emits
-## GameEvents.wall_cracked, so BloodFX / AudioFX add dust and sound), then a
-## body-shaped hole from the floor up bursts into the courtyard. The panel gets
-## meta &"staged_breach" = true before its wall_broken. Props / roll door
-## break whole only if they are not wall panels.
+## room side with growing local cracks inside `delay` s (each emits
+## GameEvents.wall_cracked, so BloodFX / AudioFX add dust and sound), then the
+## burst into the courtyard: a hole from the floor up sized by
+## breach_hole_size(), or for the roll door (the Brute's entry) the whole door
+## (force_break, a full break with its debris and events). The panel gets meta
+## &"staged_breach" = true before its wall_broken.
 func breach(wall: Destructible, delay := 1.0, speed := 7.0) -> void:
 	if wall == null or wall.is_broken:
 		return
 	wall.set_meta(&"staged_breach", true)
 	var into := wall.global_basis.z.normalized()      # exterior side = courtyard
 	var h := wall.size * 0.5
-	var hit := wall.global_transform * Vector3(0.0, -h.y + BREACH_HOLE.y * 0.55, -h.z)
+	var hole := breach_hole_size()
+	var hit := wall.global_transform * Vector3(0.0, -h.y + minf(hole.y, wall.size.y) * 0.5, -h.z)
 	var step := delay / (BREACH_THUMPS + 0.5)
 	for k in BREACH_THUMPS:
 		if not is_instance_valid(wall) or wall.is_broken:
@@ -149,7 +213,10 @@ func breach(wall: Destructible, delay := 1.0, speed := 7.0) -> void:
 	await get_tree().create_timer(maxf(delay - step * BREACH_THUMPS, 0.05), false, true).timeout
 	if not is_instance_valid(wall) or wall.is_broken:
 		return
-	var fp := Rect2(-BREACH_HOLE.x * 0.5, -h.y, BREACH_HOLE.x, BREACH_HOLE.y)
+	if wall.has_meta(&"roll_door"):
+		wall.force_break(hit, into * speed)
+		return
+	var fp := Rect2(-hole.x * 0.5, -h.y, hole.x, hole.y)
 	wall.break_hole(hit, into * speed, fp)
 
 # --- Environment ----------------------------------------------------------------
@@ -338,18 +405,21 @@ func _build_props() -> void:
 	props.name = "Props"
 	add_child(props)
 	# West offices: desks with chairs (front rooms), filing cabinets (back rooms).
-	for z in [-5.5, -2.1, 2.1, 5.5]:
+	# Desks stay out of the breach lanes (z = 0, +-3, +-6 behind each facade
+	# panel) and the doorway paths (z = +-9).
+	for z in [-7.6, -1.5, 1.5, 7.6]:
 		_prop(&"desk", Vector3(-12.8, 0, z), Vector3(1.4, 0.76, 0.7), DESK_BREAK, PI * 0.5)
-		_chair(props, Vector3(-13.5 if absf(z) < 3.0 else -12.1, 0, z + (0.75 if z < 0.0 else -0.75)))
+		_chair(props, Vector3(-13.75, 0, z))
 	for z in [-7.0, -6.3, -2.6, 2.6, -3.3]:
 		_cabinet(props, Vector3(-17.15, 0, z))
 	_prop(&"desk", Vector3(-16.0, 0, -3.6), Vector3(1.4, 0.76, 0.7), DESK_BREAK, 0.0)
 	# East storage: crate stacks and drums.
-	for c: Vector3 in [Vector3(12.0, 0, -5.4), Vector3(13.2, 0, -5.4), Vector3(12.0, 0, -3.0),
-			Vector3(12.0, 0, 3.0), Vector3(12.0, 0, 5.4), Vector3(17.0, 0, -5.4), Vector3(17.0, 0, -6.6),
+	# Front-room crates sit between the breach lanes (z = 0, +-3, +-6).
+	for c: Vector3 in [Vector3(12.4, 0, -7.6), Vector3(13.6, 0, -7.6), Vector3(12.6, 0, -1.5),
+			Vector3(12.6, 0, 1.5), Vector3(12.4, 0, 7.6), Vector3(17.0, 0, -5.4), Vector3(17.0, 0, -6.6),
 			Vector3(17.0, 0, 2.6), Vector3(17.0, 0, -2.6)]:
 		_prop(&"crate", c + Vector3(0, 0.5, 0), Vector3(1.0, 1.0, 1.0), CRATE_BREAK, 0.0)
-	_prop(&"crate", Vector3(12.0, 1.5, -5.4), Vector3(1.0, 1.0, 1.0), CRATE_BREAK, 0.3)
+	_prop(&"crate", Vector3(12.4, 1.5, -7.6), Vector3(1.0, 1.0, 1.0), CRATE_BREAK, 0.3)
 	_prop(&"crate", Vector3(17.0, 1.5, 2.6), Vector3(1.0, 1.0, 1.0), CRATE_BREAK, -0.2)
 	for d: Vector3 in [Vector3(13.6, 0, -6.7), Vector3(13.4, 0, 6.6), Vector3(15.3, 0, -5.3), Vector3(15.3, 0, 2.2)]:
 		_drum(props, d)
@@ -379,14 +449,11 @@ func _prop(kind: StringName, at: Vector3, prop_size: Vector3, break_energy: floa
 	_walls.add_child(d)
 	return d
 
-func _loose(parent: Node3D, at: Vector3, mass: float, surface: StringName) -> RigidBody3D:
-	var b := RigidBody3D.new()
+func _loose(parent: Node3D, at: Vector3, mass: float, surface: StringName, strike_hp := 120.0) -> RigidBody3D:
+	var b := LooseProp.new()
 	b.mass = mass
-	b.collision_layer = Layers.DEBRIS
-	b.collision_mask = Layers.MASK_DEBRIS
-	b.set_meta(&"surface", surface)
-	b.add_to_group(&"props")
-	b.can_sleep = true
+	b.surface = surface
+	b.strike_hp = strike_hp
 	parent.add_child(b)
 	b.position = at
 	return b
@@ -408,7 +475,7 @@ func _add_box(b: Node3D, size: Vector3, at: Vector3, mat: Material, collide := t
 		b.add_child(cs)
 
 func _chair(parent: Node3D, at: Vector3) -> void:
-	var b := _loose(parent, at + Vector3(0, 0.02, 0), 8.0, &"wood")
+	var b := _loose(parent, at + Vector3(0, 0.02, 0), 8.0, &"wood", CHAIR_STRIKE_HP)
 	var mat := WorldMaterials.frame()
 	_add_box(b, Vector3(0.45, 0.06, 0.45), Vector3(0, 0.46, 0), WorldMaterials.office_chair())
 	_add_box(b, Vector3(0.45, 0.5, 0.06), Vector3(0, 0.74, 0.2), WorldMaterials.office_chair())
@@ -417,14 +484,14 @@ func _chair(parent: Node3D, at: Vector3) -> void:
 	b.rotation.y = randf_range(-0.6, 0.6)
 
 func _cabinet(parent: Node3D, at: Vector3) -> void:
-	var b := _loose(parent, at, 55.0, &"concrete")
+	var b := _loose(parent, at, 55.0, &"concrete", CABINET_STRIKE_HP)
 	_add_box(b, Vector3(0.5, 1.3, 0.6), Vector3(0, 0.65, 0), WorldMaterials.cabinet())
 	for k in 4:
 		_add_box(b, Vector3(0.02, 0.012, 0.5), Vector3(0.26, 0.3 + 0.3 * k, 0), WorldMaterials.frame(), false)
 		_add_box(b, Vector3(0.03, 0.03, 0.14), Vector3(0.265, 0.22 + 0.3 * k, 0), WorldMaterials.frame(), false)
 
 func _drum(parent: Node3D, at: Vector3) -> void:
-	var b := _loose(parent, at, 30.0, &"concrete")
+	var b := _loose(parent, at, 30.0, &"concrete", DRUM_STRIKE_HP)
 	var mi := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
 	cm.top_radius = 0.29

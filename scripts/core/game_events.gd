@@ -48,6 +48,39 @@ signal wall_chain(fighter: Node3D, count: int)
 ## A debris chunk hit the floor or a wall hard enough to be heard. (D emits.)
 signal debris_landed(body: Node3D, position: Vector3, speed: float, surface: StringName)
 
+# Upgrade 2: input, combos and states (B emits unless noted)
+signal charge_started(fighter: Node3D, move_id: StringName)
+signal charge_level_changed(fighter: Node3D, level: int)
+signal charge_released(fighter: Node3D, move_id: StringName, level: int)
+## A combo hit landed. count = hits in the current combo; damage_scale applied to it.
+signal combo_progress(attacker: Node3D, count: int, damage_scale: float)
+signal combo_ended(attacker: Node3D, count: int)
+## Round 3 anti-infinite: a comboed victim broke away (Tuning.COMBO_ESCAPE_*). (B emits.)
+signal combo_escaped(victim: Node3D, attacker: Node3D)
+signal stumbled(fighter: Node3D, duration: float)
+signal tripped(fighter: Node3D)
+signal dazed(fighter: Node3D, duration: float)
+## Zone damage built up on a limb (BodyZones.Zone); arms break at Tuning.ARM_BREAK_AT.
+signal limb_damaged(fighter: Node3D, zone: int, total: float)
+signal arm_broken(fighter: Node3D, zone: int)
+## H emits the movement ones.
+signal crouch_changed(fighter: Node3D, crouching: bool)
+signal jumped(fighter: Node3D)
+signal landed(fighter: Node3D)
+## The player's aimed zone on the soft target changed (H emits; target null = none).
+signal aim_zone_changed(aimer: Node3D, target: Node3D, zone: int)
+## Limb grabs (G emits) and wall slams (B emits).
+signal limb_grab_started(grabber: Node3D, victim: Node3D, bone: StringName)
+signal limb_grab_released(grabber: Node3D, victim: Node3D, velocity: Vector3)
+signal wall_slam(grabber: Node3D, victim: Node3D, wall: Node3D)
+## Round 3: a fighter's strike landed on a wall, prop or pillar (D emits from
+## receive_strike). result: &"chip" | &"crack" | &"hole" | &"break" | &"hold"
+## (unbreakable: outer concrete). surface: &"drywall", &"brick", &"wood", &"concrete".
+signal wall_struck(attacker: Node3D, wall: Node3D, position: Vector3, normal: Vector3, power: float, result: StringName, surface: StringName)
+## Focus: the world slows, the player does not (H emits).
+signal focus_started(fighter: Node3D)
+signal focus_ended(fighter: Node3D)
+
 # Flow
 signal round_started(mode: StringName)
 signal wave_started(index: int, total: int)

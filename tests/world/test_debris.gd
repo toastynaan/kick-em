@@ -138,6 +138,31 @@ func _ready() -> void:
 		peak_live, DebrisManager.LARGE_MAX, DebrisManager.OVERFLOW_HARD, peak, DebrisManager.count_large(), _pf(st_ok)])
 	_ok = _ok and st_ok
 
+	# 5c. Tiers: 20 whole panels. Only big chunks persist (about a quarter of a
+	#     panel); medium chunks fade after DebrisManager.MEDIUM_LIFE.
+	DebrisManager.reset()
+	await get_tree().physics_frame
+	var p3: Array[Destructible] = []
+	for i in 20:
+		p3.append(WorldTestUtil.make_panel(self, &"drywall" if i % 2 == 0 else &"brick", Vector3(-80.0 + i * 4.0, 0, 170.0)))
+	await get_tree().physics_frame
+	var total := 0
+	for p in p3:
+		p.force_break(p.global_position + Vector3(0.125, 0, 0), Vector3(-9, 0, 0))
+		total += p.last_chunks.size()
+		await _watch(0.3)
+	await _watch(2.0)
+	var persistent := DebrisManager.count_large(false)
+	var per_panel := float(persistent) / 20.0
+	var panels_to_cap := float(DebrisManager.LARGE_MAX) / maxf(per_panel, 0.01)
+	await WorldTestUtil.wait_game(self, DebrisManager.MEDIUM_LIFE + 1.5)
+	var timed_left := DebrisManager.count_small(false)
+	var tier_ok := persistent <= DebrisManager.LARGE_MAX and panels_to_cap >= 20.0 and timed_left == 0 \
+		and DebrisManager.count_large(false) == persistent
+	print("[debris] tiers: 20 whole panels -> %d chunks, %d persist (%.1f per panel, cap holds %.0f panels), timed left after %.0f s: %d -> %s" % [
+		total, persistent, per_panel, panels_to_cap, DebrisManager.MEDIUM_LIFE + 1.5, timed_left, _pf(tier_ok)])
+	_ok = _ok and tier_ok
+
 	# 6. Reset.
 	DebrisManager.reset()
 	await get_tree().physics_frame

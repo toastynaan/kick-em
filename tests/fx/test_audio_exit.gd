@@ -15,7 +15,7 @@ func _ready() -> void:
 				"res://tests/fx/audio_exit_probe.tscn"], out, true)
 		var text := "\n".join(out)
 		var leaked := text.contains("leaked")
-		var done := text.contains("PROBE DONE ready=true")
+		var done := text.contains("PROBE DONE playing=true")
 		print("run %d: exit %d, probe done %s, leaked %s" % [i + 1, code, done, leaked])
 		if code != 0 or not done:
 			fails.append("probe run %d failed (exit %d)" % [i + 1, code])

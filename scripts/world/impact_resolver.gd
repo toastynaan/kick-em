@@ -36,7 +36,11 @@ const MIN_SWEEP_SPEED := 0.5     ## m/s; slower bodies are not swept
 const IMPACT_WINDOW := 0.1       ## s of COM velocity history for impact detection
 const IMPACT_COOLDOWN := 0.25    ## s; one impact counts once
 const DECISION_FORGET := 0.3     ## s a panel must be out of the sweep before it may decide again
-const CHUNK_PASS_TIME := 0.25    ## s chunks ignore the body that broke them
+## s chunks ignore the body that broke them. Long enough that the body is past
+## the chunks flying with it and the ones already on the floor ahead of it; a
+## short window let a sliding body run into that rubble and stop dead, or got
+## an exception removed while a chunk still overlapped the body (it popped back).
+const CHUNK_PASS_TIME := 1.5
 const STOP_GRACE := 0.15         ## s out of LAUNCHED/DEAD before tracking stops
 const DEAD_SETTLE_SPEED := 0.25
 const DEAD_SETTLE_TIME := 1.0
@@ -53,9 +57,16 @@ const WALL_HITSTOP := 0.06
 ## Same for a hard hit on static concrete (walls, pillars) from this energy.
 const CONCRETE_HITSTOP := 0.05
 const CONCRETE_HITSTOP_FROM := 2000.0
-## Give up keeping bones off breakables this long after a break even if the
-## body's centre never crossed the wall (it stopped in the hole).
-const PASS_TIMEOUT := 0.5
+## Bones keep ignoring breakables after a break until the body's centre is
+## PASS_BEYOND m past the wall (trailing limbs clear the rim), or PASS_TIMEOUT s
+## have passed (it stopped in the hole).
+const PASS_BEYOND := 0.5
+const PASS_TIMEOUT := 0.8
+## Limb-grab swings (upgrade 2): impact damage one swing may deal to the swung body.
+const SWING_DAMAGE_CAP := 120.0
+## nearest_wall_dir: horizontal rays cast around the point, and the prop retries per ray.
+const WALL_DIR_RAYS := 16
+const WALL_DIR_RETRIES := 3
 
 ## Fighters currently tracked (launched). Fed by GameEvents.fighter_launched.
 var tracked: Array = []
@@ -84,13 +95,20 @@ class Track:
 	var flight_hits := 0         ## impacts that dealt damage this flight
 	var flight_damage := 0.0
 	var walls_broken := 0
+	## Limb-grab swing (track_swing): the holder is never bowled, joint pulls are not impacts.
+	var swinging := false
+	var swing_holder: Node3D = null
+	var swing_damage := 0.0
 
 var _tracks: Dictionary = {}       ## instance id -> Track
 var _pending_chain: Dictionary = {} ## victim instance id -> Chain
-## Victim instance id -> {"attacker": attacker instance id, "t": game time of the launch}.
+## Victim instance id -> {"attacker": instance id, "node": the launcher, "t": game time}.
+## Fed by hit_landed (the striker), thrown and limb_grab_released (the grabber);
+## a body launched by bowling inherits the flyer's launcher (bowling credit).
 var _launcher: Dictionary = {}
-## Victim instance ids whose current flight is a throw (GameEvents.thrown):
-## their brick / concrete impacts are finishers (spec: Dismemberment rule 2).
+## Victim instance ids whose current flight is a throw (GameEvents.thrown or a
+## limb-grab fling): their brick / concrete impacts are finishers (spec:
+## Dismemberment rule 2) and their impacts name the thrower as attacker.
 var _thrown: Dictionary = {}
 var _time := 0.0
 var _box := BoxShape3D.new()
@@ -110,6 +128,100 @@ func _ready() -> void:
 	GameEvents.fighter_recovered.connect(_on_fighter_recovered)
 	GameEvents.hit_landed.connect(_on_hit_landed)
 	GameEvents.thrown.connect(_on_thrown)
+	GameEvents.limb_grab_released.connect(_on_limb_grab_released)
+
+## Upgrade 2 contract. A body swung by a limb grab is swept like a flying body:
+## walls it hits decide break / crack / bounce with the same energy rules and
+## fighters it reaches are bowled (never `holder`), until untrack_swing().
+## Impact damage to the swung body is capped at SWING_DAMAGE_CAP per swing
+## (and the usual per-flight rules), and the grip's own pull never counts as
+## an impact.
+func track_swing(fighter: Node3D, holder: Node3D) -> void:
+	var f := fighter as Fighter
+	if f == null or not is_instance_valid(f):
+		return
+	var track := _track_for(f)
+	track.swinging = true
+	track.swing_holder = holder
+	track.swing_damage = 0.0
+	track.decided.clear()
+	track.bowled.clear()
+	if holder and is_instance_valid(holder):
+		track.bowled[holder.get_instance_id()] = true
+	track.idle = 0.0
+	track.still = 0.0
+	_reset_history(track)
+
+## End a swing (release or break free). A released body that is LAUNCHED keeps
+## being tracked as a normal flight; otherwise tracking ends shortly after.
+func untrack_swing(fighter: Node3D) -> void:
+	if fighter == null or not _tracks.has(fighter.get_instance_id()):
+		return
+	var track: Track = _tracks[fighter.get_instance_id()]
+	track.swinging = false
+	track.swing_holder = null
+	track.idle = 0.0
+	_reset_history(track)
+
+func is_swinging(fighter: Node3D) -> bool:
+	return fighter != null and _tracks.has(fighter.get_instance_id()) \
+		and (_tracks[fighter.get_instance_id()] as Track).swinging
+
+## Unit XZ direction from `from` to the nearest wall or pillar face within
+## max_dist (ZERO if none). Juggles flatten their launch toward it.
+## WALL_DIR_RAYS horizontal rays at body height against WORLD and breakable
+## walls (props are skipped, holes let the ray through); the answer is the
+## inward normal of the face the closest ray hit.
+func nearest_wall_dir(from: Vector3, max_dist := 8.0) -> Vector3:
+	if not is_inside_tree():
+		return Vector3.ZERO
+	var world: World3D = get_viewport().find_world_3d()
+	if world == null:
+		return Vector3.ZERO
+	var space := world.direct_space_state
+	var o := Vector3(from.x, clampf(from.y, 0.6, 2.2), from.z)
+	var best_d := max_dist
+	var best := Vector3.ZERO
+	for i in WALL_DIR_RAYS:
+		var ang := TAU * float(i) / float(WALL_DIR_RAYS)
+		var dir := Vector3(cos(ang), 0.0, sin(ang))
+		var hit := _wall_ray(space, o, dir, max_dist)
+		if hit.is_empty():
+			continue
+		var n: Vector3 = hit["normal"]
+		n.y = 0.0
+		var p: Vector3 = hit["position"]
+		# Rank by the real distance to the hit (a pillar corner is farther than
+		# its face plane); answer with the face's inward normal.
+		var d := o.distance_to(p)
+		var into := -n.normalized() if n.length() > 0.5 else dir
+		if d < best_d:
+			best_d = d
+			best = into
+	return best
+
+var _ray := PhysicsRayQueryParameters3D.new()
+
+func _wall_ray(space: PhysicsDirectSpaceState3D, o: Vector3, dir: Vector3, max_dist: float) -> Dictionary:
+	_ray.from = o
+	_ray.to = o + dir * max_dist
+	_ray.collision_mask = Layers.WORLD | Layers.DESTRUCTIBLE
+	_ray.collide_with_areas = false
+	var excl: Array[RID] = []
+	for _k in WALL_DIR_RETRIES + 1:
+		_ray.exclude = excl
+		var hit := space.intersect_ray(_ray)
+		if hit.is_empty():
+			return hit
+		var obj: Object = hit["collider"]
+		var panel := obj as Destructible
+		# Props (breakable or loose) are not walls; loose props sit on
+		# DESTRUCTIBLE too so strikes reach them.
+		if (panel != null and panel.kind != &"panel") or obj is RigidBody3D:
+			excl.append((obj as CollisionObject3D).get_rid())
+			continue
+		return hit
+	return {}
 
 ## Reset all tracking (round restart).
 func reset() -> void:
@@ -155,7 +267,7 @@ func _on_hit_landed(info: HitInfo) -> void:
 		return
 	var id := info.victim.get_instance_id()
 	if info.attacker and is_instance_valid(info.attacker):
-		_launcher[id] = {"attacker": info.attacker.get_instance_id(), "t": _time}
+		_set_launcher(id, info.attacker)
 	if info.kind == &"throw":
 		_thrown[id] = true
 	else:
@@ -171,7 +283,44 @@ func _on_thrown(grabber: Node3D, victim: Node3D, _velocity: Vector3) -> void:
 	var id := victim.get_instance_id()
 	_thrown[id] = true
 	if grabber and is_instance_valid(grabber):
-		_launcher[id] = {"attacker": grabber.get_instance_id(), "t": _time}
+		_set_launcher(id, grabber)
+
+## A limb-grab fling counts like a throw (agent G): the grabber launched this
+## flight, which starts fresh (per-flight damage rules, bowling chain). A
+## break-free (no fling velocity) throws nothing.
+func _on_limb_grab_released(grabber: Node3D, victim: Node3D, velocity: Vector3) -> void:
+	if victim == null or not is_instance_valid(victim) or velocity.length() < MIN_SWEEP_SPEED:
+		return
+	var id := victim.get_instance_id()
+	_thrown[id] = true
+	if grabber and is_instance_valid(grabber):
+		_set_launcher(id, grabber)
+	if _tracks.has(id):
+		var track: Track = _tracks[id]
+		track.flight_hits = 0
+		track.flight_damage = 0.0
+		track.walls_broken = 0
+		track.chain = Chain.new()
+		track.bowled.clear()
+		if grabber and is_instance_valid(grabber):
+			track.bowled[grabber.get_instance_id()] = true
+		track.decided.clear()
+		_reset_history(track)
+
+func _set_launcher(victim_id: int, who: Node3D) -> void:
+	_launcher[victim_id] = {"attacker": who.get_instance_id(), "node": who, "t": _time}
+
+## Who launched (struck, threw or flung) this fighter's current flight, or null.
+func get_launcher(fighter: Node3D) -> Node3D:
+	if fighter == null:
+		return null
+	var l: Dictionary = _launcher.get(fighter.get_instance_id(), {})
+	var who: Variant = l.get("node")
+	return who as Node3D if who != null and is_instance_valid(who) else null
+
+## True while the fighter's flight is a throw (thrown or flung by a limb grab).
+func is_thrown_flight(fighter: Node3D) -> bool:
+	return fighter != null and _thrown.has(fighter.get_instance_id())
 
 func _track_for(f: Fighter) -> Track:
 	var id := f.get_instance_id()
@@ -235,7 +384,7 @@ func _update(track: Track, delta: float) -> bool:
 	if not is_instance_valid(f) or f.is_queued_for_deletion() or not f.is_inside_tree():
 		return false
 	var st := f.get_state()
-	var flying := st == RagdollController.State.LAUNCHED or st == RagdollController.State.DEAD
+	var flying := track.swinging or st == RagdollController.State.LAUNCHED or st == RagdollController.State.DEAD
 	if not flying:
 		track.idle += delta
 		if track.ignoring and f.ragdoll:
@@ -246,7 +395,7 @@ func _update(track: Track, delta: float) -> bool:
 	var M := maxf(f.get_total_mass(), 1.0)
 	var v := f.get_com_velocity()
 	var com := f.get_center_of_mass()
-	if st == RagdollController.State.DEAD:
+	if st == RagdollController.State.DEAD and not track.swinging:
 		if v.length() < DEAD_SETTLE_SPEED:
 			track.still += delta
 			if track.still > DEAD_SETTLE_TIME:
@@ -282,7 +431,7 @@ func _sweep(track: Track, f: Fighter, M: float, v: Vector3, com: Vector3, bounds
 	# broke, until its centre has crossed the wall.
 	for wid in track.passing.keys():
 		var pw: Dictionary = track.passing[wid]
-		if (com - (pw["point"] as Vector3)).dot(pw["into"]) > 0.05 or _time > float(pw["until"]):
+		if (com - (pw["point"] as Vector3)).dot(pw["into"]) > PASS_BEYOND or _time > float(pw["until"]):
 			track.passing.erase(wid)
 		else:
 			_want_ignore = true
@@ -548,6 +697,9 @@ func _bowl(track: Track, f: Fighter, victim: Fighter, energy: float, v: Vector3,
 		_pending_chain[vid] = chain
 		victim.launch(lv, pos, &"Chest")
 		_pending_chain.erase(vid)
+		var root := get_launcher(f)
+		if root != null and root != victim:
+			_set_launcher(vid, root)
 		if is_instance_valid(victim):
 			var vt := _track_for(victim)
 			vt.chain = chain
@@ -557,7 +709,9 @@ func _bowl(track: Track, f: Fighter, victim: Fighter, energy: float, v: Vector3,
 	if energy >= Tuning.BOWL_LAUNCH_ABOVE:
 		GameEvents.screen_shake.emit(clampf(energy / 20000.0, 0.1, 0.4))
 	if is_instance_valid(victim) and victim_energy > 0.0:
-		_deal(victim, victim_energy, pos, -d, &"body", &"bowl", f)
+		# Bowling credit goes to whoever launched the flyer (else the flyer).
+		var credit: Fighter = get_launcher(f) as Fighter
+		_deal(victim, victim_energy, pos, -d, &"body", &"bowl", credit if credit != null and credit != victim else f)
 
 func _capsule_box(f: Fighter) -> AABB:
 	for c in f.get_children():
@@ -621,10 +775,14 @@ func _commit_impact(track: Track, f: Fighter, M: float, bounds: AABB) -> void:
 	var pos := com - dvn * 0.5
 	var surface := &"concrete"
 	var space := f.get_world_3d().direct_space_state
+	var excl := _own_rids(f)
+	if track.swinging and track.swing_holder is Fighter and is_instance_valid(track.swing_holder):
+		excl.append_array(_own_rids(track.swing_holder as Fighter))
 	var q := PhysicsRayQueryParameters3D.create(com, com - dvn * reach,
-		Layers.WORLD | Layers.DESTRUCTIBLE | Layers.CAPSULE | Layers.RAGDOLL | Layers.DEBRIS,
-		_own_rids(f))
+		Layers.WORLD | Layers.DESTRUCTIBLE | Layers.CAPSULE | Layers.RAGDOLL | Layers.DEBRIS, excl)
 	var hit := space.intersect_ray(q)
+	if track.swinging and hit.is_empty():
+		return  # the grip pulled the body around: not an impact
 	var collider: Object = null
 	if not hit.is_empty():
 		n = hit["normal"]
@@ -697,10 +855,14 @@ func _deal(f: Fighter, energy: float, pos: Vector3, n: Vector3, surface: StringN
 		if track.flight_hits >= 1:
 			dmg *= Tuning.IMPACT_REPEAT_MULT
 		dmg = minf(dmg, maxf(Tuning.IMPACT_FLIGHT_CAP - track.flight_damage, 0.0))
+		if track.swinging:
+			dmg = minf(dmg, maxf(SWING_DAMAGE_CAP - track.swing_damage, 0.0))
 		if dmg <= 0.0:
 			return
 		track.flight_hits += 1
 		track.flight_damage += dmg
+		if track.swinging:
+			track.swing_damage += dmg
 	var info := HitInfo.new()
 	info.attacker = attacker
 	info.victim = f
@@ -713,9 +875,13 @@ func _deal(f: Fighter, energy: float, pos: Vector3, n: Vector3, surface: StringN
 	info.hit_bone = _nearest_bone(f, pos)
 	info.energy = energy
 	info.result = HitInfo.Result.HIT
-	# A throw into brick or concrete is a finisher (may dismember on a kill).
-	if attacker == null and _thrown.has(f.get_instance_id()) and (surface == &"brick" or surface == &"concrete"):
-		info.is_finisher = true
+	# A thrown (or flung) body's own impacts name the thrower, and a throw into
+	# brick or concrete is a finisher (may dismember on a kill).
+	if move_id != &"bowl" and _thrown.has(f.get_instance_id()):
+		if attacker == null:
+			info.attacker = get_launcher(f) as Fighter
+		if surface == &"brick" or surface == &"concrete":
+			info.is_finisher = true
 	f.apply_damage(dmg, &"impact", info)
 	# HUD wording (agent E): floor slams report &"floor", body / bowling hits &"body".
 	var shown := surface

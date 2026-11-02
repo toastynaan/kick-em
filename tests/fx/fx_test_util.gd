@@ -33,11 +33,14 @@ static func make_fighter(parent: Node, pos: Vector3, body := true) -> Node3D:
 
 ## Wait (wall clock: the synth runs on a worker thread, and --fixed-fps frames
 ## can outrun it) until AudioFX has every sound. Returns AudioFX.is_ready().
-static func wait_audio(tree: SceneTree, max_ms := 20000) -> bool:
+## `complete`: wait for every variant, not just the first of each id.
+## Generous by default: with many Godot processes on one machine the worker
+## thread can take 50x longer than the ~2 s it needs on an idle one.
+static func wait_audio(tree: SceneTree, max_ms := 240000, complete := false) -> bool:
 	var t0 := Time.get_ticks_msec()
-	while not AudioFX.is_ready() and Time.get_ticks_msec() - t0 < max_ms:
+	while not (AudioFX.is_complete() if complete else AudioFX.is_ready()) and Time.get_ticks_msec() - t0 < max_ms:
 		await tree.process_frame
-	return AudioFX.is_ready()
+	return AudioFX.is_complete() if complete else AudioFX.is_ready()
 
 static func physics_frames(tree: SceneTree, n: int) -> void:
 	for i in n:
@@ -50,6 +53,16 @@ static func drain(tree: SceneTree, max_frames := 600) -> void:
 		await tree.physics_frame
 		i += 1
 	await tree.physics_frame
+
+## A float shader parameter, 0 when it was never set (headless has no
+## shader introspection, so unset uniforms read back as null).
+static func fparam(m: Material, param: StringName) -> float:
+	var v = (m as ShaderMaterial).get_shader_parameter(param) if m is ShaderMaterial else null
+	return float(v) if v != null else 0.0
+
+## fparam() for a mesh part's material.
+static func part_param(part: MeshInstance3D, param: StringName) -> float:
+	return fparam(part.material_override, param)
 
 static func is_red(c: Color) -> bool:
 	return c.r > 0.15 and c.r > c.g * 2.0 and c.r > c.b * 2.0

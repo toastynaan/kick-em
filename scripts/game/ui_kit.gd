@@ -104,13 +104,14 @@ static func full_rect(name: String) -> Control:
 const ACTION_HELP := {
 	&"move": "Move (camera-relative)",
 	&"camera": "Orbit the camera",
-	&"light": "Jab, chains up to 3. During perfect-dodge slow-mo: teleport counter (1 Focus)",
-	&"heavy": "Power punch: hold 0.2-1.0 s to charge. Mid and full charge launch",
-	&"kick": "Sparta kick: big launch, main wall breaker. In dodge slow-mo: teleport counter",
-	&"sweep": "Leg sweep: knocks the target down where it stands",
-	&"grab": "Grab (beats block); release or wait 1 s to throw at the stick. Red glint: press to break their grab",
-	&"block": "Block (-80% damage). White glint: press just before the hit to perfect-dodge",
-	&"dash": "Dash: speed feeds your next hit. After a launch: pursuit. While flying: air recovery (1 Focus each)",
+	&"punch": "Tap: next punch in the string. Hold: charge it. In dodge slow-mo: teleport counter",
+	&"kick": "Tap: next kick in the string. Hold: charge it. Crouch + kick: sweep",
+	&"grab": "Grab; release throws. Red glint: press to break their grab",
+	&"jump": "Jump: clears low attacks",
+	&"crouch": "Crouch (hold): ducks high attacks and standing grabs",
+	&"block": "Block (-80% damage). Tap just before a hit: perfect dodge",
+	&"dash": "Dash: speed feeds your next hit. After a launch: pursuit",
+	&"focus": "Focus (hold): the world slows, you don't. Drains the Focus meter",
 	&"pause": "Pause menu",
 	&"restart": "Restart the round (pause and round-over screens)",
 	&"help": "Show or hide this panel",
@@ -118,10 +119,10 @@ const ACTION_HELP := {
 	&"fullscreen": "Switch between fullscreen and a window",
 }
 const ACTION_TITLES := {
-	&"move": "Move", &"camera": "Camera", &"light": "Light", &"heavy": "Heavy (hold)",
-	&"kick": "Kick", &"sweep": "Sweep", &"grab": "Grab", &"block": "Block", &"dash": "Dash",
-	&"pause": "Pause", &"restart": "Restart", &"help": "Help", &"debug": "Debug",
-	&"fullscreen": "Fullscreen",
+	&"move": "Move", &"camera": "Camera", &"punch": "Punch", &"kick": "Kick",
+	&"grab": "Grab", &"jump": "Jump", &"crouch": "Crouch", &"block": "Block",
+	&"dash": "Dash", &"focus": "Focus", &"pause": "Pause", &"restart": "Restart",
+	&"help": "Help", &"debug": "Debug", &"fullscreen": "Fullscreen",
 }
 
 ## Rows of [title, keyboard+mouse, gamepad, description], one per action, built
@@ -223,7 +224,7 @@ static func controls_panel() -> PanelContainer:
 		d.custom_minimum_size.x = 560
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		grid.add_child(d)
-	box.add_child(label("Focus (3 bars) pays for teleport counter, pursuit and air recovery. Perfect dodge +0.5.", 18, FOCUS_COLOR))
+	box.add_child(label("Focus (3 bars): hold to slow the world while you keep full speed (needs half a bar). Fills from perfect dodges, launches and kills.", 18, FOCUS_COLOR))
 	box.add_child(label("F1 closes this panel", 16, TEXT_DIM))
 	panel.visible = false
 	return panel

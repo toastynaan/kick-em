@@ -90,3 +90,42 @@ func _run() -> void:
 	var fd := TimeDirector.frame_delta()
 	_check(fd > 0.0 and fd <= 0.1, "frame_delta() is the unscaled frame time in slow motion (%.4f s)" % fd)
 	TimeDirector.reset()
+
+	# --- Focus (Upgrade 2): the world slows, the player does not ----------------
+	var fs := Tuning.FOCUS_SCALE
+	var changes: Array = []
+	TimeDirector.focus_changed.connect(func(on: bool) -> void: changes.append(on))
+	_check(not TimeDirector.is_focus_active() and is_equal_approx(TimeDirector.player_time_factor(), 1.0), "no Focus: player factor 1")
+	_check(TimeDirector.begin_focus(), "begin_focus granted")
+	_check(TimeDirector.is_focus_active() and _near(Engine.time_scale, fs), "Focus drops the world to %.2f (%.2f)" % [fs, Engine.time_scale])
+	_check(_near(TimeDirector.player_time_factor(), 1.0 / fs, 0.01), "player factor = 1/scale (%.3f)" % TimeDirector.player_time_factor())
+	_check(_near(TimeDirector.player_delta(0.1), 0.1 / fs, 0.002), "player_delta(0.1) = %.4f" % TimeDirector.player_delta(0.1))
+	_check(_near(TimeDirector.player_delta(1.0 / 120.0) * Engine.time_scale, 1.0 / 120.0, 0.0001), "player moves a real-time step per tick")
+	await _wait(0.6)
+	_check(TimeDirector.get_budget_used() < 0.001, "Focus does not use the slow-motion budget")
+	# Stacking: a slower request during Focus wins; the player stays real time.
+	_check(TimeDirector.request_slowmo(Tuning.WALL_BREAK_SLOWMO.x, 0.3, TimeDirector.PRIO_WALL_BREAK), "wall break during Focus granted")
+	_check(_near(Engine.time_scale, minf(fs, Tuning.WALL_BREAK_SLOWMO.x)), "world at the slower scale (%.2f)" % Engine.time_scale)
+	_check(_near(TimeDirector.player_time_factor() * Engine.time_scale, 1.0, 0.01), "player still real time under the stacked scale")
+	await _wait(0.3 + Tuning.SLOWMO_EASE + 0.05)
+	_check(_near(Engine.time_scale, fs), "wall break over: back to the Focus scale (%.2f)" % Engine.time_scale)
+	# A faster request during Focus does not speed the world up.
+	TimeDirector.request_slowmo(0.5, 0.3, TimeDirector.PRIO_BIG_LAUNCH)
+	_check(_near(Engine.time_scale, fs), "a 0.5x request does not lift the Focus scale")
+	await _wait(0.4)
+	TimeDirector.end_focus()
+	_check(not TimeDirector.is_focus_active(), "end_focus")
+	_check(TimeDirector.player_time_factor() > 1.01, "player kept real time while the world eases back")
+	await _wait(Tuning.SLOWMO_EASE + 0.05)
+	_check(_near(Engine.time_scale, 1.0) and _near(TimeDirector.player_time_factor(), 1.0), "after the ease: world 1.0, player factor 1")
+	# The KO ends Focus and Focus cannot start during a KO.
+	TimeDirector.begin_focus()
+	TimeDirector.request_slowmo(Tuning.KO_SLOWMO.x, 0.3, TimeDirector.PRIO_KO)
+	_check(not TimeDirector.is_focus_active(), "a KO ends Focus")
+	_check(_near(TimeDirector.player_time_factor(), 1.0), "the player slows with the KO")
+	_check(not TimeDirector.begin_focus(), "Focus refused during a KO")
+	TimeDirector.reset()
+	TimeDirector.begin_focus()
+	TimeDirector.reset()
+	_check(not TimeDirector.is_focus_active() and _near(Engine.time_scale, 1.0), "reset ends Focus")
+	_check(changes.size() >= 4 and changes[0] == true and changes[1] == false, "focus_changed signals (%s)" % str(changes))

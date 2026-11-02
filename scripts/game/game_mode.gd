@@ -19,11 +19,11 @@ const SPAWN_CLEARANCE := 1.4     ## m: a spawn point is busy while a fighter is 
 const SPAWN_STALL_MAX := 2.5     ## s all spawn points may stay busy before spawning beside one
 const BREACH_DELAY := 1.5       ## s from first crack to burst (room for D's three thumps)
 const BREACH_BEHIND := 1.4       ## m behind the facade panel the breaching enemy waits
-const WAVES_FOLLOW_TIME := 0.8  ## s follow-cam in waves (tokens pause while it runs)
 const KO_PANEL_DELAY := 0.9      ## real s after the KO slow motion before the panel
 const CORPSE_FADE_TIME := 1.5    ## s fade-out duration passed to fade_out_and_free
 const TITLE_ORBIT_RATE := 0.07   ## rad/s of the title backdrop camera
 const LAB_SCENE := "res://scenes/ragdoll_lab.tscn"
+const GRAB_LAB_SCENE := "res://scenes/grab_lab.tscn"  ## agent G's limb-grab lab (Esc returns to main.tscn)
 
 static var pending_mode: StringName = &""
 
@@ -66,7 +66,8 @@ func _ready() -> void:
 	add_child(menus)
 	menus.duel_pressed.connect(_on_choose.bind(&"duel"))
 	menus.waves_pressed.connect(_on_choose.bind(&"waves"))
-	menus.lab_pressed.connect(_on_lab)
+	menus.lab_pressed.connect(_open_lab.bind(LAB_SCENE))
+	menus.grab_lab_pressed.connect(_open_lab.bind(GRAB_LAB_SCENE))
 	menus.quit_pressed.connect(_on_quit)
 	menus.pause_requested.connect(pause)
 	menus.resume_pressed.connect(resume)
@@ -109,10 +110,6 @@ func start_round(round_mode: StringName) -> void:
 	camera_rig = CameraRig.new()
 	camera_rig.name = "CameraRig"
 	camera_rig.target = player
-	if mode == &"waves":
-		# Keep crowds attacking: short follow-cam, only for launches heading at a wall.
-		camera_rig.follow_time = WAVES_FOLLOW_TIME
-		camera_rig.follow_needs_wall = true
 	add_child(camera_rig)
 
 	hud = HUD.new()
@@ -258,12 +255,12 @@ func _on_choose(round_mode: StringName) -> void:
 	AudioFX.play_ui(&"ui")
 	start_round(round_mode)
 
-func _on_lab() -> void:
-	if not ResourceLoader.exists(LAB_SCENE):
+func _open_lab(scene_path: String) -> void:
+	if not ResourceLoader.exists(scene_path):
 		return
 	reset_globals()
 	get_tree().paused = false
-	get_tree().change_scene_to_file(LAB_SCENE)
+	get_tree().change_scene_to_file(scene_path)
 
 func _on_quit() -> void:
 	get_tree().quit()
@@ -442,7 +439,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_capture_mouse()
 
 # --- Deaths, corpses, round end ---------------------------------------------------------
-func _on_fighter_died_event(fighter: Node3D, _info: HitInfo) -> void:
+func _on_fighter_died_event(fighter: Node3D, info: HitInfo) -> void:
+	_maybe_finisher_closeup.call_deferred(fighter, info)
 	var f := fighter as Fighter
 	if f != null and (f == player or _alive.has(f)):
 		_handle_death(f)
@@ -502,6 +500,22 @@ func _fade_corpse(i: int) -> void:
 
 var _won := false
 
+## U7: a finisher kill with no enemy winding up gets a short close-up at
+## Tuning.FINISHER_CLOSEUP (the round's last KO is handled by _end_round).
+## Deferred so the death has been processed (round end, wave end) first.
+func _maybe_finisher_closeup(fighter, info) -> void:  # untyped: the fighter may be freed by now
+	if phase != Phase.FIGHTING or camera_rig == null or not (info is HitInfo):
+		return
+	if not is_instance_valid(fighter) or fighter == player or info.attacker != player:
+		return
+	if not (info.is_finisher or info.charge_level >= 3):
+		return
+	for e in get_alive_enemies():
+		if e.combat != null and e.combat.is_attacking():
+			return  # someone is winding up: the player needs the normal camera
+	if TimeDirector.request_slowmo(Tuning.FINISHER_CLOSEUP.z, Tuning.FINISHER_CLOSEUP.x, TimeDirector.PRIO_WALL_BREAK):
+		camera_rig.start_closeup(fighter, Tuning.FINISHER_CLOSEUP.x)
+
 func _end_round(won: bool, focus: Fighter) -> void:
 	if phase == Phase.ENDING or phase == Phase.OVER:
 		return
@@ -512,7 +526,11 @@ func _end_round(won: bool, focus: Fighter) -> void:
 	TimeDirector.request_slowmo(Tuning.KO_SLOWMO.x, Tuning.KO_SLOWMO.y, TimeDirector.PRIO_KO)
 	var focus_node: Node3D = focus if focus != null and is_instance_valid(focus) else player
 	if camera_rig and focus_node and is_instance_valid(focus_node):
-		camera_rig.start_orbit(focus_node)
+		if won and focus_node != player:
+			# U7: the last enemy's KO gets the finisher close-up, then the KO cam.
+			camera_rig.start_closeup(focus_node, Tuning.FINISHER_CLOSEUP.x, true)
+		else:
+			camera_rig.start_orbit(focus_node)
 	if hud:
 		hud.set_round_over()
 	_after(Tuning.KO_SLOWMO.y + KO_PANEL_DELAY, _show_round_over.bind(_gen))

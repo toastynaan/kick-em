@@ -217,11 +217,107 @@ const BIG_LAUNCH_SLOWMO := Vector2(0.35, 0.5)
 const BIG_LAUNCH_ENERGY := 6000.0  ## lowered from 9,000 so counters and dash kicks get slow motion
 const KO_SLOWMO := Vector2(0.2, 1.0)
 
-# --- Camera -----------------------------------------------------------------
-const CAM_MIN_DIST := 3.0
+# --- Camera (Upgrade 2: Camera fixes) ----------------------------------------
+const CAM_MIN_DIST := 2.2        ## m; was 3.0. The camera never gets closer.
 const CAM_MAX_DIST := 9.0
+const CAM_COMBAT_DIST := Vector2(3.5, 7.0)  ## m: pulls back as token holders spread out
+const CAM_PLAYER_OFFSET_X := -0.1  ## player sits this fraction of the screen width left of centre
+const CAM_PITCH_RANGE := Vector2(-35.0, 20.0)  ## degrees (negative looks down)
+## In play the camera never follows a flying body: a launch or throw sending a
+## body more than CAM_WIDEN_TRIGGER m widens the frame instead, for at most CAM_WIDEN_TIME.
+const CAM_WIDEN_TRIGGER := 6.0
+const CAM_WIDEN_PULLBACK := 2.0  ## m, at most
+const CAM_WIDEN_FOV := 8.0       ## degrees, at most
+const CAM_WIDEN_TIME := 1.2      ## s, at most
+const CAM_MOUSE_IDLE := 1.0      ## s after the last camera input before auto-rotation
+const CAM_RETURN_TIME := 0.5     ## s to ease back behind the player
+const CAM_MODE_GAP := 0.75       ## s: at most one camera mode change per this
+const CAM_MODE_BLEND := 0.25     ## s per mode blend
+const CAM_TARGET_TURN := 90.0    ## degrees per s on a soft-target change
+const CAM_BLOCKER_ALPHA := 0.25  ## walls, props, rubble and ragdolls in the way fade to this
+## Kill-cam only (player not in control): follow a flying body.
 const FOLLOW_CAM_SPEED := 10.0
 const FOLLOW_CAM_TIME := 1.5
+const KILLCAM_WALLS := 3         ## a flight through this many walls earns a replay
+const FINISHER_CLOSEUP := Vector3(0.6, 2.0, 0.3)  ## (real s, m from the target, time scale)
+
+# --- Input model (Upgrade 2: tap to combo, hold to charge) --------------------
+const HOLD_THRESHOLD := 0.15     ## s: released before = tap, still held = charge (main feel setting)
+const CHARGE_LEVELS: Array[float] = [0.15, 0.4, 0.8]  ## s held to reach level 1, 2, 3
+const CHARGE_DAMAGE: Array[float] = [1.0, 1.4, 2.0, 3.0]  ## damage x by level 0..3
+const CHARGE_AUTO_RELEASE := 1.5 ## s: a held button never locks the fighter
+const CHARGE_WALK: Array[float] = [1.0, 0.6, 0.6, 0.4]    ## walk speed x by level 0..3
+const BUFFER_FRAMES := 10.0      ## a press in the last N frames of recovery fires the next move
+const STRING_RESET := 0.4        ## s after a move ends with no press: the string resets
+const COMBO_DROP := 1.0          ## s without a landed hit ends the combo count
+
+# --- Crouch and jump (Upgrade 2) -----------------------------------------------
+const CROUCH_HEIGHT := 1.1       ## m capsule (standing 1.8)
+const CROUCH_SPEED := 0.4        ## walk x
+const JUMP_APEX := 0.9           ## m; with GRAVITY 20 this is 0.6 s in the air (v0 = 6 m/s)
+const JUMP_AIR_TIME := 0.6
+const JUMP_AIR_STEER := 0.5      ## of walk control while airborne
+const JUMP_LAND_FRAMES := 6.0
+const AIR_COUNTER_LAUNCH := 1.25 ## launch x on a fighter hit while jumping
+
+# --- Combos (Upgrade 2) ----------------------------------------------------------
+const JUGGLE_LAUNCH := 1.3       ## launch x on a tumbling/airborne/stumbling victim, flattened toward the nearest wall
+const COMBO_FULL_HITS := 2       ## hits 1-2 do full damage...
+const COMBO_SCALE_STEP := 0.1    ## ...then each hit 10% less...
+const COMBO_SCALE_MIN := 0.5     ## ...down to 50%
+# Anti-infinite (round 3). Scaling alone never ends a stun loop, so the victim's
+# hitstun shrinks over a combo and a hard cap lets it break away. Counted per
+# VICTIM: hits taken from anyone with no COMBO_DROP gap.
+const COMBO_STUN_DECAY_FROM := 4 ## from this hit taken, flinch/stagger stun shrinks...
+const COMBO_STUN_DECAY := 0.15   ## ...by this much per hit...
+const COMBO_STUN_MIN := 0.4      ## ...down to 40% of its normal length
+const COMBO_ESCAPE_HITS := 8     ## the hit that would make this many: damage, no stun, the victim breaks away
+const COMBO_ESCAPE_STUN := 2.5   ## s of stun taken in one combo also triggers the break-away
+const COMBO_ESCAPE_GUARD := 0.6  ## s of auto-guard (frontal strikes blocked) after breaking away
+const COMBO_ESCAPE_PUSH := 1.2   ## m the break-away opens between the two fighters
+const JUGGLE_MAX_RELAUNCH := 2   ## juggle relaunches per flight; later hits only damage, the body falls
+const STUMBLE_TIME := 0.6        ## tap sweep: off balance, cannot attack or block
+const TRIP_TIME := 0.5           ## charged sweep L1-2: off their feet, tumble at hip height
+const LAUNCHER_LIFT := 1.5       ## m: uppercut, L3 sweep
+const UPWARD_THROW_LIFT := 2.0   ## m: grab, back + release
+const DAZED_TIME := 1.5          ## hunched, no actions; the next hit always launches
+const DAZE_BLOCKED_HITS := 3     ## hits on a blocking enemy that daze it
+
+# --- Body zones and grabs (Upgrade 2) ----------------------------------------------
+const ZONE_HEAD_DAMAGE := 1.3
+const ZONE_LEG_SLOW := 0.3       ## enemy walk -30%...
+const ZONE_LEG_SLOW_TIME := 3.0  ## ...for this long
+const ARM_BREAK_AT := 100.0      ## zone damage on one arm
+const ARM_DRAG_BREAK_MULT := 0.7 ## arm drags give the victim a 30% shorter break window
+const WALL_SLAM_RANGE := 1.5     ## m from a wall/pillar when the grab connects
+const WALL_SLAM_SPEED := 9.0     ## m/s head first into it (~2,800 J for 70 kg)
+
+# --- Focus (Upgrade 2: the world slows, you don't) --------------------------------
+## Units are bars: FOCUS_MAX (3.0) is three bars.
+const FOCUS_SCALE := 0.3         ## world time scale while Focus is held
+const FOCUS_MIN_START := 0.5     ## bars needed to start
+const FOCUS_DRAIN := 0.4         ## bars per real second (1 bar per 2.5 s)
+const FOCUS_KILL := 0.25         ## bars per kill
+const FOCUS_PURSUIT_CHAIN := 3   ## pursuits on one body inside one Focus burst
+
+# --- Wall strikes (Round 3: punch and kick walls) ---------------------------------
+## The player's punches and kicks damage the wall cells under the striking
+## limb. Strike power = move damage x CHARGE_DAMAGE[level] x (1 + STRIKE_DASH_BONUS
+## while dash momentum is on). Each surface soaks power per cell; damage stays
+## for the round, so harder walls break over several hits, and a weakened wall
+## breaks more easily when a body is thrown into it.
+## Feel targets (agent D tunes these numbers):
+##   drywall: two jabs or one kick open a fist-sized hole, a charged kick a body-sized one
+##   wood (roll door): 3-4 kicks
+##   brick: about 8 kicks, or 2-3 level-3 charges
+##   concrete pillar: chips every hit, the core holds
+##   outer concrete walls: chips, cracks and dust only (the arena boundary never opens)
+const STRIKE_CELL_HP := {&"drywall": 28.0, &"wood": 170.0, &"brick": 450.0, &"concrete": 900.0}
+const STRIKE_SPREAD := 0.12      ## m: cells within this of the contact take half the power (D widens it for strong hits)
+const STRIKE_DASH_BONUS := 0.5
+const STRIKE_HITSTOP := 0.04     ## real s, attacker only (a wall hit needs weight too)
+const STRIKE_RECOIL := 1.5       ## m/s push back off a wall that holds
+const STRIKE_SHAKE := 0.12       ## screen-shake trauma for a wall that holds (x2 when it breaks)
 
 # --- Dismemberment ----------------------------------------------------------
 const SEVER_ENERGY := 4000.0

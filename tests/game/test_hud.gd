@@ -141,3 +141,78 @@ func _run() -> void:
 	enemy.queue_free()
 	await _frames(3)
 	_check(hud._opp_hp_label.text == "0", "freed opponent shows an empty bar without errors")
+
+	# --- Upgrade 2: Focus meter, reticle, combo counter, charge levels ---------
+	var stranger := Node3D.new()  # a live non-player node for "enemy" emits (enemy is freed above)
+	world.add_child(stranger)
+	_check(hud._reticle.visible, "centre reticle shown")
+	var rc := hud._reticle.get_global_rect().position
+	var vsz := get_viewport().get_visible_rect().size
+	_check(rc.distance_to(vsz * 0.5) < 2.0, "reticle at the screen centre")
+	TimeDirector.begin_focus()
+	await _frames(3)
+	_check(hud._bars.focus_active and hud._focus_label.text.begins_with("FOCUS ON"), "Focus meter shows the active state")
+	_check(hud._reticle.focus, "reticle highlights in Focus")
+	await _wait_real(0.5)
+	_check(hud._focus_tint.modulate.a > 0.02, "screen tint during Focus")
+	TimeDirector.end_focus()
+	await _wait_real(0.4)
+	_check(not hud._bars.focus_active and hud._focus_label.text.begins_with("FOCUS "), "Focus meter back to idle")
+
+	GameEvents.combo_progress.emit(player, 4, 0.8)
+	await _frames(2)
+	_check(hud.get_combo_text() == "4 HITS" and hud._combo_sub.text == "DMG 80%", "combo counter '4 HITS' / 'DMG 80%%'")
+	GameEvents.combo_progress.emit(stranger, 6, 0.6)
+	await _frames(1)
+	_check(hud.get_combo_text() == "4 HITS", "enemy combos are not shown")
+	GameEvents.combo_ended.emit(player, 4)
+	await _wait_real(0.9)
+	_check(hud.get_combo_text() == "", "combo counter fades after combo_ended")
+
+	GameEvents.charge_started.emit(player, &"punch")
+	await _frames(2)
+	_check(hud.get_charge_state()["visible"] and hud.get_charge_state()["charging"], "charge meter shows on charge_started")
+	GameEvents.charge_level_changed.emit(player, 2)
+	await _frames(2)
+	_check(hud.get_charge_state()["level"] == 2 and hud._charge.level == 2, "charge level 2 shown")
+	GameEvents.charge_released.emit(player, &"punch", 2)
+	await _wait_real(0.6)
+	_check(not hud.get_charge_state()["visible"], "charge meter hides after the release")
+	GameEvents.charge_started.emit(stranger, &"e_heavy")
+	await _frames(2)
+	_check(not hud.get_charge_state()["visible"], "enemy charges are not shown")
+
+	# --- Round 3: strike-made holes announce WALL BREAK once, not on every jab ----
+	var panel := _FakePanel.new()
+	world.add_child(panel)
+	var shows := func(p: _FakePanel, holes: int, by_strike: bool, broken: bool) -> bool:
+		p.strike_holes = holes
+		p.last_break_by_strike = by_strike
+		p.is_broken = broken
+		hud._pop_label.text = ""
+		GameEvents.wall_broken.emit(p, Vector3.ZERO, 900.0, Vector3.ZERO)
+		return hud._pop_label.text == "WALL BREAK"
+	_check(shows.call(panel, 1, true, false), "first strike hole shows WALL BREAK")
+	_check(not shows.call(panel, 2, true, false), "a jab widening the hole shows no banner")
+	_check(not shows.call(panel, 3, true, false), "nor the next one")
+	_check(shows.call(panel, 4, true, true), "a strike that breaks the whole panel shows it again")
+	var other_panel := _FakePanel.new()
+	world.add_child(other_panel)
+	_check(shows.call(other_panel, 0, false, true), "a body impact break still shows WALL BREAK")
+	_check(shows.call(other_panel, 2, false, false), "impact breaks ignore the strike-hole count")
+	var plain := Node3D.new()
+	world.add_child(plain)
+	hud._pop_label.text = ""
+	GameEvents.wall_broken.emit(plain, Vector3.ZERO, 900.0, Vector3.ZERO)
+	_check(hud._pop_label.text == "WALL BREAK", "walls without the strike fields (before D lands) still announce")
+	# The pop sits in the upper band, off the screen centre where the hole is.
+	var pr := hud._pop_label.get_global_rect()
+	var pop_center_y := pr.position.y + pr.size.y * 0.5
+	var vh := get_viewport().get_visible_rect().size.y
+	_check(pop_center_y < vh * 0.25 and pop_center_y > vh * 0.12, "WALL BREAK pop in the upper band (%.0f%% of height)" % (100.0 * pop_center_y / vh))
+
+## Stand-in for a Destructible with D's round-3 fields.
+class _FakePanel extends Node3D:
+	var strike_holes := 0
+	var last_break_by_strike := false
+	var is_broken := false

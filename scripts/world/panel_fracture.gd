@@ -25,6 +25,11 @@ const SEEDS_MAX := 26
 const VARIANTS := 3
 ## Chunks with a face area under this are "small" (Layers.DEBRIS_SMALL, fade).
 const SMALL_AREA := 0.22
+## Chunks with at least this face area persist for the round; the rest of the
+## large-layer chunks are timed (DebrisManager.MEDIUM_LIFE).
+const PERSIST_AREA := 0.45
+## Prop pieces with at least this volume (m^3) persist.
+const PERSIST_VOLUME := 0.018
 ## Seed placement: exponent > 1 pulls seeds toward the centre.
 const CENTER_BIAS := 1.25
 const CRACK_WIDTH := 0.02
@@ -53,6 +58,7 @@ class Chunk:
 	var shape: ConvexPolygonShape3D   ## Inset hull, relative to origin (flying chunk).
 	var static_shape: ConvexPolygonShape3D  ## Full hull, panel-local (remaining wall).
 	var small: bool
+	var persist: bool                 ## stays for the round (big pieces)
 	var neighbors := PackedInt32Array()
 	var edge_mask := 0
 
@@ -161,6 +167,7 @@ static func _from_polygons(cells: Array, size: Vector3, rng: RandomNumberGenerat
 		c.origin = Vector3(c.centroid.x, c.centroid.y, 0.0)
 		c.volume = area * t
 		c.small = area < SMALL_AREA
+		c.persist = area >= PERSIST_AREA
 		c.mesh = _prism_mesh(poly, -t * 0.5, t * 0.5, c.origin, half, false)
 		c.shape = _prism_shape(poly, t, c.centroid, true)
 		c.static_shape = _prism_shape(poly, t, Vector2.ZERO, false)
@@ -416,6 +423,7 @@ static func build_prop(kind: StringName, size: Vector3) -> FractureSet:
 		c.area = bs.x * bs.z
 		c.volume = bs.x * bs.y * bs.z
 		c.small = c.volume < 0.01
+		c.persist = c.volume >= PERSIST_VOLUME
 		c.mesh = _prism_mesh(c.polygon, center.z - bs.z * 0.5, center.z + bs.z * 0.5, center, Vector2(1e6, 1e6), true)
 		var inset := Vector3(minf(0.01, bs.x * 0.2), minf(0.01, bs.y * 0.2), minf(0.01, bs.z * 0.2))
 		c.shape = _box_points(bs * 0.5 - inset)

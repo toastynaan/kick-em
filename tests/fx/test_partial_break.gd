@@ -110,7 +110,7 @@ func _ready() -> void:
 	# Integration: agent D's real Destructible with local fracture (break_hole).
 	BloodFX.reset()
 	var script: Script = load("res://scripts/world/destructible.gd")
-	var real: Node3D = script.new() if script != null else null
+	var real: Node3D = script.new() if script != null and script.can_instantiate() else null
 	if real == null or not real.has_method(&"break_hole") or not real.has_method(&"is_point_open"):
 		print("note: Destructible.break_hole / is_point_open not available; skipped real panel")
 		if real != null:

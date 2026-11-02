@@ -58,6 +58,14 @@ const LAND_TONE_FADE := 0.3            ## s for the falling-loop tone to fade af
 const AIR_RECOVER_BLEND := 0.15
 const MAX_ANIM_SPEED := 14.0           ## clamp on per-bone velocity taken from animation
 const FLOOR_RAY := 40.0
+const BROKEN_SHOULDER_EXTRA := 30.0    ## deg a broken shoulder's limits widen (each side)
+const BROKEN_ELBOW_EXTRA := 15.0       ## deg past full flexion for a broken elbow
+const BROKEN_ELBOW_HYPER := 40.0       ## deg of hyperextension a broken elbow allows
+const GRIP_SPEED_CAP := 18.0           ## m/s clamp on bones while gripped (same as LimbGrab.BONE_SPEED_MAX)
+const GRIP_SPIN_CAP := 35.0            ## rad/s (same as LimbGrab.BONE_SPIN_MAX)
+const GRIP_FIX := 0.6                  ## fraction of a joint gap closed per pass while gripped
+const GRIP_FIX_ITERS := 2              ## passes per tick (gripped bodies only)
+const GRIP_FIX_MIN := 0.01             ## m: gaps below this are left to Jolt
 
 static var _active_slots := 0
 
@@ -128,6 +136,13 @@ var _dead_still_t := 0.0
 var _ignore_breakables := false
 var _ray: PhysicsRayQueryParameters3D
 var _flight_pose: StringName = &""
+var _gripped := false
+## Gripped-only joint drift fix (tests and the lab switch it off to compare).
+var grip_fix_enabled := true
+var _clock := 0.0                         # game seconds since setup (monotonic)
+var _getup_not_before := 0.0              # delay_getup(): no get-up before this _clock time
+var _arm_broken := [false, false]
+var _j_limp := PackedByteArray()          # joint muscles/tension off (broken arm)
 var _body_radius := PackedFloat32Array()   # bounding radius of each body's shape
 # Hitstop freeze
 var _hitstop_until := -1.0
@@ -169,6 +184,9 @@ func setup(p_host: CharacterBody3D, p_rig: HumanoidRig, p_animator: PoseAnimator
 	_reset_history()
 
 ## Re-apply profile values that live on the bodies (call after changing profile).
+## Touches angular damping only, never mass: a limb grab (agent G) scales the
+## held limb's server mass while gripped, and this controller's mass table
+## (_mass, read once in setup) stays the source of truth for COM and energy.
 func apply_profile() -> void:
 	for pb in _pbs:
 		pb.angular_damp = profile.body_angular_damp
@@ -217,6 +235,7 @@ func _build_tables() -> void:
 	var neutral := PoseLibrary.get_pose(&"neutral")
 	_jn = 0
 	_j_child.clear(); _j_parent.clear(); _j_hinge.clear(); _j_bone.clear(); _j_lim.clear(); _j_inertia.clear(); _j_neutral.clear()
+	_j_limp.clear()
 	for i in _n:
 		var bone: StringName = Bones.PHYSICAL[i]
 		if bone == Bones.HIPS:
@@ -231,6 +250,7 @@ func _build_tables() -> void:
 		_j_inertia.append(rig.get_joint_inertia(bone))
 		var nq = neutral.rot[_skel_idx[i]]
 		_j_neutral.append(nq if nq != null else Quaternion.IDENTITY)
+		_j_limp.append(0)
 		_jn += 1
 	_out_rot.resize(HumanoidRig.BONE_COUNT)
 	_final_basis.resize(HumanoidRig.BONE_COUNT)
@@ -447,7 +467,7 @@ func set_ignore_breakables(ignore: bool) -> void:
 ## above the floor the capsule is left in the air: the Fighter's
 ## move_and_slide gravity brings it down.
 func air_recover() -> bool:
-	if state != State.LAUNCHED or _launch_time < Tuning.AIR_RECOVERY_AFTER or rig == null:
+	if state != State.LAUNCHED or _launch_time < Tuning.AIR_RECOVERY_AFTER or rig == null or _gripped:
 		return false
 	_read_bodies()
 	var com_v := get_com_velocity()
@@ -497,6 +517,103 @@ func kill(velocity: Vector3 = Vector3.ZERO) -> void:
 	_dead_still_t = 0.0
 	_state_t = 0.0
 	_set_state(State.DEAD)
+
+## Upgrade 2. Broken arm (BodyZones.Zone.ARM_L or ARM_R): the shoulder and
+## elbow joints widen (Jolt hard limits and the soft ranges, the elbow can
+## hyperextend), that arm's muscles and neutral tension switch off so it
+## flops in the ragdoll, and the animator hangs it from the shoulder while
+## standing (it swings with the body). Lasts until heal_arms() (round reset).
+func break_arm(zone: int) -> void:
+	if rig == null or not BodyZones.is_arm(zone):
+		return
+	var side := 0 if zone == BodyZones.Zone.ARM_L else 1
+	if _arm_broken[side]:
+		return
+	_arm_broken[side] = true
+	var ua: StringName = Bones.L_UPPER_ARM if side == 0 else Bones.R_UPPER_ARM
+	var la: StringName = Bones.L_LOWER_ARM if side == 0 else Bones.R_LOWER_ARM
+	rig.widen_joint(ua, BROKEN_SHOULDER_EXTRA, BROKEN_SHOULDER_EXTRA)
+	rig.widen_joint(la, BROKEN_ELBOW_EXTRA, BROKEN_ELBOW_HYPER)
+	var k := PI / 180.0
+	for j in _jn:
+		var b: StringName = Bones.PHYSICAL[_j_child[j]]
+		if b == ua or b == la:
+			_j_limp[j] = 1
+			var lim: Array = _j_lim[j]
+			if b == la:
+				lim[0] = Vector2(lim[0].x - BROKEN_ELBOW_HYPER * k, lim[0].y + BROKEN_ELBOW_EXTRA * k)
+			else:
+				for a in 3:
+					lim[a] = Vector2(lim[a].x - BROKEN_SHOULDER_EXTRA * k, lim[a].y + BROKEN_SHOULDER_EXTRA * k)
+	if animator:
+		animator.set_arm_broken(side, true)
+
+func is_arm_broken(zone: int) -> bool:
+	if not BodyZones.is_arm(zone):
+		return false
+	return _arm_broken[0 if zone == BodyZones.Zone.ARM_L else 1]
+
+## Undo break_arm() on both arms (round restart).
+func heal_arms() -> void:
+	if rig == null:
+		return
+	for side in 2:
+		if not _arm_broken[side]:
+			continue
+		_arm_broken[side] = false
+		rig.widen_joint(Bones.L_UPPER_ARM if side == 0 else Bones.R_UPPER_ARM, 0.0, 0.0)
+		rig.widen_joint(Bones.L_LOWER_ARM if side == 0 else Bones.R_LOWER_ARM, 0.0, 0.0)
+	var k := PI / 180.0
+	for j in _jn:
+		var b: StringName = Bones.PHYSICAL[_j_child[j]]
+		if b in [Bones.L_UPPER_ARM, Bones.L_LOWER_ARM, Bones.R_UPPER_ARM, Bones.R_LOWER_ARM]:
+			var spec: Dictionary = HumanoidRig.JOINT_LIMITS[b]
+			_j_lim[j] = [spec["x"] * k, spec.get("y", Vector2.ZERO) * k, spec.get("z", Vector2.ZERO) * k]
+			_j_limp[j] = 0
+	if animator:
+		animator.heal_arms()
+
+## Upgrade 2. Held by a limb grab (agent G): the body stays a limp ragdoll in
+## LAUNCHED (no muscles, no landing/grounded/get-up/settling, no air
+## recovery) until set_gripped(false), then lands and gets up normally.
+## A standing body is put into full ragdoll here if the caller has not done
+## it. Backstop clamp on bone speed while held (G clamps tighter).
+func set_gripped(on: bool) -> void:
+	if rig == null or on == _gripped:
+		return
+	_gripped = on
+	if on:
+		if not _full:
+			launch(Vector3.ZERO, get_center_of_mass(), Bones.CHEST)
+		elif _dead_frozen:
+			_unfreeze_dead()
+		if state == State.GROUNDED:
+			_set_state(State.LAUNCHED)
+		_release_slot()
+		_set_tones(0.0)
+		if animator:
+			animator._hold(&"neutral", 0.2)
+	else:
+		_launch_time = 0.0
+		_landed = false
+		_land_time = 0.0
+		_slow_time = 0.0
+		_dead_still_t = 0.0
+		_state_t = 0.0
+
+func is_gripped() -> bool:
+	return _gripped
+
+## Upgrade 2 (ground finishers): the downed body's automatic get-up starts no
+## sooner than `seconds` (game time) from now. Call it as often as you like
+## while the body is launched or lying down; it only ever extends the wait,
+## never shortens it. No effect once the get-up has begun.
+func delay_getup(seconds: float) -> void:
+	_getup_not_before = maxf(_getup_not_before, _clock + maxf(seconds, 0.0))
+
+## Game seconds until the get-up may start (0 = not delayed).
+func get_getup_delay_left() -> float:
+	return maxf(_getup_not_before - _clock, 0.0)
 
 ## Debug/restart: snap straight back to ANIMATED standing at the pelvis.
 func force_recover() -> void:
@@ -659,6 +776,7 @@ func _physics_process(delta: float) -> void:
 			last_tick_ms = (Time.get_ticks_usec() - t0) / 1000.0
 			return
 	_state_t += delta
+	_clock += delta
 	match state:
 		State.ANIMATED:
 			_tick_animated(delta)
@@ -759,6 +877,9 @@ func _tick_launched(delta: float) -> void:
 	_launch_time += delta
 	_read_bodies()
 	_follow_host()
+	if _gripped:
+		_tick_gripped()
+		return
 	if animator:
 		var want: StringName = &"neutral" if _landed else &"fall"
 		if _flight_pose != &"":
@@ -798,6 +919,72 @@ func _tick_launched(delta: float) -> void:
 		landed.emit()
 		_enter_grounded()
 
+## Held by a limb grab: limp, no landing logic, backstop speed clamp, and an
+## extra joint position pass (fast whips open the free elbows and ankles:
+## Jolt's two global position steps are not enough for a body swung by one
+## limb, and raising them would cost every ragdoll).
+func _tick_gripped() -> void:
+	if grip_fix_enabled:
+		_fix_joint_drift()
+	for i in _n:
+		if not _sim[i] or _severed[i]:
+			continue
+		if _lv[i].length() > GRIP_SPEED_CAP:
+			_lv[i] = _lv[i].limit_length(GRIP_SPEED_CAP)
+			PhysicsServer3D.body_set_state(_rids[i], PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, _lv[i])
+		if _av[i].length() > GRIP_SPIN_CAP:
+			_av[i] = _av[i].limit_length(GRIP_SPIN_CAP)
+			PhysicsServer3D.body_set_state(_rids[i], PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY, _av[i])
+	_apply_torques(false)
+	_write_physics_pose(1.0)
+
+## Gripped bodies only: GRIP_FIX_ITERS Gauss-Seidel passes that move each
+## joint's two bodies back together by GRIP_FIX of the gap, weighted by their
+## current server masses (agent G makes the held limb heavier). The first
+## pass also removes the velocity that would open each gap further (an
+## inelastic correction), so nothing here adds energy.
+func _fix_joint_drift() -> void:
+	var inv := PackedFloat64Array()
+	inv.resize(_n)
+	for i in _n:
+		var m: float = PhysicsServer3D.body_get_param(_rids[i], PhysicsServer3D.BODY_PARAM_MASS)
+		inv[i] = 1.0 / maxf(m, 0.01)
+	var moved := PackedByteArray()
+	moved.resize(_n)
+	var vmoved := PackedByteArray()
+	vmoved.resize(_n)
+	for it in GRIP_FIX_ITERS:
+		for j in _jn:
+			var c := _j_child[j]
+			var pa := _j_parent[j]
+			if not _sim[c] or not _sim[pa] or _severed[c] or _severed[pa]:
+				continue
+			var a: Vector3 = (_xf[pa] * _off_inv[pa]) * _rest_origin[_j_bone[j]]
+			var err: Vector3 = a - (_xf[c] * _off_inv[c]).origin
+			if err.length_squared() < GRIP_FIX_MIN * GRIP_FIX_MIN:
+				continue
+			var wsum := inv[c] + inv[pa]
+			_xf[c].origin += err * (GRIP_FIX * inv[c] / wsum)
+			_xf[pa].origin -= err * (GRIP_FIX * inv[pa] / wsum)
+			moved[c] = 1
+			moved[pa] = 1
+			if it == 0:
+				# Also stop the joint opening further next step: remove the part
+				# of the relative velocity that separates the two bodies along
+				# the gap (inelastic, so it only removes energy).
+				var n := err.normalized()
+				var sep := (_lv[pa] - _lv[c]).dot(n)
+				if sep > 0.0:
+					_lv[c] += n * (sep * inv[c] / wsum)
+					_lv[pa] -= n * (sep * inv[pa] / wsum)
+					vmoved[c] = 1
+					vmoved[pa] = 1
+	for i in _n:
+		if moved[i]:
+			PhysicsServer3D.body_set_state(_rids[i], PhysicsServer3D.BODY_STATE_TRANSFORM, _xf[i])
+		if vmoved[i]:
+			PhysicsServer3D.body_set_state(_rids[i], PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, _lv[i])
+
 func _enter_grounded() -> void:
 	_release_slot()
 	_set_tones(0.0)
@@ -814,13 +1001,13 @@ func _tick_grounded(delta: float) -> void:
 	_follow_host()
 	_apply_torques(false)
 	_write_physics_pose(1.0)
-	if auto_getup and _state_t >= getup_delay:
+	if auto_getup and _state_t >= getup_delay and _clock >= _getup_not_before:
 		if _lv[_hips_i].length() < GETUP_MAX_PELVIS_SPEED or _state_t >= getup_delay + GETUP_WAIT_MAX:
 			start_getup()
 
 ## Begin the get-up now (from GROUNDED). Face up or down from the pelvis.
 func start_getup() -> void:
-	if state != State.GROUNDED:
+	if state != State.GROUNDED or _gripped:
 		return
 	_read_bodies()
 	var bodies := _bone_world_transforms()
@@ -870,6 +1057,7 @@ func _tick_getup(delta: float) -> void:
 
 func _finish_to_animated() -> void:
 	_flight_pose = &""
+	_gripped = false
 	if animator:
 		animator.locked = false
 	_launch_time = INF
@@ -882,6 +1070,9 @@ func _tick_dead(delta: float) -> void:
 		return
 	_read_bodies()
 	_follow_host()
+	if _gripped:
+		_tick_gripped()
+		return
 	_apply_torques(false)
 	_write_physics_pose(1.0)
 	var fastest := 0.0
@@ -1217,10 +1408,12 @@ func _apply_torques(muscles: bool) -> void:
 				tw += ax * ((ly.x - ly.y * w_ax) * i_t)
 		var err := Vector3.ZERO
 		var kd := 0.0
-		if p.use_neutral:
+		if _j_limp[j]:
+			pass
+		elif p.use_neutral:
 			err += _rotvec(_j_neutral[j] * q.inverse()) * p.neutral_kn
 			kd += p.neutral_kd
-		var tone := _tone[c]
+		var tone := _tone[c] if not _j_limp[j] else 0.0
 		if use_m and tone > 0.0:
 			err += _rotvec(anim[_j_bone[j]] * q.inverse()) * (p.muscle_kp * tone)
 			kd += p.muscle_kd * tone

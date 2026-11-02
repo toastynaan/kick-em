@@ -42,18 +42,37 @@ const ROUTE_REPLAN := 0.5           ## s between waypoint searches while routing
 const GETUP_PAUSE := 0.6            ## s after a get-up before attacking again
 const REQUEST_RETRY := 0.25         ## s between refused token requests
 const LONE_INTERVAL := Vector2(0.35, 1.0)  ## s between attacks for a lone enemy (duel)
-const REQUEST_MAX_DIST := 5.5       ## m: closer than this before asking for a melee token (it must arrive within GIVE_UP_TIME)
+const REQUEST_MAX_DIST := 6.0       ## m: closer than this before asking for a melee token (it must arrive within GIVE_UP_TIME)
 const FACE_TOLERANCE := 0.8         ## dot(forward, to player) needed to swing
 const FACE_WAIT_MAX := 0.35         ## s: swing anyway if turning takes longer
 const START_FAIL_MAX := 30          ## refused start_enemy_attack calls before giving up the token
 ## Centre-to-centre distance at which each move starts.
 const MOVE_RANGE := {&"e_hook": 1.4, &"e_kick": 1.6, &"e_heavy": 1.6, &"e_grab": 1.05,
-	&"e_charge": 5.5, &"e_throw_debris": 11.0}
+	&"e_charge": 5.5, &"e_throw_debris": 11.0, &"e_sweep": 1.45}
 ## Minimum distance for ranged / charging moves.
 const MOVE_MIN_RANGE := {&"e_charge": 2.6, &"e_throw_debris": 3.5}
 ## Tell length per move (game s, inside [TELL_MIN, TELL_MAX]); heavier = longer.
 const MOVE_TELL := {&"e_hook": 0.38, &"e_kick": 0.46, &"e_grab": 0.42, &"e_heavy": 0.54,
-	&"e_charge": 0.6, &"e_throw_debris": 0.5}
+	&"e_charge": 0.6, &"e_throw_debris": 0.5, &"e_sweep": 0.44}
+## Upgrade 2 height mix: move weights per archetype (HIGH e_hook / e_grab,
+## MID e_kick / e_heavy, LOW e_sweep). Moves an archetype lacks (e_sweep
+## before MoveLibrary has it) drop out. Shield and Brute keep their identity:
+## no sweeps; the Brute charges from range (_pick_move).
+const MOVE_MIX := {
+	&"grunt": {&"e_hook": 0.45, &"e_kick": 0.35, &"e_sweep": 0.2},
+	&"brawler": {&"e_hook": 0.4, &"e_heavy": 0.35, &"e_sweep": 0.25},
+	&"shield": {&"e_hook": 0.55, &"e_heavy": 0.45},
+	&"brute": {&"e_heavy": 0.7, &"e_grab": 0.3},
+	&"duelist": {&"e_hook": 0.25, &"e_kick": 0.2, &"e_heavy": 0.15, &"e_grab": 0.15, &"e_sweep": 0.25},
+	&"thrower": {&"e_hook": 0.6, &"e_kick": 0.4},
+}
+## Hit heights when MoveLibrary has no entry (MoveData.hit_level is the source).
+const MOVE_LEVEL_FALLBACK := {&"e_hook": HitInfo.Level.HIGH, &"e_grab": HitInfo.Level.HIGH,
+	&"e_kick": HitInfo.Level.MID, &"e_heavy": HitInfo.Level.MID, &"e_charge": HitInfo.Level.MID,
+	&"e_throw_debris": HitInfo.Level.MID, &"e_sweep": HitInfo.Level.LOW}
+const MAX_SAME_LEVEL := 2           ## no third attack in a row at one height
+## Moves a fighter with a broken arm still uses (kicks, the shoulder charge).
+const ARM_FREE_MOVES: Array[StringName] = [&"e_kick", &"e_sweep", &"e_charge"]
 const TELL_JITTER := 0.03
 const EASY_TELL_BONUS := 0.05
 const SPEED_MULT := {&"shield": 0.65, &"brute": 0.75}
@@ -97,7 +116,11 @@ const DETOUR_TIME := 0.8
 const NEAR_JOIN_INTERVAL := Vector2(0.3, 0.8)  ## s: max wait after moving up to the NEAR ring
 ## Crowd enemies use Tuning.ATTACK_INTERVAL x this, start to start (the
 ## director's pacing keeps the crowd at one grant per 1-1.5 s on Normal).
-const CROWD_INTERVAL_MULT := 0.7
+const CROWD_INTERVAL_MULT := 0.5
+## Where in the NEAR ring band an enemy waits (0 = inner edge). Close to the
+## inner edge so a granted token turns into a swing quickly (crowd rate).
+const NEAR_RING_BIAS := {&"default": Vector2(0.0, 0.35), &"duelist": Vector2(0.05, 0.3),
+	&"thrower": Vector2(0.4, 0.8)}
 const ENTRY_FIGHT_DIST := 4.0       ## m: an entering enemy inside the courtyard turns to fight this close
 const PLAYER_OUTSIDE_GROW := 2.5    ## m: play area margin around a player outside the courtyard
 const OUTSIDE_RETURN_TIME := 2.5    ## s outside the courtyard before walking a spawn path back in
@@ -118,7 +141,7 @@ const CLEAR_HEIGHT := 1.5           ## m: its height (bottom ~0.2 m above the fl
 const CLEAR_CENTER := 0.95          ## m: its centre above the floor
 const HEAD_PROBE_RISE := 0.8        ## m above WALL_PROBE_HEIGHT for the second forward ray
 const SPOT_RADIUS := 0.45           ## m: free radius a steering target needs
-const BODY_CLEARANCE := 0.45        ## m: wall hits closer than this to the movement line block it
+const BODY_CLEARANCE := 0.32        ## m: wall hits closer than this to the movement line block it (~body radius)
 const RANGE_SLACK := 0.4            ## m added to a move's range once the approach stalls
 # Navigation (AINavGrid via AttackDirector)
 const NAV_REPLAN := 0.6             ## s between path re-plans
@@ -126,12 +149,13 @@ const NAV_GOAL_MOVE := 1.0          ## m the goal may move before an early re-pl
 const NAV_LOOKAHEAD := 8            ## path points checked for a clear shortcut
 const NAV_LOOK_EVERY := 0.12        ## s between shortcut checks
 const NAV_STUCK := 1.2              ## s without progress along a path before a local grid refresh
+const UNREACHABLE_WAIT := 1.5       ## s before asking again after the player proved unreachable
 # Duelist vanish step (free, BT3 flavour) when it cannot reach an open player
 const VSTEP_NO_PROGRESS := 2.5      ## s without getting VSTEP_PROGRESS closer
 const VSTEP_PROGRESS := 0.5         ## m
 const VSTEP_PATH_LEN := 14.0        ## m: a longer path triggers it at once
 const VSTEP_MIN_DIST := 2.2         ## m: closer than this it just walks
-const VSTEP_RADIUS := 2.5           ## m from the player
+const VSTEP_RADII: Array[float] = [2.5, 1.8, 3.2]  ## m from the player, in order of preference
 const VSTEP_HIDE := 0.12            ## s hidden before the teleport
 const VSTEP_SHOW := 0.05            ## s after reappearing before it acts
 const VSTEP_COOLDOWN := 6.0
@@ -166,6 +190,7 @@ var _block_until := 0.0             ## game time (Duelist plain block)
 var _player_block_time := 0.0
 var _player_attacking := false
 var _ring_bias := 0.5
+var _near_bias := 0.2
 var _strafe_sign := 1.0
 var _strafe_timer := 0.0
 var _taunt_timer := 0.0
@@ -215,8 +240,13 @@ var _fetch_cooldown_until := 0.0
 var counters_started := 0
 ## Duelist vanish steps taken (tests, debugging).
 var vanish_steps := 0
+var _arm_broken := false
+var _recent_levels: Array[int] = []
 ## Length of the current nav path (m; INF when the grid found none).
 var nav_path_length := 0.0
+## The grid says the current goal cannot be reached on foot.
+var nav_unreachable := false
+var _unreachable_until := 0.0
 var _nav_path := PackedVector3Array()
 var _nav_goal := Vector3.INF
 var _npath_age := INF
@@ -250,6 +280,8 @@ func _ready() -> void:
 	_rng.randomize()
 	var bias: Vector2 = RING_BIAS.get(fighter.archetype, Vector2(0.2, 0.7))
 	_ring_bias = _rng.randf_range(bias.x, bias.y)
+	var near_bias: Vector2 = NEAR_RING_BIAS.get(fighter.archetype, NEAR_RING_BIAS[&"default"])
+	_near_bias = _rng.randf_range(near_bias.x, near_bias.y)
 	_strafe_sign = 1.0 if _rng.randf() < 0.5 else -1.0
 	_strafe_timer = _rng.randf_range(STRAFE_SWITCH.x, STRAFE_SWITCH.y)
 	_taunt_timer = _rng.randf_range(TAUNT_INTERVAL.x, TAUNT_INTERVAL.y)
@@ -258,6 +290,7 @@ func _ready() -> void:
 	if fighter.combat:
 		fighter.combat.attack_ended.connect(_on_attack_ended)
 	GameEvents.perfect_dodge.connect(_on_perfect_dodge)
+	GameEvents.arm_broken.connect(_on_arm_broken)
 	GameEvents.attack_whiff.connect(_on_attack_whiff)
 	AttackDirector.register_enemy(fighter)
 
@@ -342,7 +375,7 @@ func _physics_process(delta: float) -> void:
 
 func _is_disabled() -> bool:
 	var disabled := fighter.is_down() or fighter.is_in_hitstun() \
-		or (fighter.combat != null and fighter.combat.held_by != null)
+		or AttackDirector.is_enemy_impaired(fighter)
 	if fighter.is_down():
 		_was_down = true
 	if disabled and mode == Mode.ENTRY:
@@ -500,7 +533,7 @@ func _do_ring(delta: float, player: Fighter) -> void:
 	var ring := AttackDirector.get_ring(fighter)
 	var far := ring != AttackDirector.Ring.NEAR or fighter.archetype == &"thrower"
 	var band: Vector2 = Tuning.FAR_RING if far else Tuning.NEAR_RING
-	var radius := lerpf(band.x, band.y, _ring_bias)
+	var radius := lerpf(band.x, band.y, _ring_bias if far else _near_bias)
 	_want_guard = _guard_wanted(d, false)
 	if _fetch_rubble(delta, center):
 		return
@@ -644,12 +677,14 @@ func _tick_request(delta: float, player: Fighter) -> void:
 		return
 	if _fetch_target != null:
 		return  # the Thrower fetches its rubble first
+	if _time < _unreachable_until:
+		return  # the player is walled off from here
 	var max_dist := SHIELD_REQUEST_DIST if fighter.archetype == &"shield" else REQUEST_MAX_DIST
 	if not fighter.archetype in [&"thrower", &"brute"] and dist > max_dist:
 		return
 	# Only the Duelist's counter / whiff punish skip the crowd pacing; a
-	# Brawler punishing a blocker just skips its own interval.
-	if AttackDirector.request_token(fighter, _counter_pending or _time < _punish_until):
+	# Brawler punishing a blocker skips its interval and the turn order.
+	if AttackDirector.request_token(fighter, _counter_pending or _time < _punish_until, _brawler_wants_grab()):
 		_move_id = _pick_move(dist, player)
 		_has_move = true
 		_approach_time = 0.0
@@ -692,6 +727,12 @@ func _do_token_turn(delta: float, player: Fighter) -> void:
 	if dist > max_r:
 		_in_range_time = 0.0
 		var goal := _route(_approach_goal(center, dir, max_r * 0.75), center)
+		if nav_unreachable and fighter.archetype != &"duelist":
+			# Walled off from the player: give the turn to someone who can
+			# reach it (the Duelist vanish-steps instead).
+			_give_up_token()
+			_unreachable_until = _time + UNREACHABLE_WAIT
+			return
 		var v := _flat(goal - _pos()).normalized()
 		_finish_move(v, center, false)
 		return
@@ -747,48 +788,105 @@ func _new_interval() -> float:
 	return _rng.randf_range(Tuning.ATTACK_INTERVAL.x, Tuning.ATTACK_INTERVAL.y) * CROWD_INTERVAL_MULT
 
 func _pick_move(dist: float, _player: Fighter) -> StringName:
-	var moves: Array = fighter.config.get("moves", [&"e_hook"])
-	var pick: StringName = &"e_hook"
-	var roll := _rng.randf()
+	var pick: StringName = &""
 	match fighter.archetype:
-		&"grunt":
-			pick = &"e_hook" if roll < 0.6 else &"e_kick"
 		&"brawler":
-			if _brawler_wants_grab():
+			if _brawler_wants_grab() and not _arm_broken:
 				pick = &"e_grab"
-			else:
-				pick = &"e_hook" if roll < 0.55 else &"e_heavy"
-		&"shield":
-			pick = &"e_hook" if roll < 0.6 else &"e_heavy"
 		&"brute":
-			if dist >= 3.0 and roll < 0.75:
-				pick = &"e_charge"
-			elif dist >= 3.0:
-				pick = &"e_heavy" if _rng.randf() < 0.65 else &"e_grab"
-			else:
-				pick = &"e_heavy" if roll < 0.7 else &"e_grab"
+			if dist >= 3.0 and _rng.randf() < 0.75:
+				pick = &"e_charge"  # a shoulder charge: fine with a broken arm too
 		&"duelist":
 			if _counter_pending:
-				pick = &"e_hook"
+				pick = &"e_hook" if not _arm_broken else &"e_kick"
 			elif _time < _punish_until:
 				pick = &"e_kick"  # a whiff is punished with a launch
-			elif _player_block_time > 0.5 and roll < 0.7:
-				pick = &"e_grab"
-			elif roll < 0.35:
-				pick = &"e_hook"
-			elif roll < 0.6:
-				pick = &"e_kick"
-			elif roll < 0.8:
-				pick = &"e_heavy"
-			else:
+			elif _player_block_time > 0.5 and _rng.randf() < 0.7 and not _arm_broken:
 				pick = &"e_grab"
 		&"thrower":
-			pick = &"e_hook" if dist < 2.5 else &"e_throw_debris"
-		_:
-			pick = moves[_rng.randi() % moves.size()] if not moves.is_empty() else &"e_hook"
-	if not moves.is_empty() and not pick in moves:
-		pick = moves[0]
+			if dist >= 2.5:
+				pick = &"e_throw_debris"
+	if pick == &"":
+		pick = _weighted_pick()
+	_note_level(pick)
 	return pick
+
+## Weighted pick from MOVE_MIX: only moves the archetype has (e_sweep once
+## MoveLibrary has it), kicks only with a broken arm, and never a third
+## attack in a row at the same height (so crouching or jumping on a guess
+## does not always work, nor does blocking everything).
+func _weighted_pick() -> StringName:
+	var mix: Dictionary = MOVE_MIX.get(fighter.archetype, {})
+	var cands: Array[StringName] = []
+	var weights: Array[float] = []
+	for m: StringName in mix:
+		if not _move_available(m):
+			continue
+		if _arm_broken and not m in ARM_FREE_MOVES:
+			continue
+		cands.append(m)
+		weights.append(float(mix[m]))
+	if cands.is_empty():
+		if _arm_broken and _move_available(&"e_kick", true):
+			return &"e_kick"
+		var moves: Array = fighter.config.get("moves", [&"e_hook"])
+		return moves[0] if not moves.is_empty() else &"e_hook"
+	# Height variety: drop the repeated height when the last MAX_SAME_LEVEL matched.
+	if _recent_levels.size() >= MAX_SAME_LEVEL:
+		var last: int = _recent_levels[-1]
+		var same := true
+		for l in _recent_levels.slice(_recent_levels.size() - MAX_SAME_LEVEL):
+			same = same and l == last
+		if same:
+			var keep_c: Array[StringName] = []
+			var keep_w: Array[float] = []
+			for i in cands.size():
+				if move_level(cands[i]) != last:
+					keep_c.append(cands[i])
+					keep_w.append(weights[i])
+			if not keep_c.is_empty():
+				cands = keep_c
+				weights = keep_w
+	var total := 0.0
+	for w in weights:
+		total += w
+	var roll := _rng.randf() * total
+	for i in cands.size():
+		roll -= weights[i]
+		if roll <= 0.0:
+			return cands[i]
+	return cands[-1]
+
+## The archetype can use `move`: listed in its Tuning moves, or e_sweep /
+## e_kick added by the Upgrade 2 height mix once MoveLibrary has them.
+func _move_available(move: StringName, any_archetype := false) -> bool:
+	var listed: Array = fighter.config.get("moves", [])
+	if move in listed:
+		return true
+	if not (any_archetype or move in MOVE_MIX.get(fighter.archetype, {})):
+		return false
+	return MoveLibrary.has_move(move)
+
+## Hit height of an enemy move: MoveData.hit_level from B's MoveLibrary,
+## else the spec's table (hook and grab HIGH, kicks MID, sweep LOW). While
+## B has not tagged a move (hit_level still the MID default) the table wins
+## where it says otherwise.
+static func move_level(move: StringName) -> int:
+	var fallback := int(MOVE_LEVEL_FALLBACK.get(move, HitInfo.Level.MID))
+	if MoveLibrary.has_move(move):
+		var m := MoveLibrary.get_move(move)
+		if m != null and (m.hit_level != HitInfo.Level.MID or fallback == HitInfo.Level.MID):
+			return m.hit_level
+	return fallback
+
+func _note_level(move: StringName) -> void:
+	_recent_levels.append(move_level(move))
+	if _recent_levels.size() > 4:
+		_recent_levels.remove_at(0)
+
+func _on_arm_broken(f: Node3D, _zone: int) -> void:
+	if f == fighter:
+		_arm_broken = true
 
 func _tell_for(move_id: StringName) -> float:
 	if _counter_pending or _time < _punish_until:
@@ -1148,6 +1246,7 @@ func _route(goal: Vector3, anchor: Vector3) -> Vector3:
 		_side_locked = false
 		_nav_path = PackedVector3Array()
 		nav_path_length = 0.0
+		nav_unreachable = false
 		return goal
 	_blocked_time += dt
 	if _blocked_time < SIDE_ROUTE_BLOCKED:
@@ -1203,10 +1302,14 @@ func _nav_route(me: Vector3, goal: Vector3) -> Vector3:
 			_npath_age = 0.0
 			_nav_index = 0
 			_nav_look_age = INF
-			nav_path_length = AINavGrid.path_length(me, p)
+			# A partial path stops at the closest reachable cell: the goal is
+			# walled off (a sealed room, a hole too small to walk through).
+			nav_unreachable = not AttackDirector.nav.last_path_complete
+			nav_path_length = INF if nav_unreachable else AINavGrid.path_length(me, p)
 		elif AttackDirector.nav_has_budget():
 			_nav_path = PackedVector3Array()  # no path at all
 			nav_path_length = INF
+			nav_unreachable = true
 	if _nav_path.is_empty():
 		return Vector3.INF
 	while _nav_index < _nav_path.size() - 1 and _flat(_nav_path[_nav_index] - me).length() < AINavGrid.CELL * 1.5:
@@ -1291,20 +1394,22 @@ func _finish_vanish_step(player: Fighter) -> void:
 	vanish_steps += 1
 	vanish_stepped.emit(_vstep_spot)
 
-## A clear floor spot VSTEP_RADIUS from the player with a clear line to it,
+## A clear floor spot VSTEP_RADII from the player with a clear line to it,
 ## preferring the player's front (so the Duelist reappears in view).
 func _vanish_spot(player: Fighter) -> Vector3:
 	var center := player.get_ground_position()
 	var fwd := _flat(player.get_forward())
 	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3.FORWARD
-	for k in 12:
-		@warning_ignore("integer_division")
-		var i: int = (k + 1) / 2 * (1 if k % 2 == 1 else -1)  # 0, 1, -1, 2, -2, ...
-		var c := center + fwd.rotated(Vector3.UP, deg_to_rad(30.0) * i) * VSTEP_RADIUS
-		if AttackDirector.nav_ready() and not AttackDirector.nav.is_walkable(c):
-			continue
-		if _spot_free(c) and _clear_line(center, c):
-			return c
+	# In a cramped room (an office with desks) 2.5 m may not fit: try others.
+	for radius: float in VSTEP_RADII:
+		for k in 12:
+			@warning_ignore("integer_division")
+			var i: int = (k + 1) / 2 * (1 if k % 2 == 1 else -1)  # 0, 1, -1, 2, -2, ...
+			var c := center + fwd.rotated(Vector3.UP, deg_to_rad(30.0) * i) * radius
+			if AttackDirector.nav_ready() and not AttackDirector.nav.is_walkable(c):
+				continue
+			if _spot_free(c) and _clear_line(center, c):
+				return c
 	return Vector3.INF
 
 ## A point beside the blocked line (SIDE_ROUTE_OFFSETS) seen from here and

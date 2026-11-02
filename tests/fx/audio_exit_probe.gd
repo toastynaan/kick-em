@@ -6,11 +6,23 @@ extends Node
 
 func _ready() -> void:
 	var t0 := Time.get_ticks_msec()
-	while not AudioFX.is_ready() and Time.get_ticks_msec() - t0 < 20000:
+	while not AudioFX.is_ready() and Time.get_ticks_msec() - t0 < 5000:
 		await get_tree().process_frame
-	for id: StringName in AudioFX.get_ids():
+	# On a loaded machine the background synth may not be done: build a few
+	# short sounds here so AudioFX's own players still play mid-quit.
+	var ids: Array[StringName] = AudioFX.get_ids()
+	if not AudioFX.is_ready():
+		ids = [&"ui", &"punch", &"clank", &"miss"]
+		for id in ids:
+			var wav := AudioFX.generate(id, 0)
+			AudioFX._mutex.lock()
+			(AudioFX._streams[id] as Array).append(wav)
+			AudioFX._mutex.unlock()
+	var started := 0
+	for id: StringName in ids:
 		AudioFX.play(id, Vector3(1, 1, 1))
 		AudioFX.play_ui(id)
+		started += 2
 	await get_tree().process_frame
-	print("PROBE DONE ready=%s" % AudioFX.is_ready())
+	print("PROBE DONE playing=%s started=%d" % [AudioFX._used, started])
 	get_tree().quit(0)

@@ -24,7 +24,7 @@ const SPRAY_POOL := 12            ## Hit-spray emitters, round-robin
 const SPRAY_MAX_DROPS := 96       ## Droplets per spray emitter at full energy
 const STUMP_POOL := 4             ## Arterial stump emitters
 const SPARK_POOL := 6             ## Block sparks
-const DUST_POOL := 6              ## Dust puff + chip emitter pairs
+const DUST_POOL := 8              ## Dust puff + chip emitter pairs
 const STUMP_TIME := 2.0           ## s of arterial spray (spec)
 const STUMP_PULSE_HZ := 2.2       ## Heartbeat pulses per second
 const STUMP_DRIP_EVERY := 0.3     ## s between stump splat requests
@@ -56,7 +56,11 @@ const PIECE_TRAIL_MAX := 8        ## decals per severed piece
 const HIT_DAMAGE_TO_ENERGY := 25.0  ## J per damage point for hits that do not launch
 const WALL_BODY_RADIUS := 2.5     ## m; a wall break bleeds only with a launched body this close
 const HOLE_FALLBACK_RADIUS := 0.9  ## m; decals this close to a hole go when the panel has no is_point_open
-const CONCRETE_DUST_ENERGY := 2500.0  ## J; body hits on concrete at or above this kick up dust and chips
+const STRIKE_FULL_POWER := 400.0  ## wall-strike power that makes the biggest dust and chips
+const STRIKE_DUST_ENERGY := Vector2(600.0, 7000.0)  ## dust() energy for the weakest .. full-power strike
+const STRIKE_FLASH_FULL := 500.0  ## strike power for the largest wall contact flash (capped at 0.45)
+const CONCRETE_DUST_ENERGY := 2500.0  ## J; hard-surface hits at or above this also throw chips
+const IMPACT_DUST_ENERGY := 800.0  ## J; body hits on floor and walls at or above this kick up dust (U7)
 const ARMOR_SPARK_SCALE := 0.6    ## armor spark size relative to a block spark
 const DECAL_CULL_MASK := 0xFFFFF & ~(Layers.VIS_CHARACTERS | Layers.VIS_FX)
 const RAY_MASK := Layers.WORLD | Layers.DESTRUCTIBLE
@@ -163,6 +167,7 @@ func _ready() -> void:
 	_ray.hit_back_faces = false
 	_build_textures()
 	_build_emitters()
+	_build_upgrade2()
 	_connect_events()
 
 
@@ -246,12 +251,15 @@ func reset() -> void:
 	_dead_watch.clear()
 	_lying.clear()
 	_pooled.clear()
+	_reset_upgrade2()
 
 
 # --- Extra API ---------------------------------------------------------------
 
-## Debris / dust puff (wall breaks and cracks, gore-off hits). No blood.
-func dust(position: Vector3, color: Color, energy: float, direction := Vector3.UP) -> void:
+## Debris / dust puff (wall breaks and cracks, impacts, gore-off hits). No
+## blood. `chips` adds the small debris chips.
+func dust(position: Vector3, color: Color, energy: float, direction := Vector3.UP, chips := true,
+		chip_scale := 1.0) -> void:
 	var i := _dust_next
 	_dust_next = (_dust_next + 1) % _puffs.size()
 	var t := clampf(energy / 8000.0, 0.0, 1.0)
@@ -266,15 +274,19 @@ func dust(position: Vector3, color: Color, energy: float, direction := Vector3.U
 	puff.global_transform = xf
 	puff.visible = true
 	puff.restart()
-	var chips := _chips[i]
-	var cpm := chips.process_material as ParticleProcessMaterial
+	if not chips:
+		return
+	var ce := _chips[i]
+	var cpm := ce.process_material as ParticleProcessMaterial
 	cpm.color = color.darkened(0.15)
+	cpm.scale_min = 0.5 * chip_scale
+	cpm.scale_max = 1.6 * chip_scale
 	cpm.initial_velocity_min = lerpf(1.0, 2.5, t)
 	cpm.initial_velocity_max = lerpf(2.5, 7.0, t)
-	chips.amount_ratio = lerpf(0.2, 1.0, t)
-	chips.global_transform = xf
-	chips.visible = true
-	chips.restart()
+	ce.amount_ratio = lerpf(0.2, 1.0, t)
+	ce.global_transform = xf
+	ce.visible = true
+	ce.restart()
 
 ## Small spark burst (blocked hits; armor at scale < 1).
 func spark(position: Vector3, normal: Vector3, scale := 1.0) -> void:
@@ -326,10 +338,12 @@ func refresh_blood_level(fighter: Node3D) -> void:
 	if not is_instance_valid(fighter):
 		return
 	var level := _blood_level(fighter)
+	var spread := PLAYER_BLOOD_SPREAD if fighter.is_in_group(&"player") else 1.0
 	for part in _mesh_parts(fighter):
 		var mat := _part_material(part)
 		if mat != null:
 			mat.set_shader_parameter(&"blood_level", level)
+			mat.set_shader_parameter(&"blood_spread", spread)
 
 
 # =============================================================================
@@ -347,14 +361,24 @@ func _connect_events() -> void:
 	GameEvents.fighter_damaged.connect(_on_fighter_damaged)
 	GameEvents.wave_started.connect(_on_wave_started)
 	GameEvents.armor_absorbed.connect(_on_armor_absorbed)
+	GameEvents.aim_zone_changed.connect(_on_aim_zone_changed)
+	GameEvents.dazed.connect(_on_dazed)
+	GameEvents.stumbled.connect(_on_stumbled)
+	GameEvents.tripped.connect(_on_tripped)
+	GameEvents.arm_broken.connect(_on_arm_broken)
+	GameEvents.wall_struck.connect(_on_wall_struck)
 
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null or not is_instance_valid(info.victim):
 		return
 	var e := maxf(info.energy, info.damage * HIT_DAMAGE_TO_ENERGY)
 	var at := _hit_point(info)
-	_wound(info.victim, at, clampf(info.damage / 100.0, 0.15, 1.0), info.hit_direction)
+	# The player's wounds are drawn larger so damage taken reads without the HP bar.
+	var scale := PLAYER_WOUND_SCALE if info.victim.is_in_group(&"player") else 1.0
+	_wound(info.victim, at, clampf(info.damage / 100.0, 0.15, 1.0), info.hit_direction, scale)
 	_flash(info.victim)
+	if info.kind != &"grab":
+		impact_flash(at, impact_power(info), info.charge_level >= 3)
 	# Spray above a jab only. Grabs do not bleed; a throw bleeds when it lands (body_impact).
 	if info.kind == &"grab" or info.kind == &"throw" or String(info.move_id).begins_with("jab"):
 		return
@@ -396,9 +420,11 @@ func _on_body_impact(fighter: Node3D, position: Vector3, normal: Vector3, energy
 	spray(position, out, energy * 0.6)
 	if surface != &"body" and surface != &"debris":
 		smear(position, n, vel, energy)
-	# Pillars and outer walls never break: a hard hit chips them instead.
-	if surface == &"concrete" and energy >= CONCRETE_DUST_ENERGY:
-		dust(position + n * 0.05, DUST_BY_SURFACE[&"concrete"], energy * 0.5, n)
+	# U7: a dust burst where a body hits the floor or a wall; hard surfaces
+	# (pillars, outer walls, brick) also throw chips on big hits.
+	if surface != &"body" and surface != &"debris" and energy >= IMPACT_DUST_ENERGY:
+		var chips := energy >= CONCRETE_DUST_ENERGY and (surface == &"concrete" or surface == &"brick")
+		dust(position + n * 0.05, DUST_BY_SURFACE.get(surface, DUST_BY_SURFACE[&"floor"]), energy * 0.5, n, chips)
 	splat(position + n * 0.2, out, energy * 0.5)
 	if is_instance_valid(fighter):
 		_wound(fighter, position, clampf(energy / 6000.0, 0.2, 1.0), n)
@@ -408,7 +434,11 @@ func _on_wall_broken(wall: Node3D, position: Vector3, energy: float, velocity: V
 	_release_decals_over_holes(wall, position)
 	_nudge_heightfield()
 	var vdir := _safe_dir(Vector3(velocity.x, 0.0, velocity.z), Vector3.FORWARD)
-	dust(position, _surface_color(wall), energy, vdir)
+	# A strike that opens a hole emits wall_broken and wall_struck in the same
+	# frame; the strike makes its own (bigger) burst, so this one waits for the
+	# end of the frame and is skipped if a strike on this wall arrived.
+	_wall_dust_deferred.call_deferred(_id_of(wall), position, _surface_color(wall), energy, vdir,
+			Engine.get_process_frames())
 	# A scripted break (an enemy bursting in) has no flying body: dust only.
 	if not _launched_body_near(position, WALL_BODY_RADIUS):
 		return
@@ -431,7 +461,36 @@ func _on_wall_cracked(wall: Node3D, position: Vector3, energy: float) -> void:
 	var dir := Vector3.UP
 	if is_instance_valid(wall) and wall.has_method(&"get_face_normal"):
 		dir = wall.call(&"get_face_normal", position + Vector3.UP)
-	dust(position, _surface_color(wall), energy * 0.4, dir)
+	_wall_dust_deferred.call_deferred(_id_of(wall), position, _surface_color(wall), energy * 0.4, dir,
+			Engine.get_process_frames())
+
+func _wall_dust_deferred(wall_id: int, position: Vector3, color: Color, energy: float, dir: Vector3,
+		frame: int) -> void:
+	if wall_id != 0 and int(_struck_frame.get(wall_id, -1)) == frame:
+		return
+	dust(position, color, energy, dir)
+
+static func _id_of(n: Object) -> int:
+	return n.get_instance_id() if is_instance_valid(n) else 0
+
+## Round 3: a punch or kick on a wall. A dust puff in the surface's colour
+## along the normal, chips sized by power and result, a bigger burst (and a
+## puff out of the far side) for a hole or a break, and a small contact flash.
+func _on_wall_struck(_attacker: Node3D, wall: Node3D, position: Vector3, normal: Vector3, power: float,
+		result: StringName, surface: StringName) -> void:
+	if is_instance_valid(wall):
+		_struck_frame[wall.get_instance_id()] = Engine.get_process_frames()
+	var n := _safe_dir(normal, Vector3.UP)
+	var t := clampf(power / STRIKE_FULL_POWER, 0.05, 1.0)
+	var big := result == &"hole" or result == &"break"
+	var energy := lerpf(STRIKE_DUST_ENERGY.x, STRIKE_DUST_ENERGY.y, t) * (1.8 if big else 1.0)
+	var chips := result != &"hold" or surface == &"concrete"
+	var chip_scale := lerpf(0.45, 1.1, t) * (1.6 if big else (1.2 if result == &"crack" else 1.0))
+	var color: Color = DUST_BY_SURFACE.get(surface, DUST_DEFAULT)
+	dust(position + n * 0.05, color, energy, n, chips, chip_scale)
+	if big:
+		dust(position - n * 0.35, color, energy * 0.7, -n, true, chip_scale)
+	impact_flash(position + n * 0.03, clampf(power / STRIKE_FLASH_FULL, 0.04, 0.45) * (1.3 if big else 1.0))
 
 func _on_fighter_died(fighter: Node3D, _info: HitInfo) -> void:
 	if not is_instance_valid(fighter):
@@ -486,6 +545,10 @@ func _process(delta: float) -> void:
 	_update_growth(delta)
 	_update_flashes(delta)
 	_update_stumps(delta)
+	var real := delta / maxf(Engine.time_scale, 0.001)
+	_update_impact_flashes(real)
+	_update_swirls(delta)
+	_update_highlight(real)
 	_arena_check_t -= delta
 	if _arena_check_t <= 0.0:
 		_arena_check_t = 0.5
@@ -1004,13 +1067,14 @@ func _destructible_of(o: Object) -> Node3D:
 
 ## Paint the parts near `position`. `blow_dir` (attacker -> victim) moves a point
 ## that lies inside a part out to the surface facing the attacker.
-func _wound(fighter: Node3D, position: Vector3, amount: float, blow_dir: Vector3) -> void:
+func _wound(fighter: Node3D, position: Vector3, amount: float, blow_dir: Vector3,
+		radius_scale := 1.0) -> void:
 	if not is_instance_valid(fighter):
 		return
 	var parts := _mesh_parts(fighter)
 	if parts.is_empty():
 		return
-	var radius := lerpf(0.05, 0.13, clampf(amount, 0.0, 1.0))
+	var radius := lerpf(0.05, 0.13, clampf(amount, 0.0, 1.0)) * radius_scale
 	# Rank parts by distance from the hit to their bounds.
 	var best: Array[MeshInstance3D] = []
 	var best_d: Array[float] = []
@@ -1617,4 +1681,522 @@ func _make_puff(r: RandomNumberGenerator) -> ImageTexture:
 			var i := y * S + x
 			alpha[i] = clampf(1.0 - d, 0.0, 1.0) ** 1.5 * (0.6 + 0.4 * n)
 			value[i] = 0.85 + 0.15 * n
+	return _image_from(alpha, value, S, S)
+
+
+# =============================================================================
+# Upgrade 2: limb glow, view fade, zone highlight, impact flash, dazed swirl
+# =============================================================================
+
+const LimbGlowScript := preload("res://scripts/fx/limb_glow.gd")
+const BILLBOARD_ADD := preload("res://shaders/fx_billboard_add.gdshader")
+const BILLBOARD_XRAY := preload("res://shaders/fx_billboard_add_xray.gdshader")
+
+const IMPACT_POOL := 8
+const IMPACT_FLASH_TIME := 0.05          ## real s: the radial flash (about 3 frames at 60 fps)
+const IMPACT_RING_TIME := 0.13           ## real s: the streak ring expands and fades
+const IMPACT_FLASH_SIZE := Vector2(0.3, 1.4)   ## m: weakest .. full-power hit
+const IMPACT_RING_SIZE := Vector2(0.5, 2.3)    ## m
+const IMPACT_FULL_ENERGY := 12000.0      ## J: a hit this strong is full power
+const IMPACT_BRIGHTNESS := 2.2           ## additive strength (HDR)
+const IMPACT_COLOR := Color(1.0, 0.95, 0.85)
+const IMPACT_COLOR_CHARGED := Color(1.0, 0.8, 0.4)
+const SWIRL_POOL := 4
+const SWIRL_STARS := 3
+const SWIRL_HEIGHT := 0.22        ## m above the head bone (+0.12 to the crown)
+const SWIRL_RADIUS := 0.24        ## m
+const SWIRL_SPEED := 5.0          ## rad/s
+const SWIRL_STAR_SIZE := 0.2      ## m
+const SWIRL_COLOR := Color(1.0, 0.9, 0.4)
+const HIGHLIGHT_NORMAL := 0.55    ## aimed-zone highlight strength in normal play
+const HIGHLIGHT_FOCUS := 0.9      ## ...and while Focus is active
+const HIGHLIGHT_RATE := 6.0       ## per real second
+const HIGHLIGHT_COLOR := Color(1.0, 0.82, 0.35)
+const PLAYER_WOUND_SCALE := 1.35  ## wound radius x on the player (damage reads without the HP bar)
+const PLAYER_BLOOD_SPREAD := 1.6  ## lost-HP grime spread x on the player (shows on the back, to the camera)
+const ZONE_HALO_SIZE := Vector2(0.35, 0.75)  ## m: aimed-zone halo in normal play .. in Focus
+const ZONE_HALO_ALPHA := Vector2(0.35, 0.75)
+const ZONE_HALO_COLOR := Color(1.0, 0.82, 0.35)
+const STUMBLE_DUST_ENERGY := 900.0
+const TRIP_DUST_ENERGY := 1800.0
+
+var _halo_mesh: QuadMesh
+var _halo_mat: ShaderMaterial
+var _impact_mat: ShaderMaterial
+var _impact_ring_mat: ShaderMaterial
+var _star_mat: ShaderMaterial
+var _glows: Array = []                    ## live LimbGlow handles
+var _impact_nodes: Array[MeshInstance3D] = []
+var _impact_rings: Array[MeshInstance3D] = []
+var _impact_age := PackedFloat32Array()    ## real s since the flash; < 0 idle
+var _impact_power := PackedFloat32Array()
+var _impact_tint: Array[Color] = []
+var _impact_next := 0
+var _swirls: Array[Node3D] = []
+var _swirl_fighter: Array = []
+var _swirl_time := PackedFloat32Array()   ## s left (<= 0 idle)
+var _swirl_age := PackedFloat32Array()
+var _swirl_next := 0
+var _hl_target_id := 0
+var _hl_zone := -1
+var _hl_parts: Array[MeshInstance3D] = []
+var _hl_level := 0.0
+var _hl_age := 0.0
+var _hl_halo: MeshInstance3D
+var _fade_of: Dictionary = {}             ## fighter id -> last view_fade
+var _struck_frame: Dictionary = {}        ## wall id -> process frame of its last wall_struck
+
+
+## Glow on one bone (attacking fist or foot for tells, charged limb). Returns a
+## handle node; free it to stop early, else it ends after `duration` s of the
+## fighter's own time (world time for enemies, so a tell stretches with slow
+## motion and Focus like the attack it announces; player time for the player).
+## duration <= 0: until freed. The handle also has set_color() and
+## set_intensity().
+func limb_glow(fighter: Node3D, bone: StringName, color: Color, duration: float, intensity := 1.0) -> Node3D:
+	if not is_instance_valid(fighter) or not fighter.is_inside_tree():
+		return null
+	var rig := _rig_of(fighter)
+	var attach: Node3D = null
+	if rig != null and rig.has_method(&"get_attachment"):
+		attach = rig.call(&"get_attachment", bone)
+	var parts := _bone_parts(fighter, bone)
+	var parent: Node3D = attach if attach != null else fighter
+	var h: Node3D = LimbGlowScript.new()
+	h.call(&"setup", self, fighter, bone, parts, color, duration, intensity, _halo_mesh, _halo_mat)
+	parent.add_child(h)
+	# Centre the halo on the limb's meshes (the fist, not the wrist joint).
+	var center := Vector3(0, 1.3, 0) if attach == null else Vector3.ZERO
+	if not parts.is_empty():
+		var inv := parent.global_transform.affine_inverse()
+		var sum := Vector3.ZERO
+		for p in parts:
+			sum += inv * (p.global_transform * p.get_aabb().get_center())
+		center = sum / parts.size()
+	h.position = center
+	_glows.append(h)
+	return h
+
+## Live limb glows (tests, debug).
+func active_glows() -> int:
+	var n := 0
+	for g in _glows:
+		if is_instance_valid(g):
+			n += 1
+	return n
+
+func _on_glow_exit(handle: Node) -> void:
+	_glows.erase(handle)
+
+## Fade a fighter that blocks the camera's view (0 = opaque, 1 = gone). A
+## screen-door dither in fighter.gdshader (view_fade); a faint silhouette stays.
+func set_fighter_fade(fighter: Node3D, amount: float) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var a := clampf(amount, 0.0, 1.0)
+	var id := fighter.get_instance_id()
+	if absf(float(_fade_of.get(id, 0.0)) - a) < 0.005:
+		return
+	_fade_of[id] = a
+	for part in _mesh_parts(fighter):
+		var mat := _part_material(part)
+		if mat != null:
+			mat.set_shader_parameter(&"view_fade", a)
+
+## Current view fade of a fighter (tests, debug).
+func get_fighter_fade(fighter: Node3D) -> float:
+	return float(_fade_of.get(fighter.get_instance_id(), 0.0)) if is_instance_valid(fighter) else 0.0
+
+## Mesh parts riding one bone: HumanoidRig.get_bone_parts(), else parts tagged
+## with that bone (meta "bone"), else the attachment's mesh children.
+func _bone_parts(fighter: Node3D, bone: StringName) -> Array[MeshInstance3D]:
+	var out: Array[MeshInstance3D] = []
+	var rig := _rig_of(fighter)
+	if rig == null:
+		return out
+	if rig.has_method(&"get_bone_parts"):
+		out.assign(rig.call(&"get_bone_parts", bone))
+		return out
+	for p in _mesh_parts(fighter):
+		if p.has_meta(&"bone") and StringName(p.get_meta(&"bone")) == bone:
+			out.append(p)
+	if out.is_empty() and rig.has_method(&"get_attachment"):
+		var att: Node = rig.call(&"get_attachment", bone)
+		if att != null:
+			for c in att.get_children():
+				if c is MeshInstance3D:
+					out.append(c)
+	return out
+
+# --- Zone highlight ------------------------------------------------------------
+
+func _on_aim_zone_changed(_aimer: Node3D, target: Node3D, zone: int) -> void:
+	set_zone_highlight(target, zone)
+
+## Highlight `zone` (BodyZones.Zone) on `target`; null clears it.
+func set_zone_highlight(target: Node3D, zone: int) -> void:
+	var id := target.get_instance_id() if is_instance_valid(target) else 0
+	if id == _hl_target_id and zone == _hl_zone:
+		return
+	_clear_highlight()
+	if id == 0:
+		return
+	_hl_target_id = id
+	_hl_zone = zone
+	for bone in BodyZones.bones(zone):
+		_hl_parts.append_array(_bone_parts(target, bone))
+	_hl_level = 0.0
+
+## Parts currently highlighted (tests, debug).
+func get_highlight_parts() -> Array[MeshInstance3D]:
+	return _hl_parts
+
+func _clear_highlight() -> void:
+	if _hl_halo != null:
+		_hl_halo.visible = false
+	for p in _hl_parts:
+		if is_instance_valid(p):
+			var mat := _part_material(p)
+			if mat != null:
+				mat.set_shader_parameter(&"highlight", 0.0)
+	_hl_parts.clear()
+	_hl_target_id = 0
+	_hl_zone = -1
+	_hl_level = 0.0
+
+func _update_highlight(real_delta: float) -> void:
+	if _hl_target_id == 0:
+		return
+	var t := instance_from_id(_hl_target_id) as Node3D
+	if t == null or not t.is_inside_tree() or (t.has_method(&"is_dead") and t.call(&"is_dead")):
+		_clear_highlight()
+		return
+	var goal := HIGHLIGHT_FOCUS if _focus_active() else HIGHLIGHT_NORMAL
+	_hl_level = move_toward(_hl_level, goal, HIGHLIGHT_RATE * real_delta)
+	_hl_age += real_delta
+	var v := _hl_level * (0.85 + 0.15 * sin(_hl_age * TAU * 1.5))
+	var sum := Vector3.ZERO
+	var n := 0
+	for p in _hl_parts:
+		if is_instance_valid(p):
+			var mat := _part_material(p)
+			if mat != null:
+				mat.set_shader_parameter(&"highlight_color", HIGHLIGHT_COLOR)
+				mat.set_shader_parameter(&"highlight", v)
+			sum += p.global_transform * p.get_aabb().get_center()
+			n += 1
+	# A soft halo on the zone; larger and brighter in Focus.
+	if n > 0:
+		var k := clampf((_hl_level - HIGHLIGHT_NORMAL) / maxf(HIGHLIGHT_FOCUS - HIGHLIGHT_NORMAL, 0.01), 0.0, 1.0)
+		var size := lerpf(ZONE_HALO_SIZE.x, ZONE_HALO_SIZE.y, k)
+		var a := lerpf(ZONE_HALO_ALPHA.x, ZONE_HALO_ALPHA.y, k) * clampf(_hl_level / HIGHLIGHT_NORMAL, 0.0, 1.0)
+		_hl_halo.global_position = sum / n
+		_hl_halo.scale = Vector3(size, size, size)
+		_hl_halo.set_instance_shader_parameter(&"tint", Color(ZONE_HALO_COLOR.r, ZONE_HALO_COLOR.g, ZONE_HALO_COLOR.b, a))
+		_hl_halo.visible = true
+
+func _focus_active() -> bool:
+	var td := get_node_or_null(^"/root/TimeDirector")
+	return td != null and td.has_method(&"is_focus_active") and td.call(&"is_focus_active")
+
+# --- Impact flash (U7) -----------------------------------------------------------
+
+## 0..1 hit power for the flash: launch energy, damage and charge level.
+static func impact_power(info: HitInfo) -> float:
+	var p := sqrt(clampf(info.energy / IMPACT_FULL_ENERGY, 0.0, 1.0))
+	p = maxf(p, clampf(info.damage / 150.0, 0.0, 1.0))
+	p = maxf(p, clampf(info.charge_level / 3.0, 0.0, 1.0))
+	return clampf(p, 0.05, 1.0)
+
+## A 2-3 frame radial flash plus an expanding streak ring at a contact point.
+func impact_flash(position: Vector3, power: float, charged := false) -> void:
+	var i := _impact_next
+	_impact_next = (_impact_next + 1) % IMPACT_POOL
+	_impact_age[i] = 0.0
+	_impact_power[i] = clampf(power, 0.0, 1.0)
+	_impact_tint[i] = IMPACT_COLOR_CHARGED if charged else IMPACT_COLOR
+	var f := _impact_nodes[i]
+	var r := _impact_rings[i]
+	f.global_position = position
+	r.global_position = position
+	f.set_instance_shader_parameter(&"spin", rng.randf() * TAU)
+	r.set_instance_shader_parameter(&"spin", rng.randf() * TAU)
+	f.visible = true
+	r.visible = true
+	_update_impact_flash(i, 0.0)
+
+## Flashes currently showing (tests, debug).
+func active_impact_flashes() -> int:
+	var n := 0
+	for a in _impact_age:
+		if a >= 0.0:
+			n += 1
+	return n
+
+func _update_impact_flashes(real_delta: float) -> void:
+	for i in IMPACT_POOL:
+		if _impact_age[i] < 0.0:
+			continue
+		_impact_age[i] += real_delta
+		_update_impact_flash(i, _impact_age[i])
+
+func _update_impact_flash(i: int, age: float) -> void:
+	var p := _impact_power[i]
+	var c := _impact_tint[i]
+	var f := _impact_nodes[i]
+	var r := _impact_rings[i]
+	if age > IMPACT_RING_TIME:
+		_impact_age[i] = -1.0
+		f.visible = false
+		r.visible = false
+		return
+	var fu := clampf(age / IMPACT_FLASH_TIME, 0.0, 1.0)
+	var fs := lerpf(IMPACT_FLASH_SIZE.x, IMPACT_FLASH_SIZE.y, p) * (1.0 + 0.3 * fu)
+	f.scale = Vector3(fs, fs, fs)
+	f.visible = age <= IMPACT_FLASH_TIME
+	f.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, IMPACT_BRIGHTNESS * (1.0 - fu * fu)))
+	var ru := clampf(age / IMPACT_RING_TIME, 0.0, 1.0)
+	var rs := lerpf(IMPACT_RING_SIZE.x, IMPACT_RING_SIZE.y, p) * (0.35 + 0.65 * (1.0 - pow(1.0 - ru, 2.5)))
+	r.scale = Vector3(rs, rs, rs)
+	r.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, IMPACT_BRIGHTNESS * 0.8 * pow(1.0 - ru, 1.5)))
+
+# --- Dazed swirl, stumble and trip dust, broken arm ---------------------------------
+
+func _on_dazed(fighter: Node3D, duration: float) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var slot := -1
+	for i in SWIRL_POOL:  # re-dazing the same fighter refreshes its swirl
+		if _swirl_time[i] > 0.0 and _swirl_fighter[i] == fighter:
+			slot = i
+	if slot < 0:
+		slot = _swirl_next
+		_swirl_next = (_swirl_next + 1) % SWIRL_POOL
+	_swirl_fighter[slot] = fighter
+	_swirl_time[slot] = duration if duration > 0.0 else Tuning.DAZED_TIME
+	_swirl_age[slot] = 0.0
+	_swirls[slot].visible = true
+	_place_swirl(slot)
+
+## Dazed swirls currently showing (tests, debug).
+func active_swirls() -> int:
+	var n := 0
+	for t in _swirl_time:
+		if t > 0.0:
+			n += 1
+	return n
+
+func _update_swirls(delta: float) -> void:
+	for i in SWIRL_POOL:
+		if _swirl_time[i] <= 0.0:
+			continue
+		var f = _swirl_fighter[i]
+		var gone: bool = not is_instance_valid(f) or not (f as Node3D).is_inside_tree()
+		if not gone and ((f.has_method(&"is_dead") and f.call(&"is_dead"))
+				or (f.has_method(&"is_launched") and f.call(&"is_launched"))):
+			gone = true
+		_swirl_time[i] -= delta
+		_swirl_age[i] += delta
+		if gone or _swirl_time[i] <= 0.0:
+			_swirl_time[i] = 0.0
+			_swirl_fighter[i] = null
+			_swirls[i].visible = false
+			continue
+		_place_swirl(i)
+
+func _place_swirl(i: int) -> void:
+	var f: Node3D = _swirl_fighter[i]
+	var head := f.global_position + Vector3.UP * 1.7
+	var rig := _rig_of(f)
+	if rig != null and rig.has_method(&"get_bone_global_position"):
+		head = rig.call(&"get_bone_global_position", Bones.HEAD) + Vector3.UP * 0.12
+	var node := _swirls[i]
+	node.global_position = head + Vector3.UP * SWIRL_HEIGHT
+	var age := _swirl_age[i]
+	var fade := clampf(_swirl_time[i] / 0.25, 0.0, 1.0) * clampf(age / 0.1, 0.0, 1.0)
+	for k in SWIRL_STARS:
+		var star := node.get_child(k) as MeshInstance3D
+		var ang := age * SWIRL_SPEED + k * TAU / SWIRL_STARS
+		star.position = Vector3(cos(ang) * SWIRL_RADIUS, 0.03 * sin(age * 7.0 + k * 2.0), sin(ang) * SWIRL_RADIUS * 0.6)
+		star.set_instance_shader_parameter(&"spin", age * 4.0 + k)
+		star.set_instance_shader_parameter(&"tint", Color(SWIRL_COLOR.r, SWIRL_COLOR.g, SWIRL_COLOR.b, 1.4 * fade))
+
+func _ground_of(f: Node3D) -> Vector3:
+	if f.has_method(&"get_ground_position"):
+		return f.call(&"get_ground_position")
+	return f.global_position
+
+func _on_stumbled(fighter: Node3D, _duration: float) -> void:
+	if is_instance_valid(fighter):
+		dust(_ground_of(fighter) + Vector3.UP * 0.05, DUST_BY_SURFACE[&"floor"], STUMBLE_DUST_ENERGY,
+				Vector3.UP, false)
+
+func _on_tripped(fighter: Node3D) -> void:
+	if is_instance_valid(fighter):
+		dust(_ground_of(fighter) + Vector3.UP * 0.05, DUST_BY_SURFACE[&"floor"], TRIP_DUST_ENERGY,
+				Vector3.UP, false)
+
+## A broken arm: a small flash and a little blood at the forearm.
+func _on_arm_broken(fighter: Node3D, zone: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var bone: StringName = BodyZones.AIM_BONE.get(zone, Bones.R_LOWER_ARM)
+	var rig := _rig_of(fighter)
+	var at := fighter.global_position + Vector3.UP * 1.1
+	if rig != null and rig.has_method(&"get_bone_global_position"):
+		at = rig.call(&"get_bone_global_position", bone)
+	impact_flash(at, 0.5)
+	if Tuning.gore != Tuning.Gore.OFF:
+		spray(at, Vector3.UP, 1500.0)
+	_wound(fighter, at, 0.7, Vector3.ZERO)
+
+# --- Startup / reset -------------------------------------------------------------
+
+func _build_upgrade2() -> void:
+	var trng := RandomNumberGenerator.new()
+	trng.seed = 4242
+	_halo_mesh = QuadMesh.new()
+	_halo_mesh.size = Vector2(1, 1)
+	_halo_mat = _billboard_mat(BILLBOARD_XRAY, _make_glow_tex())
+	_impact_mat = _billboard_mat(BILLBOARD_XRAY, _make_flash_tex(trng))
+	_impact_ring_mat = _billboard_mat(BILLBOARD_XRAY, _make_ring_tex(trng))
+	_star_mat = _billboard_mat(BILLBOARD_ADD, _make_star_tex())
+	_hl_halo = _fx_quad(_halo_mat, "ZoneHalo", _holder)
+	_impact_age.resize(IMPACT_POOL)
+	_impact_age.fill(-1.0)
+	_impact_power.resize(IMPACT_POOL)
+	for i in IMPACT_POOL:
+		_impact_nodes.append(_fx_quad(_impact_mat, "ImpactFlash%d" % i, _holder))
+		_impact_rings.append(_fx_quad(_impact_ring_mat, "ImpactRing%d" % i, _holder))
+		_impact_tint.append(IMPACT_COLOR)
+	_swirl_time.resize(SWIRL_POOL)
+	_swirl_time.fill(0.0)
+	_swirl_age.resize(SWIRL_POOL)
+	for i in SWIRL_POOL:
+		var n := Node3D.new()
+		n.name = "DazedSwirl%d" % i
+		n.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		n.visible = false
+		_holder.add_child(n)
+		for k in SWIRL_STARS:
+			var star := _fx_quad(_star_mat, "Star%d" % k, n)
+			star.scale = Vector3.ONE * SWIRL_STAR_SIZE
+			star.visible = true
+		_swirls.append(n)
+		_swirl_fighter.append(null)
+
+func _reset_upgrade2() -> void:
+	_clear_highlight()
+	for i in IMPACT_POOL:
+		_impact_age[i] = -1.0
+		_impact_nodes[i].visible = false
+		_impact_rings[i].visible = false
+	for i in SWIRL_POOL:
+		_swirl_time[i] = 0.0
+		_swirl_fighter[i] = null
+		_swirls[i].visible = false
+	_fade_of.clear()
+
+func _billboard_mat(shader: Shader, tex: Texture2D) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = shader
+	m.set_shader_parameter(&"tex", tex)
+	return m
+
+func _fx_quad(mat: Material, node_name: String, parent: Node) -> MeshInstance3D:
+	var q := MeshInstance3D.new()
+	q.name = node_name
+	q.mesh = _halo_mesh
+	q.material_override = mat
+	q.layers = Layers.VIS_FX
+	q.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	q.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	q.visible = false
+	parent.add_child(q)
+	return q
+
+## Soft round glow: bright core, long falloff.
+func _make_glow_tex() -> ImageTexture:
+	var S := 64
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	for y in S:
+		for x in S:
+			var u := (x + 0.5) / S * 2.0 - 1.0
+			var v := (y + 0.5) / S * 2.0 - 1.0
+			var d := sqrt(u * u + v * v)
+			var i := y * S + x
+			alpha[i] = clampf(exp(-d * d * 7.0) * 0.9 + exp(-d * d * 40.0) * 0.6, 0.0, 1.0) * clampf((1.0 - d) * 4.0, 0.0, 1.0)
+			value[i] = 1.0
+	return _image_from(alpha, value, S, S)
+
+## Radial flash: hot core with 8-12 sharp spikes.
+func _make_flash_tex(r: RandomNumberGenerator) -> ImageTexture:
+	var S := 128
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	var spikes := r.randi_range(8, 12)
+	var phase := r.randf() * TAU
+	var lens: Array[float] = []
+	for k in spikes:
+		lens.append(r.randf_range(0.55, 1.0))
+	for y in S:
+		for x in S:
+			var u := (x + 0.5) / S * 2.0 - 1.0
+			var v := (y + 0.5) / S * 2.0 - 1.0
+			var d := sqrt(u * u + v * v)
+			var th := atan2(v, u) + phase
+			var sector := th / TAU * spikes
+			var k := posmod(int(floor(sector + 0.5)), spikes)
+			var off := absf(sector - roundf(sector))
+			var width := 0.09 * (1.0 - d / maxf(lens[k], 0.01))
+			var spike := clampf(1.0 - off / maxf(width, 0.001), 0.0, 1.0) * clampf(1.0 - d / lens[k], 0.0, 1.0)
+			var core := exp(-d * d * 30.0)
+			var i := y * S + x
+			alpha[i] = clampf(maxf(core, spike * 0.9) + exp(-d * d * 6.0) * 0.25, 0.0, 1.0)
+			value[i] = 1.0
+	return _image_from(alpha, value, S, S)
+
+## Ring of radial streaks (a shock ring).
+func _make_ring_tex(r: RandomNumberGenerator) -> ImageTexture:
+	var S := 128
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	var n := _Noise.new(r, 32)
+	for y in S:
+		for x in S:
+			var u := (x + 0.5) / S * 2.0 - 1.0
+			var v := (y + 0.5) / S * 2.0 - 1.0
+			var d := sqrt(u * u + v * v)
+			var th := atan2(v, u) / TAU + 0.5
+			var streak := smoothstep(0.45, 0.75, n.at(th, 0.5))
+			var band := smoothstep(0.5, 0.78, d) * (1.0 - smoothstep(0.86, 1.0, d))
+			var rim := exp(-pow((d - 0.82) / 0.035, 2.0))
+			var i := y * S + x
+			alpha[i] = clampf(band * streak + rim * 0.55, 0.0, 1.0)
+			value[i] = 1.0
+	return _image_from(alpha, value, S, S)
+
+## Four-point star for the dazed swirl.
+func _make_star_tex() -> ImageTexture:
+	var S := 64
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	for y in S:
+		for x in S:
+			var u := absf((x + 0.5) / S * 2.0 - 1.0)
+			var v := absf((y + 0.5) / S * 2.0 - 1.0)
+			var star := clampf(1.0 - (sqrt(u) + sqrt(v)) / 1.0, 0.0, 1.0)
+			var core := exp(-(u * u + v * v) * 18.0)
+			var i := y * S + x
+			alpha[i] = clampf(star * 2.2 + core * 0.8, 0.0, 1.0)
+			value[i] = 1.0
 	return _image_from(alpha, value, S, S)

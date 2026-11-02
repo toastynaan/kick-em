@@ -35,16 +35,19 @@ func _ready() -> void:
 		await U.physics_frames(get_tree(), 6)  # past the 25 ms same-id retrigger guard
 		played.clear()
 		GameEvents.wall_broken.emit(panel, Vector3(0, 1, -2), 4000.0, Vector3(0, 0, -9))
+		await get_tree().process_frame  # break sounds wait for the end of the frame (wall strikes)
 		if not played.has(expect[surf]):
 			fails.append("%s break played %s, want %s" % [surf, played, expect[surf]])
 		panel.queue_free()
 	await U.physics_frames(get_tree(), 6)
 	played.clear()
 	GameEvents.wall_broken.emit(null, Vector3(0, 1, -2), 4000.0, Vector3.ZERO)
+	await get_tree().process_frame
 	if not played.has(&"wall_break"):
 		fails.append("null wall did not fall back to wall_break")
 	played.clear()
 	GameEvents.wall_cracked.emit(null, Vector3(0, 1, -2), 3000.0)
+	await get_tree().process_frame
 	if not played.has(&"crack"):
 		fails.append("wall_cracked played %s" % [played])
 
@@ -109,11 +112,11 @@ func _ready() -> void:
 	elif sp.amount_ratio >= 1.0:
 		fails.append("armor spark not smaller than a block spark")
 
-	# Concrete: hard body hits kick up dust and chips; soft ones do not.
+	# Concrete: hard body hits kick up dust and chips; light ones do not.
 	var dust_i: int = BloodFX._dust_next
-	GameEvents.body_impact.emit(f, Vector3(0, 1.0, -3.0), Vector3(0, 0, 1), 1500.0, &"concrete")
+	GameEvents.body_impact.emit(f, Vector3(0, 1.0, -3.0), Vector3(0, 0, 1), 600.0, &"concrete")
 	if BloodFX._dust_next != dust_i:
-		fails.append("concrete dust below the energy threshold")
+		fails.append("concrete dust below IMPACT_DUST_ENERGY")
 	GameEvents.body_impact.emit(f, Vector3(0, 1.0, -3.0), Vector3(0, 0, 1), 4000.0, &"concrete")
 	var puff: GPUParticles3D = BloodFX._puffs[dust_i]
 	var chips: GPUParticles3D = BloodFX._chips[dust_i]

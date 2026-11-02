@@ -11,6 +11,15 @@ extends Node
 ## Round 2: clank (armor; agent B plays it), break_drywall, break_brick,
 ##   break_wood (wall_broken by surface), debris (debris_landed, throttled),
 ##   miss (dodge_feedback tick)
+## Upgrade 2: charge_hum (loop), charge_level, charge_release, jump, land,
+##   crouch, hit_cross, hit_hook, hit_uppercut, hit_roundhouse,
+##   hit_flying_kick, hit_stomp, arm_break, wall_slam, focus_in, focus_out
+## Round 3: strike_drywall, strike_brick, strike_wood, strike_concrete,
+##   strike_hold (wall_struck; 5 variants each so rapid jabs do not repeat)
+## Focus: world sounds slow with AudioServer.playback_speed_scale (set by
+##   TimeDirector); the player's own sounds are pitch-compensated by
+##   TimeDirector.player_time_factor() so they stay at normal pitch. Callers
+##   pass the source fighter to play(..., source) to get that treatment.
 ##
 ## Every id is synthesised at startup on a worker thread into VARIANTS
 ## AudioStreamWAV (16-bit mono PCM, 44.1 kHz): sine / noise oscillators,
@@ -20,6 +29,9 @@ extends Node
 
 const MIX_RATE := 44100
 const VARIANTS := 3
+## Ids that get more variants (rapid repeats on the same wall).
+const VARIANTS_BY_ID := {&"strike_drywall": 5, &"strike_brick": 5, &"strike_wood": 5,
+	&"strike_concrete": 5, &"strike_hold": 5}
 const POOL_3D := 24
 const POOL_UI := 6
 ## Peak level every sound is normalised to (headroom below int16 full scale).
@@ -41,7 +53,38 @@ const IDS: Array[StringName] = [
 	&"wave_start", &"heavy_hit", &"thud", &"body_slam", &"dodge", &"teleport",
 	&"grab", &"throw", &"break_grab", &"crack", &"wall_break", &"ko",
 	&"miss", &"clank", &"debris", &"break_drywall", &"break_brick", &"break_wood",
+	&"charge_hum", &"charge_level", &"charge_release", &"jump", &"land", &"crouch",
+	&"hit_cross", &"hit_hook", &"hit_uppercut", &"hit_roundhouse", &"hit_flying_kick",
+	&"hit_stomp", &"arm_break", &"wall_slam", &"focus_in", &"focus_out",
+	&"strike_drywall", &"strike_brick", &"strike_wood", &"strike_concrete", &"strike_hold",
 ]
+## wall_struck sound by surface.
+const STRIKE_BY_SURFACE := {
+	&"drywall": &"strike_drywall", &"brick": &"strike_brick", &"wood": &"strike_wood",
+	&"concrete": &"strike_concrete",
+}
+const STRIKE_REF_POWER := 60.0    ## a standing kick: plays at the base level and pitch
+const STRIKE_GAP_MS := 70         ## per-surface cooldown (two limbs on one wall in one tick)
+const STRIKE_STREAK_MS := 450     ## hits closer than this count as a rapid streak...
+const STRIKE_STREAK_DB := 1.2     ## ...each one this much quieter...
+const STRIKE_STREAK_MIN_DB := -4.0  ## ...down to this
+const STRIKE_PITCH_JITTER := 0.08 ## extra pitch spread on strikes (on top of PITCH_JITTER)
+const STRIKE_MIN_DB := -7.0       ## the weakest strike (a jab) is at most this much under the base level
+const STRIKE_HOLE_DB := -3.0      ## a hole layers the surface's break sound this much quieter
+const STRIKE_CRACK_DB := -6.0     ## a crack layers the crack sound
+## Ids synthesised as seamless loops (played until stopped).
+const LOOP_IDS: Array[StringName] = [&"charge_hum"]
+
+## Charge hum: pitch and level (dB) by charge level 0..3, players kept for it.
+const HUM_PITCH: Array[float] = [1.0, 1.2, 1.45, 1.8]
+const HUM_DB: Array[float] = [-9.0, -6.0, -3.5, -1.0]
+const HUM_POOL := 4
+const HUM_MAX_TIME := 3.0         ## s: a hum with no release event stops anyway
+const HUM_SLEW := 12.0            ## dB per second toward the level's volume
+## A charged release already whooshed: skip the attack_active whoosh this soon after (ms).
+const RELEASE_WHOOSH_GAP_MS := 400
+## Charged hits (level 2+) layer heavy_hit under the strike sound, this much quieter (dB).
+const CHARGED_LAYER_DB := -6.0
 
 ## wall_broken sound by Destructible.surface (anything else: wall_break).
 const BREAK_BY_SURFACE := {
@@ -68,6 +111,12 @@ const BASE_DB := {
 	&"ko": -1.0, &"wave_start": -4.0, &"ui": -4.0,
 	&"miss": -10.0, &"clank": -3.0, &"debris": -8.0,
 	&"break_drywall": 0.0, &"break_brick": 0.0, &"break_wood": -1.0,
+	&"charge_hum": -8.0, &"charge_level": -8.0, &"charge_release": -3.0, &"jump": -9.0,
+	&"land": -7.0, &"crouch": -13.0, &"hit_cross": -2.0, &"hit_hook": -1.0,
+	&"hit_uppercut": 0.0, &"hit_roundhouse": 0.0, &"hit_flying_kick": 0.0, &"hit_stomp": 0.0,
+	&"arm_break": 0.0, &"wall_slam": 0.0, &"focus_in": -4.0, &"focus_out": -6.0,
+	&"strike_drywall": -2.0, &"strike_brick": -2.0, &"strike_wood": -2.0, &"strike_concrete": -2.0,
+	&"strike_hold": -3.0,
 }
 
 ## Energy (J) at which a sound plays at its base level; louder above, quieter below.
@@ -75,6 +124,8 @@ const REF_ENERGY := {
 	&"punch": 1500.0, &"kick": 2500.0, &"heavy_hit": 8000.0, &"thud": 1200.0,
 	&"body_slam": 5000.0, &"crack": 3000.0, &"wall_break": 6000.0,
 	&"break_drywall": 3000.0, &"break_brick": 8000.0, &"break_wood": 2000.0,
+	&"hit_cross": 1500.0, &"hit_hook": 2000.0, &"hit_uppercut": 4000.0, &"hit_roundhouse": 4000.0,
+	&"hit_flying_kick": 6000.0, &"hit_stomp": 3000.0, &"wall_slam": 2800.0,
 }
 ## Hits at or above this energy (J) use heavy_hit whatever the move.
 const HEAVY_HIT_ENERGY := 7000.0
@@ -90,6 +141,7 @@ var _mutex := Mutex.new()
 var _task_id := -1
 var _abort := false
 var _ready_count := 0
+var _complete := false            ## every variant of every id is built
 
 var _players: Array[AudioStreamPlayer3D] = []
 var _ui_players: Array[AudioStreamPlayer] = []
@@ -101,6 +153,17 @@ var _debris_ms := 0               ## clock of the last token refill
 var _debris_last: Dictionary = {} ## chunk instance id -> clock ms it was last heard
 var _quitting := false
 var _used := false                ## any sound was started (exit drain needed)
+var _owned_base := PackedFloat32Array()     ## per 3D player: base pitch of a player-owned sound, 0 = world
+var _owned_base_ui := PackedFloat32Array()  ## per UI player
+var _hum_players: Array[AudioStreamPlayer3D] = []
+var _hum_fighter: Array = []                ## Node3D per hum slot (null = idle)
+var _hum_level := PackedInt32Array()
+var _hum_time := PackedFloat32Array()
+var _hum_db := PackedFloat32Array()         ## current volume (slewed)
+var _last_release: Dictionary = {}          ## fighter id -> clock ms of its last charged release
+var _strike_last: Dictionary = {}           ## surface -> clock ms of its last strike sound
+var _strike_streak: Dictionary = {}         ## surface -> rapid hits in a row
+var _struck_frame: Dictionary = {}          ## wall id -> process frame of its last wall_struck
 
 ## Every sound that actually played (tests, debug overlay).
 signal sound_played(id: StringName, position: Vector3)
@@ -126,6 +189,21 @@ func _ready() -> void:
 		u.name = "SFXUI_%d" % i
 		add_child(u)
 		_ui_players.append(u)
+	_owned_base.resize(POOL_3D)
+	_owned_base_ui.resize(POOL_UI)
+	for i in HUM_POOL:
+		var h := AudioStreamPlayer3D.new()
+		h.name = "Hum_%d" % i
+		h.unit_size = 6.0
+		h.max_distance = 50.0
+		h.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
+		h.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		add_child(h)
+		_hum_players.append(h)
+		_hum_fighter.append(null)
+	_hum_level.resize(HUM_POOL)
+	_hum_time.resize(HUM_POOL)
+	_hum_db.resize(HUM_POOL)
 	_task_id = WorkerThreadPool.add_task(_generate_all, false, "AudioFX synth")
 	_ensure_limiter()
 	_connect_events()
@@ -197,40 +275,82 @@ func stop_all() -> void:
 	for u in _ui_players:
 		u.stop()
 		u.stream = null
+	for i in _hum_players.size():
+		_hum_players[i].stop()
+		_hum_players[i].stream = null
+		_hum_fighter[i] = null
+	_owned_base.fill(0.0)
+	_owned_base_ui.fill(0.0)
 
 
 # --- Public API --------------------------------------------------------------
 
-func play(id: StringName, position: Vector3, volume_db := 0.0, pitch := 1.0) -> void:
+## `source`: the fighter making the sound, if any. The player's own sounds keep
+## normal pitch during Focus (see header).
+func play(id: StringName, position: Vector3, volume_db := 0.0, pitch := 1.0, source: Node3D = null) -> void:
 	if _quitting:
 		return
 	var stream := _pick(id)
 	if stream == null:
 		return
-	var p := _take_3d()
+	var i := _take_3d_index()
+	var p := _players[i]
+	var base := maxf(pitch * _rng.randf_range(1.0 - PITCH_JITTER, 1.0 + PITCH_JITTER), 0.05)
+	_owned_base[i] = base if is_player_source(source) else 0.0
 	p.stream = stream
 	p.global_position = position
 	p.volume_db = BASE_DB.get(id, 0.0) + volume_db
-	p.pitch_scale = maxf(pitch * _rng.randf_range(1.0 - PITCH_JITTER, 1.0 + PITCH_JITTER), 0.05)
+	p.pitch_scale = base * (player_pitch_factor() if _owned_base[i] > 0.0 else 1.0)
 	p.play()
 	_used = true
 	sound_played.emit(id, position)
 
-## Non-positional (UI, slow-motion stings, player feedback).
-func play_ui(id: StringName, volume_db := 0.0, pitch := 1.0) -> void:
+## Non-positional (UI, slow-motion stings, player feedback). `player_owned`
+## keeps it at normal pitch during Focus.
+func play_ui(id: StringName, volume_db := 0.0, pitch := 1.0, player_owned := false) -> void:
 	if _quitting:
 		return
 	var stream := _pick(id)
 	if stream == null:
 		return
-	var p := _ui_players[_next_ui]
+	var i := _next_ui
 	_next_ui = (_next_ui + 1) % _ui_players.size()
+	var p := _ui_players[i]
+	var base := maxf(pitch * _rng.randf_range(1.0 - PITCH_JITTER * 0.5, 1.0 + PITCH_JITTER * 0.5), 0.05)
+	_owned_base_ui[i] = base if player_owned else 0.0
 	p.stream = stream
 	p.volume_db = BASE_DB.get(id, 0.0) + volume_db
-	p.pitch_scale = maxf(pitch * _rng.randf_range(1.0 - PITCH_JITTER * 0.5, 1.0 + PITCH_JITTER * 0.5), 0.05)
+	p.pitch_scale = base * (player_pitch_factor() if player_owned else 1.0)
 	p.play()
 	_used = true
 	sound_played.emit(id, Vector3.ZERO)
+
+static func is_player_source(source: Node) -> bool:
+	return source != null and is_instance_valid(source) and source.is_in_group(&"player")
+
+## Pitch multiplier that cancels the world slow-down for the player's sounds:
+## TimeDirector.player_time_factor() (1 / time scale in Focus, else 1).
+func player_pitch_factor() -> float:
+	var td := get_node_or_null(^"/root/TimeDirector")
+	if td == null or not td.has_method(&"player_time_factor"):
+		return 1.0
+	return clampf(float(td.call(&"player_time_factor")), 0.25, 4.0)
+
+func _process(delta: float) -> void:
+	var f := player_pitch_factor()
+	for i in _players.size():
+		if _owned_base[i] > 0.0:
+			if _players[i].playing:
+				_players[i].pitch_scale = _owned_base[i] * f
+			else:
+				_owned_base[i] = 0.0
+	for i in _ui_players.size():
+		if _owned_base_ui[i] > 0.0:
+			if _ui_players[i].playing:
+				_ui_players[i].pitch_scale = _owned_base_ui[i] * f
+			else:
+				_owned_base_ui[i] = 0.0
+	_update_hums(delta, f)
 
 ## Every sound id this module can play.
 func get_ids() -> Array[StringName]:
@@ -239,6 +359,10 @@ func get_ids() -> Array[StringName]:
 ## True once every id has at least one variant.
 func is_ready() -> bool:
 	return _ready_count >= IDS.size()
+
+## True once every variant of every id is built (a few seconds after start).
+func is_complete() -> bool:
+	return _complete
 
 ## Number of variants generated so far for `id`.
 func variant_count(id: StringName) -> int:
@@ -253,7 +377,7 @@ func generate(id: StringName, variant := 0) -> AudioStreamWAV:
 	var buf := synthesize(id, variant)
 	if buf.is_empty():
 		return null
-	return _to_wav(buf)
+	return _to_wav(buf, LOOP_IDS.has(id))
 
 ## Raw float samples (-1..1) of one variant, normalised to PEAK.
 func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
@@ -284,6 +408,27 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"break_drywall": _make_break_drywall(s)
 		&"break_brick": _make_break_brick(s)
 		&"break_wood": _make_break_wood(s)
+		&"charge_hum": _make_charge_hum(s)
+		&"charge_level": _make_charge_level(s)
+		&"charge_release": _make_charge_release(s)
+		&"jump": _make_jump(s)
+		&"land": _make_land(s)
+		&"crouch": _make_crouch(s)
+		&"hit_cross": _make_hit_cross(s)
+		&"hit_hook": _make_hit_hook(s)
+		&"hit_uppercut": _make_hit_uppercut(s)
+		&"hit_roundhouse": _make_hit_roundhouse(s)
+		&"hit_flying_kick": _make_hit_flying_kick(s)
+		&"hit_stomp": _make_hit_stomp(s)
+		&"arm_break": _make_arm_break(s)
+		&"wall_slam": _make_wall_slam(s)
+		&"focus_in": _make_focus_in(s)
+		&"focus_out": _make_focus_out(s)
+		&"strike_drywall": _make_strike_drywall(s)
+		&"strike_brick": _make_strike_brick(s)
+		&"strike_wood": _make_strike_wood(s)
+		&"strike_concrete": _make_strike_concrete(s)
+		&"strike_hold": _make_strike_hold(s)
 		_:
 			return PackedFloat32Array()
 	s.normalize(PEAK)
@@ -318,14 +463,17 @@ func _pick(id: StringName) -> AudioStreamWAV:
 	return stream
 
 func _take_3d() -> AudioStreamPlayer3D:
-	# Prefer an idle player; steal round-robin when all are busy.
+	return _players[_take_3d_index()]
+
+## Prefer an idle player; steal round-robin when all are busy.
+func _take_3d_index() -> int:
 	var n := _players.size()
 	for i in n:
-		var p := _players[(_next_3d + i) % n]
-		if not p.playing:
-			_next_3d = (_next_3d + i + 1) % n
-			return p
-	var q := _players[_next_3d]
+		var k := (_next_3d + i) % n
+		if not _players[k].playing:
+			_next_3d = (k + 1) % n
+			return k
+	var q := _next_3d
 	_next_3d = (_next_3d + 1) % n
 	return q
 
@@ -352,6 +500,19 @@ func _connect_events() -> void:
 	GameEvents.round_over.connect(_on_round_over)
 	GameEvents.debris_landed.connect(_on_debris_landed)
 	GameEvents.dodge_feedback.connect(_on_dodge_feedback)
+	GameEvents.charge_started.connect(_on_charge_started)
+	GameEvents.charge_level_changed.connect(_on_charge_level_changed)
+	GameEvents.charge_released.connect(_on_charge_released)
+	GameEvents.jumped.connect(_on_jumped)
+	GameEvents.landed.connect(_on_landed)
+	GameEvents.crouch_changed.connect(_on_crouch_changed)
+	GameEvents.arm_broken.connect(_on_arm_broken)
+	GameEvents.wall_slam.connect(_on_wall_slam)
+	GameEvents.focus_started.connect(_on_focus_started)
+	GameEvents.focus_ended.connect(_on_focus_ended)
+	GameEvents.wall_struck.connect(_on_wall_struck)
+	GameEvents.stumbled.connect(_on_stumbled)
+	GameEvents.tripped.connect(_on_tripped)
 
 ## dB offset for an energy relative to a reference: +-6 dB per x4, clamped.
 static func energy_db(energy: float, ref: float) -> float:
@@ -378,6 +539,9 @@ static func hit_sound_for(info: HitInfo) -> StringName:
 			return &"thud"
 		&"counter":
 			return &"heavy_hit"
+	var variant := strike_variant(m)
+	if variant != &"":
+		return variant
 	if info.energy >= HEAVY_HIT_ENERGY:
 		return &"heavy_hit"
 	if (m.contains("power") or m.contains("heavy") or m.contains("charge")) \
@@ -394,6 +558,23 @@ static func _pos_of(n: Node3D) -> Vector3:
 		return n.call(&"get_aim_point")
 	return n.global_position
 
+## Upgrade 2 strike sounds by move id (cross, hook, uppercut, roundhouse,
+## flying kick, stomp / hammer fist); &"" when the move has none.
+static func strike_variant(m: String) -> StringName:
+	if m.contains("uppercut"):
+		return &"hit_uppercut"
+	if m.contains("roundhouse"):
+		return &"hit_roundhouse"
+	if m.contains("flying"):
+		return &"hit_flying_kick"
+	if m.contains("stomp") or m.contains("hammer"):
+		return &"hit_stomp"
+	if m.contains("cross"):
+		return &"hit_cross"
+	if m.contains("hook") or m.contains("backfist"):
+		return &"hit_hook"
+	return &""
+
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null:
 		return
@@ -405,7 +586,10 @@ func _on_hit_landed(info: HitInfo) -> void:
 	var vol := energy_db(e, ref)
 	if String(info.move_id).begins_with("jab"):
 		vol -= 2.0
-	play(id, _hit_point(info), vol, energy_pitch(e, ref))
+	var at := _hit_point(info)
+	play(id, at, vol, energy_pitch(e, ref), info.attacker)
+	if info.charge_level >= 2 and id != &"heavy_hit":
+		play(&"heavy_hit", at, CHARGED_LAYER_DB + 2.0 * (info.charge_level - 2), 1.0, info.attacker)
 
 func _on_hit_blocked(info: HitInfo) -> void:
 	if info == null:
@@ -419,13 +603,13 @@ static func _hit_point(info: HitInfo) -> Vector3:
 	return _pos_of(info.victim)
 
 func _on_perfect_dodge(defender: Node3D, _attacker: Node3D) -> void:
-	play(&"dodge", _pos_of(defender))
+	play(&"dodge", _pos_of(defender), 0.0, 1.0, defender)
 
 func _on_teleport_counter(defender: Node3D, _target: Node3D) -> void:
-	play(&"teleport", _pos_of(defender))
+	play(&"teleport", _pos_of(defender), 0.0, 1.0, defender)
 
 func _on_pursuit(attacker: Node3D, _victim: Node3D) -> void:
-	play(&"teleport", _pos_of(attacker), -3.0, 1.1)
+	play(&"teleport", _pos_of(attacker), -3.0, 1.1, attacker)
 
 func _on_attack_tell(attacker: Node3D, kind: StringName, _duration: float) -> void:
 	play(&"tell_grab" if kind == &"grab" else &"tell_strike", _pos_of(attacker))
@@ -444,17 +628,75 @@ func _on_attack_active(attacker: Node3D, move_id: StringName) -> void:
 		vol = -3.0
 	elif m.contains("grab"):
 		return
-	play(&"whoosh", _pos_of(attacker), vol, pitch)
+	if m.contains("uppercut") or m.contains("roundhouse") or m.contains("flying"):
+		pitch = 0.8
+		vol = 1.0
+	if is_instance_valid(attacker) and clock_ms() - int(_last_release.get(attacker.get_instance_id(), -100000)) \
+			< RELEASE_WHOOSH_GAP_MS:
+		return  # the charged release already whooshed
+	play(&"whoosh", _pos_of(attacker), vol, pitch, attacker)
 
-func _on_wall_cracked(_wall: Node3D, position: Vector3, energy: float) -> void:
+func _on_wall_cracked(wall: Node3D, position: Vector3, energy: float) -> void:
 	# Scripted cracks (enemy entry telegraph) carry 0 J: play them at a firm level.
 	var e := energy if energy > 0.0 else REF_ENERGY[&"crack"]
-	play(&"crack", position, energy_db(e, REF_ENERGY[&"crack"]), energy_pitch(e, 3000.0))
+	# A strike's own crack layer replaces this one (same frame, same wall).
+	_crack_sound_deferred.call_deferred(wall.get_instance_id() if is_instance_valid(wall) else 0,
+			position, e, Engine.get_process_frames())
+
+func _crack_sound_deferred(wall_id: int, position: Vector3, energy: float, frame: int) -> void:
+	if wall_id != 0 and int(_struck_frame.get(wall_id, -1)) == frame:
+		return
+	play(&"crack", position, energy_db(energy, REF_ENERGY[&"crack"]), energy_pitch(energy, 3000.0))
 
 func _on_wall_broken(wall: Node3D, position: Vector3, energy: float, _velocity: Vector3) -> void:
-	var id := break_sound_for(wall)
+	# A strike that opens a hole emits wall_broken and wall_struck in the same
+	# frame; the strike handler layers the break sound itself, so wait for the
+	# end of the frame and skip if a strike on this wall arrived.
+	_break_sound_deferred.call_deferred(wall.get_instance_id() if is_instance_valid(wall) else 0,
+			break_sound_for(wall), position, energy, Engine.get_process_frames())
+
+func _break_sound_deferred(wall_id: int, id: StringName, position: Vector3, energy: float, frame: int) -> void:
+	if wall_id != 0 and int(_struck_frame.get(wall_id, -1)) == frame:
+		return
 	var ref: float = REF_ENERGY.get(id, 6000.0)
 	play(id, position, energy_db(energy, ref), energy_pitch(energy, ref))
+
+## A punch or kick on a wall: per-surface strike sound, volume and pitch by
+## power, rapid repeats varied and softened; cracks, holes and breaks layer
+## the crack / break sounds. The attacker (the player) keeps Focus pitch.
+func _on_wall_struck(attacker: Node3D, wall: Node3D, position: Vector3, _normal: Vector3, power: float,
+		result: StringName, surface: StringName) -> void:
+	if is_instance_valid(wall):
+		_struck_frame[wall.get_instance_id()] = Engine.get_process_frames()
+	var now := clock_ms()
+	var last := int(_strike_last.get(surface, -100000))
+	if now - last < STRIKE_GAP_MS and result != &"hole" and result != &"break":
+		return
+	var streak: int = int(_strike_streak.get(surface, 0)) + 1 if now - last < STRIKE_STREAK_MS else 0
+	_strike_streak[surface] = streak
+	_strike_last[surface] = now
+	var p := maxf(power, 1.0)
+	var vol := clampf(4.2 * log(p / STRIKE_REF_POWER) / log(2.0), STRIKE_MIN_DB, 5.0)
+	vol += maxf(-STRIKE_STREAK_DB * streak, STRIKE_STREAK_MIN_DB)
+	var pitch := clampf(1.08 - 0.07 * log(p / STRIKE_REF_POWER) / log(2.0), 0.82, 1.2)
+	pitch *= 1.0 + _rng.randf_range(-STRIKE_PITCH_JITTER, STRIKE_PITCH_JITTER)
+	pitch *= 1.0 + 0.03 * ((streak % 3) - 1)
+	var id: StringName = STRIKE_BY_SURFACE.get(surface, &"strike_concrete")
+	if result == &"hold":
+		play(&"strike_hold", position, vol, pitch, attacker)
+		if surface == &"concrete":
+			_last_ms.erase(&"strike_concrete")
+			play(&"strike_concrete", position, vol - 9.0, pitch * 1.1, attacker)
+		return
+	_last_ms.erase(id)  # the per-surface gap above is the throttle for strikes
+	play(id, position, vol, pitch, attacker)
+	match result:
+		&"crack":
+			play(&"crack", position, vol + STRIKE_CRACK_DB, pitch * 1.1, attacker)
+		&"hole", &"break":
+			var b: StringName = BREAK_BY_SURFACE.get(surface, &"wall_break")
+			var extra := STRIKE_HOLE_DB if result == &"hole" else 0.0
+			play(b, position, vol + extra, pitch, attacker)
 
 ## Break sound for a Destructible by its `surface` (duck-typed).
 static func break_sound_for(wall: Object) -> StringName:
@@ -493,8 +735,8 @@ func _on_debris_landed(body: Node3D, position: Vector3, speed: float, surface: S
 	play(&"debris", position, clampf(energy_db(e, DEBRIS_REF_ENERGY), -12.0, 3.0), pitch)
 
 ## Mistimed dodge: a soft tick, higher when early, lower when late.
-func _on_dodge_feedback(_defender: Node3D, result: StringName) -> void:
-	play_ui(&"miss", 0.0, 1.12 if result == &"early" else 0.88)
+func _on_dodge_feedback(defender: Node3D, result: StringName) -> void:
+	play_ui(&"miss", 0.0, 1.12 if result == &"early" else 0.88, is_player_source(defender))
 
 func _on_body_impact(_fighter: Node3D, position: Vector3, _normal: Vector3, energy: float,
 		_surface: StringName) -> void:
@@ -502,8 +744,8 @@ func _on_body_impact(_fighter: Node3D, position: Vector3, _normal: Vector3, ener
 	var ref: float = REF_ENERGY[id]
 	play(id, position, energy_db(energy, ref), energy_pitch(energy, ref))
 
-func _on_grab_started(_grabber: Node3D, victim: Node3D) -> void:
-	play(&"grab", _pos_of(victim))
+func _on_grab_started(grabber: Node3D, victim: Node3D) -> void:
+	play(&"grab", _pos_of(victim), 0.0, 1.0, grabber)
 
 func _on_grab_broken(grabber: Node3D, _victim: Node3D, reversal: bool) -> void:
 	play(&"break_grab", _pos_of(grabber), 2.0 if reversal else 0.0, 0.9 if reversal else 1.0)
@@ -532,21 +774,177 @@ func _on_wave_started(_index: int, _total: int) -> void:
 	play_ui(&"wave_start")
 
 
+# --- Upgrade 2: charge, movement, arm break, wall slam, Focus --------------------
+
+func _on_charge_started(fighter: Node3D, _move_id: StringName) -> void:
+	if not is_instance_valid(fighter) or _quitting:
+		return
+	var slot := _hum_slot(fighter)
+	if slot < 0:
+		slot = _free_hum_slot()
+	var stream := _pick_loop(&"charge_hum")
+	if stream == null:
+		return
+	var h := _hum_players[slot]
+	_hum_fighter[slot] = fighter
+	_hum_level[slot] = 0
+	_hum_time[slot] = 0.0
+	_hum_db[slot] = HUM_DB[0] - 8.0  # fades in
+	h.stream = stream
+	h.global_position = _pos_of(fighter)
+	h.volume_db = BASE_DB[&"charge_hum"] + _hum_db[slot]
+	h.pitch_scale = HUM_PITCH[0] * (player_pitch_factor() if is_player_source(fighter) else 1.0)
+	h.play()
+	_used = true
+	sound_played.emit(&"charge_hum", h.global_position)
+
+func _on_charge_level_changed(fighter: Node3D, level: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var slot := _hum_slot(fighter)
+	if slot >= 0:
+		_hum_level[slot] = clampi(level, 0, HUM_PITCH.size() - 1)
+	if level > 0:
+		play(&"charge_level", _pos_of(fighter), -2.0 + 2.0 * level, 1.0 + 0.25 * (level - 1), fighter)
+
+func _on_charge_released(fighter: Node3D, _move_id: StringName, level: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var slot := _hum_slot(fighter)
+	if slot >= 0:
+		_stop_hum(slot)
+	if level > 0:
+		play(&"charge_release", _pos_of(fighter), -4.0 + 2.5 * level, 1.15 - 0.1 * level, fighter)
+		_last_release[fighter.get_instance_id()] = clock_ms()
+
+## Hums currently playing (tests, debug).
+func active_hums() -> int:
+	var n := 0
+	for f in _hum_fighter:
+		if f != null:
+			n += 1
+	return n
+
+## Pitch of the hum for `fighter` (tests): 0 when it has none.
+func hum_pitch(fighter: Node3D) -> float:
+	var slot := _hum_slot(fighter)
+	return _hum_players[slot].pitch_scale if slot >= 0 else 0.0
+
+func _hum_slot(fighter: Node3D) -> int:
+	for i in _hum_fighter.size():
+		if _hum_fighter[i] != null and _hum_fighter[i] == fighter:
+			return i
+	return -1
+
+func _free_hum_slot() -> int:
+	var oldest := 0
+	for i in _hum_fighter.size():
+		if _hum_fighter[i] == null:
+			return i
+		if _hum_time[i] > _hum_time[oldest]:
+			oldest = i
+	_stop_hum(oldest)
+	return oldest
+
+func _stop_hum(slot: int) -> void:
+	_hum_players[slot].stop()
+	_hum_fighter[slot] = null
+
+func _update_hums(delta: float, pitch_factor: float) -> void:
+	for i in _hum_fighter.size():
+		var f = _hum_fighter[i]
+		if f == null:
+			continue
+		if not is_instance_valid(f) or not (f as Node3D).is_inside_tree():
+			_stop_hum(i)
+			continue
+		_hum_time[i] += delta
+		if _hum_time[i] > HUM_MAX_TIME:
+			_stop_hum(i)
+			continue
+		var lvl := _hum_level[i]
+		_hum_db[i] = move_toward(_hum_db[i], HUM_DB[lvl], HUM_SLEW * delta)
+		var h := _hum_players[i]
+		h.global_position = _pos_of(f)
+		h.volume_db = BASE_DB[&"charge_hum"] + _hum_db[i]
+		var wobble := 1.0 + 0.01 * sin(_hum_time[i] * TAU * (3.0 + lvl))
+		h.pitch_scale = HUM_PITCH[lvl] * wobble * (pitch_factor if is_player_source(f) else 1.0)
+
+## A looping stream ignores the retrigger guard (one per charging fighter).
+func _pick_loop(id: StringName) -> AudioStreamWAV:
+	_mutex.lock()
+	var list: Array = _streams.get(id, [])
+	var stream: AudioStreamWAV = list[_rng.randi_range(0, list.size() - 1)] if not list.is_empty() else null
+	_mutex.unlock()
+	return stream
+
+func _on_jumped(fighter: Node3D) -> void:
+	if is_instance_valid(fighter):
+		play(&"jump", _feet_of(fighter), 0.0, 1.0, fighter)
+
+func _on_landed(fighter: Node3D) -> void:
+	if is_instance_valid(fighter):
+		play(&"land", _feet_of(fighter), 0.0, 1.0, fighter)
+
+func _on_crouch_changed(fighter: Node3D, crouching: bool) -> void:
+	if is_instance_valid(fighter):
+		play(&"crouch", _feet_of(fighter) + Vector3.UP * 0.5, 0.0 if crouching else -5.0,
+				1.0 if crouching else 1.15, fighter)
+
+func _on_stumbled(fighter: Node3D, _duration: float) -> void:
+	if is_instance_valid(fighter):
+		play(&"land", _feet_of(fighter), -3.0, 1.2)
+
+func _on_tripped(fighter: Node3D) -> void:
+	if is_instance_valid(fighter):
+		play(&"thud", _feet_of(fighter), -1.0, 1.05)
+
+func _on_arm_broken(fighter: Node3D, zone: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var at := _pos_of(fighter)
+	var rig = fighter.get(&"rig")
+	if rig is Node3D and (rig as Node3D).has_method(&"get_bone_global_position"):
+		at = rig.call(&"get_bone_global_position", BodyZones.AIM_BONE.get(zone, Bones.R_LOWER_ARM))
+	play(&"arm_break", at)
+
+func _on_wall_slam(grabber: Node3D, victim: Node3D, _wall: Node3D) -> void:
+	var at := _pos_of(victim) if is_instance_valid(victim) else _pos_of(grabber)
+	play(&"wall_slam", at, 0.0, 1.0, grabber)
+
+func _on_focus_started(fighter: Node3D) -> void:
+	play_ui(&"focus_in", 0.0, 1.0, is_player_source(fighter))
+
+func _on_focus_ended(fighter: Node3D) -> void:
+	play_ui(&"focus_out", 0.0, 1.0, is_player_source(fighter))
+
+static func _feet_of(f: Node3D) -> Vector3:
+	if f.has_method(&"get_ground_position"):
+		return f.call(&"get_ground_position")
+	return f.global_position
+
+
 # --- Generation --------------------------------------------------------------
 
 func _generate_all() -> void:
-	for v in VARIANTS:
+	var most := VARIANTS
+	for id in VARIANTS_BY_ID:
+		most = maxi(most, int(VARIANTS_BY_ID[id]))
+	for v in most:
 		for id in IDS:
 			if _abort:
 				return
+			if v >= int(VARIANTS_BY_ID.get(id, VARIANTS)):
+				continue
 			var wav := generate(id, v)
 			_mutex.lock()
 			(_streams[id] as Array).append(wav)
 			if v == 0:
 				_ready_count += 1
 			_mutex.unlock()
+	_complete = true
 
-func _to_wav(buf: PackedFloat32Array) -> AudioStreamWAV:
+func _to_wav(buf: PackedFloat32Array, loop := false) -> AudioStreamWAV:
 	var n := buf.size()
 	var bytes := PackedByteArray()
 	bytes.resize(n * 2)
@@ -557,6 +955,10 @@ func _to_wav(buf: PackedFloat32Array) -> AudioStreamWAV:
 	wav.mix_rate = MIX_RATE
 	wav.stereo = false
 	wav.data = bytes
+	if loop:
+		wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		wav.loop_begin = 0
+		wav.loop_end = n
 	return wav
 
 
@@ -598,21 +1000,37 @@ class _Synth:
 		var n := int(dur * SR)
 		var phase := rand()
 		var att := maxf(attack, 0.0005)
+		var att_n := int(att * SR)
 		var fade_n := mini(int(0.006 * SR), n)
+		# Exponential sweep and decay as per-sample multipliers (no exp() per sample).
+		var sweep := 1.0
+		var sweep_k := exp(-1.0 / (SR * maxf(sweep_tau, 0.0001)))
+		var decay := 1.0
+		var decay_k := exp(-1.0 / (SR * decay_tau))
+		var df := f0 - f1
+		var vib_w := TAU * vib_hz / SR
 		for k in n:
-			var t := k / SR
-			var f := f1 + (f0 - f1) * exp(-t / maxf(sweep_tau, 0.0001))
+			var f := f1 + df * sweep
+			sweep *= sweep_k
 			if vib_depth > 0.0:
-				f *= 1.0 + vib_depth * sin(TAU * vib_hz * t)
+				f *= 1.0 + vib_depth * sin(vib_w * k)
 			phase += f / SR
 			phase -= floorf(phase)
 			var v: float
-			match wave:
-				0: v = sin(TAU * phase)
-				1: v = 4.0 * absf(phase - 0.5) - 1.0
-				2: v = 2.0 * phase - 1.0
-				_: v = tanh(3.0 * sin(TAU * phase))
-			var env := minf(t / att, 1.0) * exp(-maxf(t - att, 0.0) / decay_tau)
+			if wave == 0:
+				v = sin(TAU * phase)
+			elif wave == 1:
+				v = 4.0 * absf(phase - 0.5) - 1.0
+			elif wave == 2:
+				v = 2.0 * phase - 1.0
+			else:
+				v = tanh(3.0 * sin(TAU * phase))
+			var env: float
+			if k < att_n:
+				env = float(k) / att_n
+			else:
+				env = decay
+				decay *= decay_k
 			if k > n - fade_n:
 				env *= float(n - k) / fade_n
 			buf[i0 + k] += v * env * amp
@@ -629,23 +1047,35 @@ class _Synth:
 		var hp_state := 0.0
 		var a_hp := 1.0 - exp(-TAU * maxf(hp, 1.0) / SR)
 		var att := maxf(attack, 0.0005)
+		var att_n := int(att * SR)
 		var fade_n := mini(int(0.006 * SR), n)
+		var decay := 1.0
+		var decay_k := exp(-1.0 / (SR * decay_tau))
+		var a := 0.0
+		var gain := 0.0
 		for k in n:
-			var t := k / SR
-			var fc := lerpf(lp0, lp1, float(k) / n)
-			var a := 1.0 - exp(-TAU * fc / SR)
+			# The cutoff sweep is slow: refresh its coefficient every 32 samples.
+			if k % 32 == 0:
+				var fc := lerpf(lp0, lp1, float(k) / n)
+				a = 1.0 - exp(-TAU * fc / SR)
+				# Two cascaded one-poles leave about 0.29 * sqrt(a) of the noise RMS;
+				# compensate so low and high cutoffs come out at similar loudness.
+				gain = amp / sqrt(a)
 			lp += a * (noise() - lp)
 			lp2 += a * (lp - lp2)
 			var v := lp2
 			if hp > 0.0:
 				hp_state += a_hp * (v - hp_state)
 				v -= hp_state
-			var env := minf(t / att, 1.0) * exp(-maxf(t - att, 0.0) / decay_tau)
+			var env: float
+			if k < att_n:
+				env = float(k) / att_n
+			else:
+				env = decay
+				decay *= decay_k
 			if k > n - fade_n:
 				env *= float(n - k) / fade_n
-			# Two cascaded one-poles leave about 0.29 * sqrt(a) of the noise RMS;
-			# compensate so low and high cutoffs come out at similar loudness.
-			buf[i0 + k] += v * env * amp / sqrt(a)
+			buf[i0 + k] += v * env * gain
 
 	## Band-limited noise whose amplitude swells then falls (whooshes).
 	## Band centre sweeps c0 -> c_peak -> c1, envelope peaks at peak_frac of dur.
@@ -657,24 +1087,30 @@ class _Synth:
 		var lp := 0.0
 		var lp2 := 0.0
 		var hp_state := 0.0
+		var a := 0.0
+		var a_hp := 0.0
+		var gain := 0.0
+		var env := 0.0
 		for k in n:
-			var x := float(k) / n
-			var env: float
-			var fc: float
-			if x < peak_frac:
-				var u := x / peak_frac
-				env = u * u
-				fc = lerpf(c0, c_peak, u)
-			else:
-				var u := (x - peak_frac) / (1.0 - peak_frac)
-				env = pow(1.0 - u, 1.6)
-				fc = lerpf(c_peak, c1, u)
-			var a := 1.0 - exp(-TAU * fc * 1.6 / SR)
-			var a_hp := 1.0 - exp(-TAU * fc * 0.6 / SR)
+			# Envelope and band move slowly: refresh them every 32 samples.
+			if k % 32 == 0:
+				var x := float(k) / n
+				var fc: float
+				if x < peak_frac:
+					var u := x / peak_frac
+					env = u * u
+					fc = lerpf(c0, c_peak, u)
+				else:
+					var u := (x - peak_frac) / (1.0 - peak_frac)
+					env = pow(1.0 - u, 1.6)
+					fc = lerpf(c_peak, c1, u)
+				a = 1.0 - exp(-TAU * fc * 1.6 / SR)
+				a_hp = 1.0 - exp(-TAU * fc * 0.6 / SR)
+				gain = env * amp * 1.6 / sqrt(a)
 			lp += a * (noise() - lp)
 			lp2 += a * (lp - lp2)
 			hp_state += a_hp * (lp2 - hp_state)
-			buf[i0 + k] += (lp2 - hp_state) * env * amp * 1.6 / sqrt(a)
+			buf[i0 + k] += (lp2 - hp_state) * gain
 
 	## Sparse random clicks (crackle / debris), density falls off with tau.
 	func crackle(start: float, dur: float, amp: float, rate: float, tau: float, lp_hz: float) -> void:
@@ -953,3 +1389,178 @@ func _make_break_wood(s: _Synth) -> void:
 	s.tone(0.0, 0.3, 120.0, 70.0, 0.04, 0.5, 0.001, 0.07)
 	s.knocks(0.12, 0.6, 4, 160.0, 260.0, 0.3, 0.04)
 	s.drive(1.5)
+
+
+# --- Upgrade 2 sound designs -------------------------------------------------------
+
+## Seamless 0.5 s loop: every partial completes whole cycles in the loop (base
+## a multiple of 2 Hz), with a 6 Hz tremolo (3 cycles) and a beating partial.
+func _make_charge_hum(s: _Synth) -> void:
+	var bases := [104.0, 110.0, 116.0]
+	var f0: float = bases[int(s.rr(0.0, 2.999))]
+	var n := int(0.5 * _Synth.SR)
+	s.buf.resize(n)
+	for k in n:
+		var t := k / _Synth.SR
+		var v := sin(TAU * f0 * t) * 0.5 + sin(TAU * 2.0 * f0 * t) * 0.28 \
+				+ sin(TAU * 3.0 * f0 * t) * 0.14 + sin(TAU * (f0 + 4.0) * t) * 0.3 \
+				+ sin(TAU * 5.0 * f0 * t) * 0.05
+		s.buf[k] = tanh(1.6 * v * (0.85 + 0.15 * sin(TAU * 6.0 * t)))
+
+## Bright rising "shing" when a charge reaches the next level.
+func _make_charge_level(s: _Synth) -> void:
+	var f := s.rr(880.0, 960.0)
+	s.tone(0.0, 0.3, f, f * 1.5, 0.05, 0.7, 0.002, 0.09)
+	s.tone(0.0, 0.3, f * 2.0, f * 3.0, 0.05, 0.3, 0.002, 0.06)
+	s.noise_burst(0.0, 0.12, 0.25, 9000.0, 6000.0, 4000.0, 0.001, 0.03)
+
+## Charged release: an air pop and a fast rising whoosh.
+func _make_charge_release(s: _Synth) -> void:
+	s.swoosh(0.0, 0.32, 1.0, 700.0, 4200.0, 900.0, 0.18)
+	s.tone(0.0, 0.2, 140.0, 60.0, 0.03, 0.6, 0.001, 0.05)
+	s.noise_burst(0.0, 0.04, 0.4, 5000.0, 2500.0, 900.0, 0.0005, 0.01)
+
+## Jump: a cloth swish and a soft push-off.
+func _make_jump(s: _Synth) -> void:
+	s.swoosh(0.0, 0.2, 0.7, 700.0, 2600.0, 900.0, 0.3)
+	s.tone(0.0, 0.12, 95.0, 70.0, 0.03, 0.45, 0.002, 0.03)
+	s.noise_burst(0.0, 0.05, 0.3, 2500.0, 1200.0, 400.0, 0.001, 0.012)
+
+## Land: a soft body thud and a shoe scuff.
+func _make_land(s: _Synth) -> void:
+	s.tone(0.0, 0.2, 85.0, 55.0, 0.03, 1.0, 0.001, 0.05)
+	s.noise_burst(0.0, 0.12, 0.6, 1800.0, 700.0, 250.0, 0.001, 0.035)
+	s.crackle(0.01, 0.12, 0.25, 500.0, 0.04, 3000.0)
+	s.drive(1.3)
+
+## Crouch: a short cloth shuffle.
+func _make_crouch(s: _Synth) -> void:
+	s.crackle(0.0, 0.18, 0.5, 1200.0, 0.07, 2800.0)
+	s.noise_burst(0.0, 0.18, 0.4, 2400.0, 1200.0, 800.0, 0.01, 0.05)
+	s.tone(0.02, 0.1, 110.0, 85.0, 0.03, 0.2, 0.003, 0.03)
+
+## Cross: a crisp straight punch, more snap than thud.
+func _make_hit_cross(s: _Synth) -> void:
+	var f := s.rr(150.0, 175.0)
+	s.tone(0.0, 0.2, f, f * 0.42, 0.025, 0.85, 0.0008, 0.05)
+	s.noise_burst(0.0, 0.07, 1.0, s.rr(6500.0, 7500.0), 2000.0, 900.0, 0.0003, 0.014)
+	s.noise_burst(0.0, 0.1, 0.3, 1100.0, 400.0, 0.0, 0.001, 0.03)
+	s.drive(1.7)
+
+## Hook: a meatier swinging punch, longer body.
+func _make_hit_hook(s: _Synth) -> void:
+	var f := s.rr(110.0, 130.0)
+	s.tone(0.0, 0.3, f, f * 0.4, 0.04, 1.0, 0.001, 0.085)
+	s.noise_burst(0.0, 0.18, 0.6, 1300.0, 350.0, 0.0, 0.001, 0.05)
+	s.noise_burst(0.0, 0.07, 0.7, 4500.0, 1800.0, 700.0, 0.0004, 0.018)
+	s.drive(1.9)
+
+## Uppercut: a heavy thud with a rising "whump" and a crunch.
+func _make_hit_uppercut(s: _Synth) -> void:
+	var f := s.rr(95.0, 110.0)
+	s.tone(0.0, 0.4, f, f * 0.42, 0.05, 1.0, 0.001, 0.12)
+	s.tone(0.02, 0.25, f * 0.8, f * 1.7, 0.06, 0.35, 0.004, 0.07)
+	s.noise_burst(0.0, 0.07, 0.75, 5000.0, 2000.0, 800.0, 0.0004, 0.016)
+	s.crackle(0.005, 0.12, 0.35, 900.0, 0.04, 3500.0)
+	s.drive(2.0)
+
+## Roundhouse: a loud slapping thwack over a low thud.
+func _make_hit_roundhouse(s: _Synth) -> void:
+	var f := s.rr(88.0, 100.0)
+	s.noise_burst(0.0, 0.09, 1.0, s.rr(5500.0, 6500.0), 2200.0, 700.0, 0.0003, 0.03)
+	s.tone(0.0, 0.42, f, f * 0.42, 0.05, 1.0, 0.001, 0.13)
+	s.noise_burst(0.0, 0.25, 0.5, 1400.0, 300.0, 0.0, 0.001, 0.07)
+	s.drive(2.0)
+
+## Flying kick: the biggest boom of the strikes.
+func _make_hit_flying_kick(s: _Synth) -> void:
+	var f := s.rr(78.0, 90.0)
+	s.tone(0.0, 0.6, f, f * 0.38, 0.06, 1.0, 0.001, 0.2)
+	s.noise_burst(0.0, 0.09, 0.85, 6000.0, 2000.0, 800.0, 0.0003, 0.02)
+	s.noise_burst(0.0, 0.35, 0.6, 1500.0, 250.0, 0.0, 0.001, 0.1)
+	s.crackle(0.004, 0.1, 0.3, 900.0, 0.03, 3500.0)
+	s.drive(2.2)
+
+## Stomp / hammer fist: a deep thud into the ground with grit.
+func _make_hit_stomp(s: _Synth) -> void:
+	var f := s.rr(58.0, 66.0)
+	s.tone(0.0, 0.5, f, f * 0.5, 0.06, 1.0, 0.001, 0.18)
+	s.noise_burst(0.0, 0.3, 0.7, 600.0, 200.0, 0.0, 0.001, 0.12)
+	s.crackle(0.0, 0.2, 0.45, 800.0, 0.06, 2800.0)
+	s.noise_burst(0.0, 0.05, 0.4, 3500.0, 1500.0, 500.0, 0.0004, 0.012)
+	s.drive(2.0)
+
+## Arm break: a sharp bone snap, a short grind and a muffled thud.
+func _make_arm_break(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.03, 1.0, 9500.0, 5000.0, 2500.0, 0.0002, 0.006)
+	s.tone(0.0, 0.05, 1900.0, 900.0, 0.01, 0.5, 0.0002, 0.008)
+	s.crackle(0.004, 0.16, 0.7, 1800.0, 0.05, 4000.0)
+	s.tone(0.0, 0.25, 120.0, 70.0, 0.03, 0.6, 0.001, 0.06)
+	s.drive(1.6)
+
+## Wall slam: a head driven into a wall, body slam plus a surface crunch.
+func _make_wall_slam(s: _Synth) -> void:
+	var f := s.rr(62.0, 72.0)
+	s.tone(0.0, 0.7, f, f * 0.45, 0.07, 1.0, 0.001, 0.22)
+	s.noise_burst(0.0, 0.45, 0.85, 2600.0, 600.0, 150.0, 0.001, 0.13)
+	s.crackle(0.0, 0.35, 0.6, 800.0, 0.1, 3200.0)
+	s.knocks(0.08, 0.5, 3, 120.0, 220.0, 0.3, 0.04)
+	s.drive(2.0)
+
+## Focus in: the world sinks, a falling whoosh into a low swell.
+func _make_focus_in(s: _Synth) -> void:
+	s.swoosh(0.0, 0.5, 0.9, 3200.0, 1400.0, 250.0, 0.2)
+	s.tone(0.0, 0.6, 140.0, 55.0, 0.18, 0.7, 0.05, 0.3)
+	s.tone(0.0, 0.5, 880.0, 440.0, 0.15, 0.12, 0.01, 0.15)
+
+## Focus out: a quick rising whoosh back to speed.
+func _make_focus_out(s: _Synth) -> void:
+	s.swoosh(0.0, 0.3, 0.8, 300.0, 3000.0, 2000.0, 0.7)
+	s.tone(0.05, 0.25, 220.0, 440.0, 0.1, 0.2, 0.02, 0.08)
+
+
+# --- Round 3 wall strike designs ----------------------------------------------------
+
+## Drywall: a crunchy thud with a crumble of gypsum.
+func _make_strike_drywall(s: _Synth) -> void:
+	var f := s.rr(95.0, 120.0)
+	s.tone(0.0, 0.25, f, f * 0.55, 0.03, 0.85, 0.001, s.rr(0.05, 0.07))
+	s.noise_burst(0.0, 0.18, 0.8, s.rr(3200.0, 4200.0), 1200.0, 500.0, 0.0005, s.rr(0.035, 0.05))
+	s.crackle(0.004, 0.3, 0.55, s.rr(900.0, 1300.0), 0.08, 3600.0)
+	s.crackle(0.06, 0.35, 0.2, 120.0, 0.2, 2400.0)
+	s.drive(1.6)
+
+## Brick: a hard, short knock with grit.
+func _make_strike_brick(s: _Synth) -> void:
+	var f := s.rr(170.0, 210.0)
+	s.tone(0.0, 0.16, f, f * 0.7, 0.015, 0.9, 0.0005, s.rr(0.025, 0.035))
+	s.tone(0.0, 0.2, f * 0.5, f * 0.35, 0.02, 0.6, 0.0008, 0.04)
+	s.noise_burst(0.0, 0.06, 0.9, s.rr(5000.0, 6500.0), 2500.0, 1200.0, 0.0003, 0.012)
+	s.crackle(0.002, 0.15, 0.45, s.rr(600.0, 900.0), 0.05, 4500.0)
+	s.drive(1.9)
+
+## Wood: a hollow thud and a small crack.
+func _make_strike_wood(s: _Synth) -> void:
+	var f := s.rr(180.0, 230.0)
+	s.modal(0.0, 0.35, f, [1.0, 2.31, 3.7], [1.0, 0.45, 0.2], [s.rr(0.07, 0.09), 0.05, 0.03], 0.7)
+	s.tone(0.0, 0.2, f * 0.5, f * 0.4, 0.03, 0.6, 0.001, 0.05)
+	s.noise_burst(0.0, 0.03, 0.6, 8000.0, 4000.0, 2000.0, 0.0002, 0.006)
+	s.crackle(0.01, 0.12, 0.3, 700.0, 0.04, 5000.0)
+	s.drive(1.5)
+
+## Concrete: a dull, heavy hit with chips skittering off.
+func _make_strike_concrete(s: _Synth) -> void:
+	var f := s.rr(70.0, 85.0)
+	s.tone(0.0, 0.3, f, f * 0.6, 0.03, 1.0, 0.001, s.rr(0.06, 0.08))
+	s.noise_burst(0.0, 0.12, 0.6, 1600.0, 500.0, 0.0, 0.001, 0.035)
+	s.noise_burst(0.0, 0.04, 0.5, 4500.0, 2200.0, 1000.0, 0.0003, 0.008)
+	s.knocks(0.02, 0.22, 3, 900.0, 1600.0, 0.25, 0.012)
+	s.drive(1.8)
+
+## Knuckles on a wall that holds: short, tight and satisfying.
+func _make_strike_hold(s: _Synth) -> void:
+	var f := s.rr(120.0, 150.0)
+	s.tone(0.0, 0.14, f, f * 0.6, 0.015, 1.0, 0.0005, s.rr(0.03, 0.04))
+	s.noise_burst(0.0, 0.05, 0.7, s.rr(3500.0, 4500.0), 1500.0, 600.0, 0.0003, 0.01)
+	s.tone(0.0, 0.08, f * 3.1, f * 2.8, 0.01, 0.2, 0.0003, 0.012)
+	s.drive(1.7)

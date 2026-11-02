@@ -38,6 +38,10 @@ func _run() -> void:
 		return
 	_check(gm.phase == GameMode.Phase.TITLE and gm.menus.screen == GameMenus.Screen.TITLE, "launch shows the title menu")
 	_check(gm.arena != null and gm.player == null, "title has the arena backdrop and no fighters")
+	var labels := PackedStringArray()
+	for b in gm.menus.find_children("*", "Button", true, false):
+		labels.append((b as Button).text)
+	_check(labels.has("RAGDOLL LAB") and labels.has("GRAB LAB"), "title lists RAGDOLL LAB and GRAB LAB")
 
 	gm.menus.duel_pressed.emit()
 	await _frames(6)

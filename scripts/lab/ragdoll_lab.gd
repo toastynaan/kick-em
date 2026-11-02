@@ -23,6 +23,14 @@ var _target := Vector3(0, 0.9, -1.0)
 var _active := true
 var _right_profiles: Array[StringName] = [&"realistic", &"wacky"]
 var _right_profile_i := 0
+## Pose browser (Upgrade 2): a third dummy in front plays every move and hold.
+const POSE_POS := Vector3(0, 0, 2.6)
+const AIR_MOVES: Array[StringName] = [&"flying_kick", &"hammer_fist"]
+var poser: LabDummy
+var _move_i := -1
+var _hold_i := -1
+var _shown := "-"
+var _holds: Array[StringName] = []
 
 func _ready() -> void:
 	_build_world()
@@ -32,6 +40,12 @@ func _ready() -> void:
 		d.ragdoll.auto_getup = false
 	_label3d(left, "HARD LIMITS\n(Jolt only)")
 	_label3d(right, "SOFT LIMITS +\nNEUTRAL TENSION")
+	poser = _make_dummy(&"duelist", POSE_POS, RagdollProfile.realistic())
+	poser.ragdoll.auto_getup = true
+	_label3d(poser, "POSES")
+	_holds.assign(PoseLibrary.ALL_HOLD_IDS)
+	for id in PoseLibrary.CHARGEABLE:
+		_holds.append(PoseLibrary.charge_hold_of(id))
 	_build_ui()
 	_reset()
 
@@ -138,7 +152,8 @@ func _build_ui() -> void:
 	help.text = "RAGDOLL LAB   left: Jolt hard limits only   right: soft limits + neutral tension (+ muscles)\n" \
 		+ "1 drop (go limp)   2 launch forward   3 explosion between them   4 launch into the wall\n" \
 		+ "5 toggle active/passive muscles   G get up   P cycle right profile   S slow motion   R reset   Esc menu\n" \
-		+ "Mouse drag or arrow keys: orbit   wheel or +/-: zoom"
+		+ "Mouse drag or arrow keys: orbit   wheel or +/-: zoom\n" \
+		+ "POSES dummy: N/B next/prev move  M replay  H next hold (incl. charges)  J release  V charge level  C crouch  Space jump  X break arm  Z heal"
 	layer.add_child(help)
 	status = Label.new()
 	status.position = Vector2(16, 120)
@@ -150,9 +165,10 @@ func _build_ui() -> void:
 func _process(_delta: float) -> void:
 	if status:
 		var names := ["ANIMATED", "FLINCH", "STAGGER", "LAUNCHED", "GROUNDED", "GETUP", "DEAD"]
-		status.text = "muscles: %s   right profile: %s\nleft: %s   right: %s   (%.3f / %.3f ms per tick)" % [
+		status.text = "muscles: %s   right profile: %s\nleft: %s   right: %s   (%.3f / %.3f ms per tick)\nposes: %s   stance %s   charge level %d" % [
 			"ACTIVE" if _active else "PASSIVE", _right_profiles[_right_profile_i],
-			names[left.ragdoll.state], names[right.ragdoll.state], left.ragdoll.last_tick_ms, right.ragdoll.last_tick_ms]
+			names[left.ragdoll.state], names[right.ragdoll.state], left.ragdoll.last_tick_ms, right.ragdoll.last_tick_ms,
+			_shown, poser.stance, poser.animator.charge_level]
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_LEFT or event.button_mask & MOUSE_BUTTON_MASK_RIGHT):
@@ -200,6 +216,31 @@ func _unhandled_input(event: InputEvent) -> void:
 				var td := get_node_or_null(^"/root/TimeDirector")
 				if td:
 					td.request_slowmo(0.25, 2.0, 1)
+			KEY_N:
+				_step_move(1)
+			KEY_B:
+				_step_move(-1)
+			KEY_M:
+				_step_move(0)
+			KEY_H:
+				_hold_i = (_hold_i + 1) % _holds.size()
+				_shown = "hold " + String(_holds[_hold_i])
+				if _holds[_hold_i] in [&"jump_rise", &"jump_fall", &"flying_kick_charge", &"hammer_fist_charge"]:
+					poser.jump()
+				poser.animator.hold_pose(_holds[_hold_i])
+			KEY_J:
+				poser.animator.release_pose()
+				_shown = "-"
+			KEY_V:
+				poser.animator.set_charge_level((poser.animator.charge_level + 1) % 4)
+			KEY_C:
+				poser.stance = &"stand" if poser.stance == &"crouch" else &"crouch"
+			KEY_SPACE:
+				poser.jump()
+			KEY_X:
+				poser.ragdoll.break_arm(BodyZones.Zone.ARM_R)
+			KEY_Z:
+				poser.ragdoll.heal_arms()
 			KEY_R:
 				_reset()
 			KEY_ESCAPE:
@@ -226,12 +267,22 @@ func _unhandled_input(event: InputEvent) -> void:
 				_dist = minf(_dist * 1.1, 30.0)
 				_update_camera()
 
+func _step_move(step: int) -> void:
+	var ids := PoseLibrary.ALL_MOVE_IDS
+	_move_i = wrapi(_move_i + step, 0, ids.size()) if _move_i >= 0 or step > 0 else ids.size() - 1
+	var id: StringName = ids[_move_i]
+	_shown = "move " + String(id)
+	if id in AIR_MOVES:
+		poser.jump()
+	var tell := String(id).begins_with("e_")
+	poser.animator.play_move(id, 0.5 if tell else 0.3, 0.15, 0.45)
+
 func _both(f: Callable) -> void:
 	for d in [left, right]:
 		f.call(d)
 
 func _reset() -> void:
-	for pair in [[left, LEFT_POS], [right, RIGHT_POS]]:
+	for pair in [[left, LEFT_POS], [right, RIGHT_POS], [poser, POSE_POS]]:
 		var d: LabDummy = pair[0]
 		d.ragdoll.force_recover()
 		d.ragdoll.auto_getup = false

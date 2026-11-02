@@ -14,21 +14,16 @@ func run() -> void:
 	var g := spawn(&"grunt", Vector3(0, 0, -1.1), Vector3.BACK)
 	await ticks(20)
 
-	print("power punch: tap = stagger, 14-frame startup")
-	var t_active := [0.0]
-	p.combat.attack_active.connect(func(_id: StringName) -> void: t_active[0] = TimeDirector.now())
+	print("HEAVY: a charged punch (level 1 on a tap, level 3 held)")
 	p.combat.press(CombatController.Action.HEAVY)
 	p.combat.release(CombatController.Action.HEAVY)
-	var t0 := TimeDirector.now()
-	await wait_until(func() -> bool: return _hit_info(&"power_punch") != null, 1.5)
-	var info := _hit_info(&"power_punch")
-	check(info != null, "tap power punch landed")
+	await wait_until(func() -> bool: return count_events(&"hit_landed") > 0, 1.5)
+	var info: HitInfo = last_event(&"hit_landed")[1] if count_events(&"hit_landed") > 0 else null
+	check(info != null and info.charge_level == 1, "HEAVY tap landed at charge level 1")
 	if info:
-		check(info.reaction == HitInfo.Reaction.STAGGER, "tap power punch staggers")
-		check(is_equal_approx(info.damage, Tuning.DMG_POWER_MIN), "tap damage %.0f" % info.damage)
-		var st: float = t_active[0] - t0
-		check(absf(st - Tuning.frames(14)) < 0.03, "tap startup %.3f s ~ 14 frames" % st)
-	await wait_real(1.2)
+		check(info.reaction == HitInfo.Reaction.STAGGER, "level 1 jab staggers")
+		check(is_equal_approx(info.damage, Tuning.DMG_JAB * Tuning.CHARGE_DAMAGE[1]), "tap damage %.0f" % info.damage)
+	await wait_real(1.5)
 	if g.is_down():
 		g.ragdoll.force_recover()
 	g.global_position = Vector3(0, 0, -1.1)
@@ -36,49 +31,54 @@ func run() -> void:
 	g.reset_physics_interpolation()
 	g.hp = g.max_hp
 	await ticks(10)
-
-	print("power punch: full charge = launch 13 m/s, finisher, 30-frame startup")
 	clear_events()
 	p.combat.press(CombatController.Action.HEAVY)
 	await wait_real(0.5)
-	check(p.combat.is_charging(), "charging while Heavy held")
-	check(p.combat.get_charge() > 0.3 and p.combat.get_charge() < 0.5, "charge at 0.5 s = %.2f" % p.combat.get_charge())
-	await wait_until(func() -> bool: return not p.combat.is_charging(), 1.0)
-	t0 = TimeDirector.now()
+	check(p.combat.is_charging(), "charging while HEAVY is held")
+	check(p.combat.get_charge() > 0.4 and p.combat.get_charge() < 0.7, "charge at 0.5 s = %.2f" % p.combat.get_charge())
+	await wait_real(0.5)
 	p.combat.release(CombatController.Action.HEAVY)
-	await wait_until(func() -> bool: return _hit_info(&"power_punch") != null, 1.5)
-	info = _hit_info(&"power_punch")
-	check(info != null, "full power punch landed")
+	await wait_until(func() -> bool: return count_events(&"hit_landed") > 0, 1.5)
+	info = last_event(&"hit_landed")[1] if count_events(&"hit_landed") > 0 else null
+	check(info != null, "held HEAVY landed")
 	if info:
-		check(info.reaction == HitInfo.Reaction.LAUNCH and info.is_finisher, "full charge launches, finisher")
-		check(absf(info.launch_velocity.length() - Tuning.POWER_LAUNCH_FULL) < 0.3, "launch %.2f m/s" % info.launch_velocity.length())
-		check(is_equal_approx(info.damage, Tuning.DMG_POWER_MAX), "full damage %.0f" % info.damage)
-		var st: float = t_active[0] - t0
-		check(absf(st - Tuning.frames(30)) < 0.04, "full-charge startup %.3f s ~ 30 frames" % st)
+		check(info.charge_level == 3 and info.reaction == HitInfo.Reaction.LAUNCH and info.is_finisher,
+			"level 3: launches, finisher")
+		check(is_equal_approx(info.damage, Tuning.DMG_JAB * Tuning.CHARGE_DAMAGE[3]), "level 3 damage %.0f" % info.damage)
 	await wait_real(2.5)
 
-	print("leg sweep: small launch, legs out")
-	var p2 := spawn(&"player", Vector3(10, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	print("leg sweep: tap = stumble, charged = trip (small launch, legs out)")
+	var p2 := spawn_fake(&"player", Vector3(10, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER, true)
 	var g2 := spawn(&"grunt", Vector3(10, 0, -1.1), Vector3.BACK)
 	await ticks(20)
 	clear_events()
-	p2.combat.press(CombatController.Action.SWEEP)
+	tap(p2, CombatController.Action.SWEEP)
 	await wait_until(func() -> bool: return _hit_info(&"leg_sweep") != null, 1.0)
 	info = _hit_info(&"leg_sweep")
-	check(info != null, "sweep landed")
-	if info:
-		check(info.reaction == HitInfo.Reaction.LAUNCH and info.launch_velocity.length() < 3.0,
-			"sweep launch is small (%.2f m/s)" % info.launch_velocity.length())
-		check(is_equal_approx(info.damage, Tuning.DMG_SWEEP), "sweep damage")
-		check(info.hit_bone in [&"LeftLowerLeg", &"RightLowerLeg"], "sweep hits a shin (%s)" % info.hit_bone)
+	check(info != null and info.reaction == HitInfo.Reaction.NONE and count_events(&"stumbled") == 1,
+		"tap sweep: the victim stumbles")
+	check(g2.combat.is_stumbling() and not g2.is_down(), "stumbling on its feet")
+	check(info != null and is_equal_approx(info.damage, Tuning.DMG_SWEEP), "sweep damage")
+	check(info != null and info.hit_bone in [&"LeftLowerLeg", &"RightLowerLeg"], "sweep hits a shin")
+	await wait_real(Tuning.STUMBLE_TIME + 0.3)
+	check(not g2.combat.is_stumbling() and not g2.is_down(), "an unpunished stumble recovers")
+	await wait_real(Tuning.COMBO_DROP)
+	clear_events()
+	await hold_press(p2, CombatController.Action.SWEEP, 0.3)
+	await wait_until(func() -> bool: return _hit_info(&"leg_sweep") != null, 1.0)
+	info = _hit_info(&"leg_sweep")
+	check(info != null and info.charge_level == 1 and info.reaction == HitInfo.Reaction.LAUNCH
+		and info.launch_velocity.length() < 3.0, "level 1 sweep trips: small launch")
+	check(count_events(&"tripped") == 1, "tripped emitted")
 	if rig_is_real(g2):
 		var start := g2.get_ground_position()
 		await ticks(2)
-		check(g2.is_launched(), "swept victim goes down")
+		check(g2.is_launched(), "tripped victim goes down")
 		await wait_real(1.0)
 		var moved := g2.get_ground_position() - start
 		moved.y = 0.0
-		check(moved.length() < 1.5, "swept victim falls in place (moved %.2f m)" % moved.length())
+		check(moved.length() < 1.5, "tripped victim falls in place (moved %.2f m)" % moved.length())
+	var t0 := 0.0
 
 	print("enemy tell: start_enemy_attack timing and events")
 	var p3 := spawn(&"player", Vector3(20, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)

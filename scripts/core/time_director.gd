@@ -15,9 +15,17 @@ extends Node
 ## - AudioServer.playback_speed_scale always follows Engine.time_scale.
 ## - Everything is timed in real seconds (now(), physics ticks). While the tree
 ##   is paused the slow-motion timeline is frozen, so a pause never eats a KO.
+## - Focus (Upgrade 2): begin_focus() floors the world scale at
+##   Tuning.FOCUS_SCALE outside the budget. Stacked requests still work: the
+##   world runs at the slower of Focus and the top request. While Focus is on
+##   (and for the SLOWMO_EASE back out) player_time_factor() = 1 / time scale,
+##   so the player stays in real time under any stacked scale. A KO request
+##   ends Focus (and begin_focus is refused during a KO).
 
 signal slowmo_started(priority: int, scale: float)
 signal slowmo_ended()
+## Focus turned on or off here (H listens: a KO or reset can end it).
+signal focus_changed(active: bool)
 
 const PRIO_DODGE := 1
 const PRIO_BIG_LAUNCH := 2
@@ -39,6 +47,9 @@ var _last_real := 0.0
 var _frame_delta := 0.0
 var _granted := 0
 var _refused := 0
+var _focus_active := false
+var _focus_scale := 1.0
+var _focus_release_until := -1.0   ## player keeps real time while the world eases out of Focus
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
@@ -63,6 +74,48 @@ func frame_delta() -> float:
 func real_timer(seconds: float) -> SceneTreeTimer:
 	return get_tree().create_timer(seconds, true, false, true)
 
+# --- Focus (Upgrade 2): the world slows, the player does not --------------------
+## Contract stubs; agent E implements. H calls begin/end from the player's Focus button.
+## Focus does not use the slow-motion budget (it costs meter instead).
+func begin_focus(scale := Tuning.FOCUS_SCALE) -> bool:
+	if get_active_priority() == PRIO_KO:
+		return false  # the KO owns time
+	_focus_scale = clampf(scale, 0.01, 1.0)
+	var was := _focus_active
+	_focus_active = true
+	_focus_release_until = -1.0
+	_apply(now())
+	if not was:
+		focus_changed.emit(true)
+	return true
+
+func end_focus() -> void:
+	_end_focus(true)
+
+## soft: keep the player in real time while the world eases back up (a KO
+## ends Focus hard: the player slows with the KO).
+func _end_focus(soft: bool) -> void:
+	if not _focus_active:
+		return
+	_focus_active = false
+	_focus_release_until = now() + Tuning.SLOWMO_EASE if soft else -1.0
+	_apply(now())
+	focus_changed.emit(false)
+
+func is_focus_active() -> bool:
+	return _focus_active
+
+## 1 / Engine.time_scale while Focus is active, else 1.
+func player_time_factor() -> float:
+	if _focus_active or now() < _focus_release_until:
+		return 1.0 / maxf(Engine.time_scale, 0.01)
+	return 1.0
+
+## The player's delta for a physics delta. Route every player timer, velocity,
+## gravity and animation step through this so none is missed in Focus.
+func player_delta(delta: float) -> float:
+	return delta * player_time_factor()
+
 ## Request slow motion. Returns false if refused (budget or lower priority).
 ## Ending a request restores the scale below it in the stack, not 1.0.
 func request_slowmo(scale: float, duration_real: float, priority: int) -> bool:
@@ -75,7 +128,9 @@ func request_slowmo(scale: float, duration_real: float, priority: int) -> bool:
 		_refused += 1
 		return false
 	var end := t + duration_real
-	if priority != PRIO_KO:
+	if priority == PRIO_KO:
+		_end_focus(false)
+	else:
 		var candidate := _log.duplicate()
 		candidate.append(Vector2(t, end))
 		if _max_window_coverage(candidate, t) > get_budget_seconds() + _EPS:
@@ -110,6 +165,8 @@ func get_scale() -> float:
 
 ## Clears all slow motion (round restart).
 func reset() -> void:
+	_end_focus(false)
+	_focus_release_until = -1.0
 	_stack.clear()
 	_log.clear()
 	_ease_start = -1.0
@@ -141,9 +198,9 @@ func get_budget_fraction() -> float:
 	return get_budget_used() / maxf(get_budget_seconds(), 0.001)
 
 func get_debug_text() -> String:
-	return "time %.2fx  slow-mo %s  budget %.2f/%.2f s  granted %d refused %d" % [
-		Engine.time_scale, get_active_name(), get_budget_used(), get_budget_seconds(),
-		_granted, _refused]
+	return "time %.2fx  slow-mo %s%s  player x%.2f  budget %.2f/%.2f s  granted %d refused %d" % [
+		Engine.time_scale, get_active_name(), "  FOCUS" if _focus_active else "", player_time_factor(),
+		get_budget_used(), get_budget_seconds(), _granted, _refused]
 
 # --- Internals ---------------------------------------------------------------
 func _process(delta: float) -> void:
@@ -193,6 +250,8 @@ func _apply(t: float) -> void:
 	var target := 1.0
 	if not _stack.is_empty():
 		target = _stack.back()["scale"]
+	if _focus_active:
+		target = minf(target, _focus_scale)
 	if target <= _scale:
 		_scale = target
 		_ease_start = -1.0

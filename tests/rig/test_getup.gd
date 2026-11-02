@@ -18,9 +18,17 @@ func _ready() -> void:
 	var worst_bounds_gap := 0.0
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 99
-	for n in 8:
-		var a := rng.randf_range(0, TAU)
-		rc.launch(Vector3(cos(a), 0.3, sin(a)) * rng.randf_range(4, 10), d.global_position, Bones.CHEST)
+	# Alternate backward / forward relative to the facing (lands face up /
+	# face down most of the time); Jolt varies run to run, so keep going (up
+	# to 16) until both get-up kinds have been seen.
+	var n := -1
+	while n < 15:
+		n += 1
+		if n >= 8 and kinds.size() == 2:
+			break
+		var back := d.global_basis.z if n % 2 == 0 else -d.global_basis.z
+		back = (Vector3(back.x, 0, back.z).normalized() + Vector3(rng.randf_range(-0.3, 0.3), 0, rng.randf_range(-0.3, 0.3))).normalized()
+		rc.launch((back + Vector3.UP * 0.3) * rng.randf_range(4, 10), d.rig.get_bone_global_position(Bones.CHEST), Bones.CHEST)
 		var t := 0
 		while rc.state != RagdollController.State.GETUP and t < 1200:
 			await get_tree().physics_frame

@@ -122,7 +122,9 @@ func run() -> void:
 	p = pe[0]
 	e = pe[1]
 	clear_events()
-	p.combat.press(CombatController.Action.SWEEP)
+	p.combat.force_hold_charge = true
+	await hold_press(p, CombatController.Action.SWEEP, 0.3)  # level 1 sweep trips
+	p.combat.force_hold_charge = false
 	await wait_until(func() -> bool: return _landed(&"leg_sweep", e) != null, 1.0)
 	await wait_until(func() -> bool: return e.get_state() == RagdollController.State.GROUNDED \
 		or (e.is_launched() and e.get_center_of_mass().y - e.get_ground_position().y < 0.6), 3.0)
@@ -145,7 +147,7 @@ func run() -> void:
 		check(absf(v.length() - MoveLibrary.PUNT_LAUNCH) < 0.3, "punt launch %.2f m/s" % v.length())
 		check(absf(rad_to_deg(asin(v.normalized().y)) - MoveLibrary.PUNT_UP_ANGLE) < 1.0, "punt 15 deg up")
 		check(info.hit_bone == &"Hips", "punt hits the hips")
-		check(e.downed_hits == 1, "one punt counted")
+		check(e.combat.downed_kicked, "one punt counted")
 	await wait_until(func() -> bool: return not p.combat.is_attacking(), 1.0)
 	await wait_until(func() -> bool: return e.get_state() == RagdollController.State.GROUNDED, 3.0)
 	to_e = e.get_ground_position() - p.global_position
@@ -159,7 +161,7 @@ func run() -> void:
 		check(not started.is_empty() and started[0][0] == &"sparta_kick", "no second punt in the same down")
 	await wait_until(func() -> bool: return not p.combat.is_attacking(), 1.0)
 
-	print("cancel: sweep hit -> punt")
+	print("string: crouch + K, K (sweep, then the off-balance launch)")
 	pe = await _pair(&"grunt", 1.1)
 	p = pe[0]
 	e = pe[1]
@@ -168,16 +170,23 @@ func run() -> void:
 	p.combat.press(CombatController.Action.SWEEP)
 	p.combat.release(CombatController.Action.SWEEP)
 	await wait_until(func() -> bool: return _landed(&"leg_sweep", e) != null, 1.0)
+	check(e.combat.is_stumbling(), "tap sweep: stumbling")
 	p.combat.press(K)
 	p.combat.release(K)
 	await wait_until(func() -> bool: return started.size() >= 2, 1.0)
-	check(started.size() >= 2 and started[1][0] == &"punt", "sweep cancels into a punt")
+	check(started.size() >= 2 and started[1][0] == &"sparta_kick", "the sweep cancels into the front kick")
 	if started.size() >= 2:
 		var sw := MoveLibrary.get_move(&"leg_sweep")
 		var gap: float = started[1][1] - started[0][1]
-		check(gap < Tuning.frames(sw.startup + sw.active + sw.recovery), "punt came out inside the sweep's recovery (%.3f s)" % gap)
-	ok = await wait_until(func() -> bool: return _landed(&"punt", e) != null, 1.0)
-	check(ok, "sweep -> punt landed")
+		check(gap < Tuning.frames(sw.startup + sw.active + sw.recovery), "inside the sweep's recovery (%.3f s)" % gap)
+	ok = await wait_until(func() -> bool: return _landed(&"sparta_kick", e) != null, 1.0)
+	check(ok, "front kick on the stumbling enemy landed")
+	if ok:
+		var ki := _landed(&"sparta_kick", e)
+		check(ki.juggle and ki.reaction == HitInfo.Reaction.LAUNCH, "it is a juggle launch")
+		check(ki.launch_velocity.length() >= Tuning.KICK_LAUNCH * Tuning.JUGGLE_LAUNCH - 0.2,
+			"x JUGGLE_LAUNCH: %.2f m/s" % ki.launch_velocity.length())
+	await wait_real(1.5)
 
 	print("magnetism: a jab from 2 m connects")
 	pe = await _pair(&"grunt", 2.0)

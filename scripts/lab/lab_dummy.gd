@@ -14,6 +14,15 @@ var active_muscles := true
 ## World XZ movement intent, 0..1 (lab keys / tests).
 var move_input := Vector3.ZERO
 var walk_speed := Tuning.WALK_SPEED
+## &"stand" or &"crouch" (lab key C); &"air" is set while jumping.
+var stance: StringName = &"stand"
+var _airborne := false
+
+## Lab jump (Tuning.JUMP_APEX with Tuning.GRAVITY).
+func jump() -> void:
+	if ragdoll and not ragdoll.is_simulating() and is_on_floor():
+		velocity.y = sqrt(2.0 * Tuning.GRAVITY * Tuning.JUMP_APEX)
+		_airborne = true
 
 ## Call before add_child().
 func setup(p_archetype: StringName, p_profile: RagdollProfile = null, p_active := true) -> void:
@@ -56,11 +65,19 @@ func _physics_process(delta: float) -> void:
 	if ragdoll.state == RagdollController.State.GETUP:
 		velocity = Vector3.ZERO
 		return
-	var v := move_input.limit_length(1.0) * walk_speed
+	var speed := walk_speed * (Tuning.CROUCH_SPEED if stance == &"crouch" else 1.0)
+	var v := move_input.limit_length(1.0) * speed
 	velocity.x = v.x
 	velocity.z = v.z
-	velocity.y = -0.5 if is_on_floor() else velocity.y - Tuning.GRAVITY * delta
+	if _airborne or not is_on_floor():
+		velocity.y -= Tuning.GRAVITY * delta
+	else:
+		velocity.y = -0.5
 	move_and_slide()
+	if _airborne and is_on_floor() and velocity.y <= 0.0:
+		_airborne = false
+		animator.play_move(&"land", 0.0, Tuning.frames(Tuning.JUMP_LAND_FRAMES), 0.12)
+	animator.set_stance(&"air" if _airborne else stance, velocity.y if _airborne else NAN)
 	if v.length() > 0.1:
 		var target := Basis.looking_at(Vector3(v.x, 0, v.z).normalized(), Vector3.UP)
 		global_basis = global_basis.slerp(target, clampf(Tuning.TURN_SPEED * delta, 0.0, 1.0)).orthonormalized()

@@ -19,6 +19,9 @@ var starts_while_closed := 0
 var ring_of := {}        ## Fighter -> last ring seen
 var ring_since := {}     ## Fighter -> time the ring last changed
 var attack_end := {}     ## Fighter -> time its last attack ended
+var attack_end_game := {}  ## Fighter -> Util.game_now() of its last attack end
+## s after its attack during which an enemy walks back out (not "waiting").
+const WALK_OUT_TIME := 2.0
 var outcomes := {"hit": 0, "blocked": 0, "whiff": 0}
 var player_anchor := Vector3.INF
 var player_still_since := 0.0
@@ -62,7 +65,9 @@ func _spawn(pos: Vector3, path := PackedVector3Array()) -> Fighter:
 		starts += 1
 		if not _player_open():
 			starts_while_closed += 1)
-	e.combat.attack_ended.connect(func(_m: StringName) -> void: attack_end[e] = Util.game_now())
+	e.combat.attack_ended.connect(func(_m: StringName) -> void:
+		attack_end_game[e] = Util.game_now()
+		attack_end[e] = Util.game_now())
 	enemies.append(e)
 	return e
 
@@ -165,12 +170,15 @@ func _part_crowd() -> void:
 		max_holders = maxi(max_holders, AttackDirector.get_token_holders().size())
 		if Util.game_now() - t0 < 5.0:
 			continue
-		# Separation is a rule for the waiting crowd; a token holder closing in
-		# on the player (or swinging) may brush past a neighbour.
+		# Separation is a rule for the waiting crowd. A token holder closing in
+		# (or swinging), or an enemy walking back out to the far ring after its
+		# turn, may brush past a neighbour; those are not waiting.
 		var standing: Array[Fighter] = []
+		var now_t := Util.game_now()
 		for e in enemies:
 			if not e.is_down() and not e.is_dead():
-				if not AttackDirector.has_token(e) and not e.combat.is_attacking():
+				var walking_out := now_t - float(attack_end_game.get(e, -INF)) < WALK_OUT_TIME
+				if not AttackDirector.has_token(e) and not e.combat.is_attacking() and not walking_out:
 					standing.append(e)
 				if not _inside_bounds(e):
 					out_of_bounds += 1

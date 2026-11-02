@@ -5,18 +5,24 @@ extends Node
 ## Keyboard + mouse                      Gamepad (Xbox layout)
 ##   Move ........ WASD                    Left stick
 ##   Camera ...... Mouse                   Right stick
-##   Light ....... LMB / J                 X
-##   Heavy (hold)  RMB / K                 Y
-##   Kick ........ E / L                   B
-##   Sweep ....... Q / U                   Left trigger
-##   Grab ........ F / I                   LB
-##   Block ....... Space / O               RB / Right trigger
-##   Dash ........ Shift / ;               A
+##   Punch ....... LMB / J                 X        tap = next move in the string, hold = charge it
+##   Kick ........ RMB / K                 Y        crouch + kick = sweep
+##   Grab ........ F                       B        tap or hold; release throws
+##   Jump ........ Space                   A
+##   Crouch (hold) C                       Left stick click
+##   Block ....... Q                       RB       tap just before a hit = perfect dodge
+##   Dash ........ Shift                   Right trigger   after a launch: pursuit
+##   Focus (hold)  E                       LB       the world slows, you don't
 ##   Pause ....... Esc                     Start
 ##   Restart ..... R                       Back
 ##   Help ........ F1
 ##   Debug ....... F3
-##   Fullscreen .. F11 / Alt+Enter / Cmd+Ctrl+F
+##   Fullscreen .. F11 / Alt+Enter
+##
+## Upgrade 2 key map (docs/Ragdoll Brawler — Upgrade Spec 2.md). Ctrl is not a
+## crouch key: on macOS Ctrl+click is a right click, so crouch + punch would
+## read as a kick. Fullscreen left Cmd+Ctrl+F because F is grab; the player's
+## InputInterpreter also drops presses made while Cmd is held.
 ##
 ## A key spec may carry a modifier mask as a third element:
 ## [&"key", KEY_ENTER, KEY_MASK_ALT] is Alt+Enter.
@@ -36,18 +42,19 @@ const ACTIONS := {
 	&"cam_right": [[&"axis", JOY_AXIS_RIGHT_X, 1.0]],
 	&"cam_up": [[&"axis", JOY_AXIS_RIGHT_Y, -1.0]],
 	&"cam_down": [[&"axis", JOY_AXIS_RIGHT_Y, 1.0]],
-	&"light": [[&"mouse", MOUSE_BUTTON_LEFT], [&"key", KEY_J], [&"joy", JOY_BUTTON_X]],
-	&"heavy": [[&"mouse", MOUSE_BUTTON_RIGHT], [&"key", KEY_K], [&"joy", JOY_BUTTON_Y]],
-	&"kick": [[&"key", KEY_E], [&"key", KEY_L], [&"joy", JOY_BUTTON_B]],
-	&"sweep": [[&"key", KEY_Q], [&"key", KEY_U], [&"axis", JOY_AXIS_TRIGGER_LEFT, 1.0]],
-	&"grab": [[&"key", KEY_F], [&"key", KEY_I], [&"joy", JOY_BUTTON_LEFT_SHOULDER]],
-	&"block": [[&"key", KEY_SPACE], [&"key", KEY_O], [&"joy", JOY_BUTTON_RIGHT_SHOULDER], [&"axis", JOY_AXIS_TRIGGER_RIGHT, 1.0]],
-	&"dash": [[&"key", KEY_SHIFT], [&"key", KEY_SEMICOLON], [&"joy", JOY_BUTTON_A]],
+	&"punch": [[&"mouse", MOUSE_BUTTON_LEFT], [&"key", KEY_J], [&"joy", JOY_BUTTON_X]],
+	&"kick": [[&"mouse", MOUSE_BUTTON_RIGHT], [&"key", KEY_K], [&"joy", JOY_BUTTON_Y]],
+	&"grab": [[&"key", KEY_F], [&"joy", JOY_BUTTON_B]],
+	&"jump": [[&"key", KEY_SPACE], [&"joy", JOY_BUTTON_A]],
+	&"crouch": [[&"key", KEY_C], [&"joy", JOY_BUTTON_LEFT_STICK]],
+	&"block": [[&"key", KEY_Q], [&"joy", JOY_BUTTON_RIGHT_SHOULDER]],
+	&"dash": [[&"key", KEY_SHIFT], [&"axis", JOY_AXIS_TRIGGER_RIGHT, 1.0]],
+	&"focus": [[&"key", KEY_E], [&"joy", JOY_BUTTON_LEFT_SHOULDER]],
 	&"pause": [[&"key", KEY_ESCAPE], [&"joy", JOY_BUTTON_START]],
 	&"restart": [[&"key", KEY_R], [&"joy", JOY_BUTTON_BACK]],
 	&"help": [[&"key", KEY_F1]],
 	&"debug": [[&"key", KEY_F3]],
-	&"fullscreen": [[&"key", KEY_F11], [&"key", KEY_ENTER, KEY_MASK_ALT], [&"key", KEY_F, KEY_MASK_META | KEY_MASK_CTRL]],
+	&"fullscreen": [[&"key", KEY_F11], [&"key", KEY_ENTER, KEY_MASK_ALT]],
 }
 
 const FULLSCREEN_RECHECK := 1.5  ## real s after start before checking the window really went fullscreen

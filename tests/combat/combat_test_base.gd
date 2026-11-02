@@ -47,7 +47,9 @@ func _capture_events() -> void:
 	for sig: StringName in [&"hit_landed", &"hit_blocked", &"perfect_dodge", &"teleport_counter",
 			&"grab_started", &"grab_broken", &"fighter_died", &"limb_severed",
 			&"attack_whiff", &"attack_active", &"fighter_launched", &"focus_changed", &"pursuit", &"air_recovery", &"armor_absorbed", &"dodge_feedback",
-			&"attack_tell", &"thrown"]:
+			&"attack_tell", &"thrown", &"charge_started", &"charge_level_changed", &"charge_released",
+			&"combo_progress", &"combo_ended", &"stumbled", &"tripped", &"dazed", &"limb_damaged",
+			&"arm_broken", &"wall_slam"]:
 		var s := sig
 		GameEvents.connect(s, func(a = null, b = null, c = null, d = null) -> void:
 			events.append([s, a, b, c, d]))
@@ -72,6 +74,30 @@ func clear_events() -> void:
 func spawn(archetype: StringName, pos: Vector3, facing: Vector3, team := Fighter.TEAM_ENEMY) -> Fighter:
 	var xf := Transform3D(Basis.looking_at(facing.normalized(), Vector3.UP), pos)
 	return FighterFactory.spawn_dummy(self, archetype, xf, team)
+
+const FakeFighter := preload("res://tests/combat/fake_fighter.gd")
+
+## A fighter whose crouch / jump / stick intent the test sets (fake_crouch,
+## fake_air, fake_intent). hold: read press/release as tap vs hold.
+func spawn_fake(archetype: StringName, pos: Vector3, facing: Vector3, team := Fighter.TEAM_ENEMY,
+		hold := false) -> Fighter:
+	var f: Fighter = FakeFighter.new()
+	f.name = String(archetype).capitalize() + "Fake"
+	f.setup(archetype, team)
+	f.transform = Transform3D(Basis.looking_at(facing.normalized(), Vector3.UP), pos)
+	add_child(f)
+	f.combat.force_hold_charge = hold
+	return f
+
+## Press and hold `action` for `seconds` of real time, then release.
+func hold_press(f: Fighter, action: int, seconds: float) -> void:
+	f.combat.press(action)
+	await wait_real(seconds)
+	f.combat.release(action)
+
+func tap(f: Fighter, action: int) -> void:
+	f.combat.press(action)
+	f.combat.release(action)
 
 func ticks(n: int) -> void:
 	for i in n:

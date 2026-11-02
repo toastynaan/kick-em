@@ -23,6 +23,10 @@ uniform float rough = 0.85;
 uniform float metal = 0.0;
 // Drywall facade: panel seams every 3 m and a window per panel.
 uniform bool facade = false;
+#ifdef VIEW_FADE
+// Camera blocker fade (set_view_fade): per instance, so the material stays shared.
+instance uniform float view_fade : hint_range(0.0, 1.0) = 0.0;
+#endif
 
 varying vec3 v_p;
 varying vec3 v_n;
@@ -76,7 +80,22 @@ float line_mask(float d, float w) {
 	return 1.0 - smoothstep(w * 0.5, w * 0.5 + 0.01, d);
 }
 
+float bayer2(vec2 a) {
+	a = floor(a);
+	return fract(a.x / 2.0 + a.y * a.y * 0.75);
+}
+
+float bayer4(vec2 a) {
+	return bayer2(0.5 * a) * 0.25 + bayer2(a);
+}
+
 void fragment() {
+#ifdef VIEW_FADE
+	// Screen-door dither: stays in the opaque pipeline (no sorting, cheap).
+	if (view_fade > 0.001 && bayer4(FRAGCOORD.xy) < view_fade) {
+		discard;
+	}
+#endif
 	vec2 uv = face_uv(v_p, v_n);
 	vec3 col = color_a;
 	float r = rough;
@@ -240,20 +259,29 @@ void fragment() {
 """
 
 static var _shader: Shader
+static var _shader_fade: Shader
 static var _cache: Dictionary = {}
 
+## Static world geometry (floor, concrete): no fade path, so no discard.
 static func shader() -> Shader:
 	if _shader == null:
 		_shader = Shader.new()
 		_shader.code = SHADER_CODE
 	return _shader
 
+## Panels, props and chunks: same shader with the view-fade dither compiled in.
+static func fade_shader() -> Shader:
+	if _shader_fade == null:
+		_shader_fade = Shader.new()
+		_shader_fade.code = SHADER_CODE.replace("shader_type spatial;", "shader_type spatial;\n#define VIEW_FADE")
+	return _shader_fade
+
 static func _make(key: String, pattern: int, world_space: bool, a: Color, b: Color, core: Color,
 		rough := 0.85, metal := 0.0) -> ShaderMaterial:
 	if _cache.has(key):
 		return _cache[key]
 	var m := ShaderMaterial.new()
-	m.shader = shader()
+	m.shader = shader() if world_space else fade_shader()
 	m.set_shader_parameter(&"pattern", pattern)
 	m.set_shader_parameter(&"world_space", world_space)
 	m.set_shader_parameter(&"color_a", a)
@@ -326,6 +354,17 @@ static func _std(key: String, color: Color, rough: float, metal := 0.0) -> Stand
 	_cache[key] = m
 	return m
 
+## Flat colour for the tiny chips a strike knocks off a surface.
+static func chip_material(surface: StringName) -> StandardMaterial3D:
+	match surface:
+		&"brick":
+			return _std("chip_brick", Color(0.62, 0.3, 0.2), 0.9)
+		&"concrete":
+			return _std("chip_concrete", Color(0.6, 0.6, 0.57), 0.95)
+		&"wood":
+			return _std("chip_wood", Color(0.62, 0.46, 0.28), 0.85)
+	return _std("chip_drywall", Color(0.92, 0.9, 0.85), 0.95)
+
 static func office_chair() -> StandardMaterial3D:
 	return _std("chair", Color(0.16, 0.2, 0.32), 0.7)
 
@@ -334,6 +373,49 @@ static func cabinet() -> StandardMaterial3D:
 
 static func drum() -> StandardMaterial3D:
 	return _std("drum", Color(0.12, 0.33, 0.55), 0.5, 0.5)
+
+## Upgrade 2 contract (camera rule 4): fade a breakable panel, prop or debris
+## body that blocks the camera's view. `amount` 0 = opaque (restores), 1 =
+## fully faded (the camera passes Tuning.CAM_BLOCKER_ALPHA-based amounts). Any
+## node the view ray hits on DESTRUCTIBLE or DEBRIS layers may be passed:
+## every GeometryInstance3D under it fades.
+## Meshes using the world shader get a screen-door dither through the
+## `view_fade` instance uniform (shared material untouched, opaque pipeline);
+## other materials use GeometryInstance3D.transparency (per instance too).
+## Cheap enough to call every frame: the mesh list is cached on the node and
+## unchanged amounts are skipped.
+static func set_view_fade(node: Node3D, amount: float) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	var a := clampf(amount, 0.0, 1.0)
+	if absf(float(node.get_meta(&"view_fade", 0.0)) - a) < 0.004:
+		return
+	node.set_meta(&"view_fade", a)
+	var geoms: Array = node.get_meta(&"view_fade_geoms", [])
+	if geoms.is_empty() or not is_instance_valid(geoms[0]):
+		geoms = []
+		_collect_geometry(node, geoms)
+		node.set_meta(&"view_fade_geoms", geoms)
+	for g: Variant in geoms:
+		if not is_instance_valid(g):
+			continue
+		var gi := g as GeometryInstance3D
+		var sm := gi.material_override as ShaderMaterial
+		if sm != null and sm.shader == fade_shader():
+			gi.set_instance_shader_parameter(&"view_fade", a)
+		else:
+			gi.transparency = a * MAX_TRANSPARENCY
+
+## Plain materials never fade fully, so the outline of a blocker stays readable.
+const MAX_TRANSPARENCY := 0.85
+
+static func _collect_geometry(node: Node, out: Array) -> void:
+	if node is GeometryInstance3D:
+		out.append(node)
+	for c in node.get_children():
+		if c is CollisionShape3D:
+			continue
+		_collect_geometry(c, out)
 
 ## Warm emissive strip under a lamp-post head.
 static func lamp_glow() -> StandardMaterial3D:
@@ -404,3 +486,4 @@ static func _crack_walk(img: Image, start: Vector2, ang: float, length: float, w
 		if depth > 0 and rng.randf() < 0.05:
 			_crack_walk(img, p, ang + rng.randf_range(-1.0, 1.0), (length - travelled) * 0.6,
 				w * 0.7, rng, depth - 1)
+

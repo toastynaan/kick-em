@@ -5,6 +5,9 @@ extends RefCounted
 
 enum Reaction { NONE, FLINCH, STAGGER, LAUNCH }
 enum Result { IGNORED, HIT, BLOCKED, DODGED, GRAB_BROKEN }
+## Attack height (Upgrade 2: Crouch and jump). HIGH misses crouching fighters,
+## LOW misses jumping ones, a crouching block stops LOW.
+enum Level { HIGH, MID, LOW }
 
 var attacker: Node3D             ## Fighter, or null for environment hits
 var victim: Node3D               ## Fighter
@@ -21,6 +24,15 @@ var energy: float = 0.0              ## J, 0.5 * victim mass * |launch_velocity|
 var unblockable := false
 var is_finisher := false             ## Full-charge punch, teleport counter, throw: may dismember on a kill
 var result: int = Result.IGNORED     ## Filled in by the defender
+
+# Upgrade 2
+var level: int = Level.MID           ## attack height
+var zone: int = BodyZones.Zone.TORSO ## body zone struck or grabbed
+var charge_level: int = 0            ## 0 = tap, 1..3 = charged (Tuning.CHARGE_LEVELS)
+var combo_index: int = 0             ## 1-based hit number in the attacker's combo, 0 = none
+var damage_scale := 1.0              ## combo scaling already applied to damage (environment damage is never scaled)
+var juggle := false                  ## victim was tumbling, airborne or stumbling
+var air_counter := false             ## victim was jumping (x Tuning.AIR_COUNTER_LAUNCH)
 
 func _to_string() -> String:
 	return "HitInfo(%s %s dmg=%.0f react=%d v=%s)" % [move_id, kind, damage, reaction, launch_velocity]

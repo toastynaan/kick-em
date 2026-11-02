@@ -91,7 +91,9 @@ func _ready() -> void:
 
 	# 4. Pillar at (6, 6): from the west at 10 m/s.
 	r = await _fly(Vector3(3.3, 0, 6), Vector3(10, 1.5, 0), 1.0)
-	var pc: Array = r["imp"].filter(func(d: Dictionary) -> bool: return d["surface"] == &"concrete" and absf(d["pos"].x - 5.5) < 0.4)
+	# Pillar face hits only (the floor beside the pillar is concrete too).
+	var pc: Array = r["imp"].filter(func(d: Dictionary) -> bool: return d["surface"] == &"concrete" \
+		and absf(d["pos"].x - 5.5) < 0.4 and d["pos"].y > 0.25)
 	var p_ok: bool = pc.size() == 1
 	print("[flight] pillar 10 m/s: impacts=%s end x=%.2f -> %s" % [
 		pc.map(func(d: Dictionary) -> String: return "E=%.0f dmg=%.0f" % [d["energy"], d["damage"]]),

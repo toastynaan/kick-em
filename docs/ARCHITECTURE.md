@@ -115,3 +115,69 @@ Round 2 came from two reviews (destruction, fighting), real-time soaks and a win
 | `Destructible.is_point_open(world_pos: Vector3) -> bool` — true where cells are gone (partial holes) | D | F (decals), D |
 | `GameEvents.attack_tell` kind `&"counter"` draws a **blue** glint | C | B emits |
 | `AudioFX` sound ids `clank` (armor), `break_drywall`, `break_brick`, `break_wood`, `debris` | F | B, D, F |
+
+## Upgrade 2 (docs/Ragdoll Brawler — Upgrade Spec 2.md)
+
+Scope: milestones U1–U7 of the upgrade spec. The roguelike section is design only and is **not built**. Hazard props are "Later" and not built. Same rules as before: own files only, private copies, `--fixed-fps 120` for tests, numbers in `Tuning`.
+
+**Decisions on the spec's open questions (defaults until the user says otherwise):** the proposed key map, with block on Q and jump on Space; crouch is **C only** (on macOS Ctrl+click is a right click, so Ctrl as crouch would turn crouch + punch into a kick); zone aiming from the camera centre; crouching makes standing grabs whiff (the spec's crouch rule); no tier ladder or boons yet.
+
+**Ownership changes:** `scripts/fighter/fighter.gd` and `scripts/combat/player_controller.gd` move from B to the new agent **H**. New agent **G** owns limb grabs. Everything else keeps its owner.
+
+| Owner | Upgrade 2 files (in addition to their existing ones) |
+| --- | --- |
+| core (lead) | `scripts/core/body_zones.gd` (new), Tuning/GameEvents/HitInfo/Controls additions, `tests/integration/*`, `tests/run_all.sh` |
+| A — rig & ragdoll | new poses in `pose_library.gd`, stance in `pose_animator.gd`, broken arm and grip in `ragdoll_controller.gd` |
+| B — combat | `combat_controller.gd`, `move_data.gd`, `move_library.gd`, `scripts/combat/combo_graph.gd` (new), `hurtbox.gd`, `combat_fx.gd`, `thrown_chunk.gd`, `projectile_probe.gd`, `tests/combat/*` |
+| C — AI | unchanged (tells now glow on the attacking limb) |
+| D — world | unchanged |
+| E — feel & flow | unchanged (camera rewrite, Focus time) |
+| F — blood & audio | unchanged |
+| **G — limb grabs** (new) | `scripts/combat/limb_grab.gd`, `scripts/combat/grab_lab.gd` + `scenes/grab_lab.tscn`, `tests/grab/*` |
+| **H — body & player input** (new) | `scripts/fighter/fighter.gd`, `scripts/combat/player_controller.gd`, `scripts/combat/input_interpreter.gd` (new), `scripts/combat/zone_aim.gd` (new), `tests/input/*` |
+
+**Contract already in the tree (lead):**
+- `Controls` key map: actions `punch` (LMB/J, X), `kick` (RMB/K, Y), `grab` (F, B), `jump` (Space, A), `crouch` (C, L3), `block` (Q, RB), `dash` (Shift, RT), `focus` (E, LB). `light`, `heavy` and `sweep` are gone. Fullscreen is F11 / Alt+Enter only.
+- `CombatController.Action` enum is **unchanged** (LIGHT, HEAVY, KICK, SWEEP, GRAB, BLOCK, DASH) so bots, tests and the showcase keep working: the punch button presses LIGHT, the kick button KICK. HEAVY and SWEEP stay as scripted entry points (B decides: HEAVY = a charged punch press, SWEEP = crouch + kick).
+- `Tuning`: every "tuning start" from the upgrade spec (camera, input model, crouch/jump, combos, zones, Focus). Add new numbers as local consts and list them in your report.
+- `HitInfo.Level { HIGH, MID, LOW }` and new fields `level`, `zone`, `charge_level`, `combo_index`, `damage_scale`, `juggle`, `air_counter`.
+- `BodyZones` (Zone enum, bones per zone, `of_bone`, `AIM_BONE`).
+- `GameEvents`: charge_started / charge_level_changed / charge_released, combo_progress / combo_ended, stumbled, tripped, dazed, limb_damaged, arm_broken, crouch_changed, jumped, landed, aim_zone_changed, limb_grab_started / limb_grab_released, wall_slam, focus_started / focus_ended.
+- Stubs with fixed signatures (owners implement, callers code against them now):
+
+| API | Owner | Callers |
+| --- | --- | --- |
+| `Fighter.aim_zone`, `aim_bone`, `is_crouching()`, `is_airborne()`, `get_input_intent()` (&"forward"/&"back"/&"neutral") | H | B, G, E, F |
+| `TimeDirector.begin_focus()`, `end_focus()`, `is_focus_active()`, `player_time_factor()`, `player_delta(delta)` | E | H, A, B, F |
+| `CombatController.get_charge_level()`, `get_combo_count()`, `get_damage_scale()`, `is_dazed()`, `is_stumbling()`; `MoveData.hit_level` | B | E (HUD), C, H, F |
+| `PoseAnimator.set_stance(&"stand"/&"crouch"/&"air")`; poses for every new move, `<move>_charge` hold poses, `stumble`, `dazed`, `land` | A | H, B |
+| `RagdollController.break_arm(zone)`, `set_gripped(on)` | A | B, G |
+| `LimbGrab.can_grip()`, `start()`, `is_active()`, `set_swing_input()`, `release()`, `break_free()` | G | B |
+| `ImpactResolver.track_swing()`, `untrack_swing()`, `nearest_wall_dir()` | D | G, B |
+| `WorldMaterials.set_view_fade(node, amount)` (static) | D | E |
+| `BloodFX.set_fighter_fade(fighter, amount)`, `limb_glow(fighter, bone, color, duration, intensity)` | F | E, C, B |
+
+**How the pieces meet:**
+- Input: `PlayerController` (H) reads actions through `InputInterpreter` (H: press/release timestamps in player time, drops presses while Cmd is held) and calls `combat.press()` / `combat.release()`. **B** decides what a press means: tap vs hold at `Tuning.HOLD_THRESHOLD`, charge levels, the combo string (`ComboGraph`), crouch/jump/forward/back variants from the Fighter queries. Jump and crouch are movement (H); B reads them.
+- Focus: H owns the button, the meter drain (`fighter.focus`, bars) and the end conditions, and calls `TimeDirector.begin_focus()/end_focus()` (E: time scale, budget exemption, `player_time_factor`). Every player-side timer and motion goes through `TimeDirector.player_delta()`: velocity and gravity (H), animation (A), combat timers (B). Audio (F) slows world sounds and keeps the player's own at normal pitch.
+- Zones: H casts from the screen centre to the soft target's hurtboxes each tick, sets `fighter.aim_zone/aim_bone`, and emits `aim_zone_changed`; F highlights the zone on the body; B applies the zone's strike effect and picks the grab type; G runs arm drags and giant swings.
+- Tells: C replaces the overhead glint with `BloodFX.limb_glow` on the attacking fist or foot, at the move's `hit_level` (head, waist, feet). Colours stay: white strike, red grab, blue counter.
+- Camera: E never follows a flying body in play (widen instead), fades blockers through D's and F's fade APIs, collides the spring arm with `Layers.WORLD` only (floor, outer walls, pillars).
+
+**Order of work:** each agent works in the spec's priority order (U1 → U7) inside its own files, keeping the game playable and its tests green after each step. Expect callers to land against your stubs before you implement them.
+
+## Round 3: wall strikes
+
+The player can punch and kick walls; harder walls take more hits. Contract (lead): `Tuning` "Wall strikes" block (per-surface cell HP and feel targets; agent D may change the values in that block only), `GameEvents.wall_struck(attacker, wall, position, normal, power, result, surface)`, and `receive_strike(attacker, hit_pos, direction, power) -> StringName` on any world node that takes strikes (stubs on `Destructible` and `Pillar`; D adds it to props and the outer concrete walls).
+- **B** detects strike contact with world geometry during a move's active frames (player only), finds the first node on the collider or its ancestors with `receive_strike`, and calls it once per move; applies hitstop, recoil and shake.
+- **D** turns power into per-cell damage with visible progress and breaks; weakened walls break more easily under body impacts.
+- **F** plays per-surface strike sounds, dust and chips on `wall_struck`.
+- A strike that knocks cells out also emits `GameEvents.wall_broken` (AI nav refresh, decals). `Destructible.strike_holes` and `last_break_by_strike` let the HUD and camera announce only the first strike hole in a panel and a full break.
+
+## Round 3: anti-infinite
+
+Damage scaling alone never ends a stun loop (P,P,P mashed with the stick neutral killed every archetype in one combo). Contract (lead): `Tuning` "Anti-infinite" constants in the Combos block and `GameEvents.combo_escaped(victim, attacker)`. B implements:
+- Combos are counted per victim (hits taken from anyone without a `COMBO_DROP` gap); damage scaling uses that count.
+- From hit `COMBO_STUN_DECAY_FROM`, flinch/stagger/stumble/daze stun shrinks by `COMBO_STUN_DECAY` per hit, down to `COMBO_STUN_MIN`.
+- At `COMBO_ESCAPE_HITS` hits or `COMBO_ESCAPE_STUN` s of stun in one combo the victim breaks away: damage but no stun, `COMBO_ESCAPE_GUARD` s of auto-guard, `COMBO_ESCAPE_PUSH` m of separation, count reset. Applies to the player too.
+- At most `JUGGLE_MAX_RELAUNCH` juggle relaunches per flight; ordinary strikes never relaunch a downed body, and hits extend a get-up at most once per knockdown.

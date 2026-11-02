@@ -198,16 +198,17 @@ func _test_rings() -> void:
 	for e in enemies:
 		if AttackDirector.get_ring(e) == AttackDirector.Ring.NEAR:
 			near += 1
-	var want := maxi(1, AttackDirector.get_token_count())
-	check(near == want, "no holders: %d NEAR (one in line per free token), got %d" % [want, near])
+	var want := AttackDirector.get_token_count() + 1
+	check(near == want, "no holders: %d NEAR (one in line per free token + a standby), got %d" % [want, near])
 	await _grant(enemies[3])
 	await get_tree().physics_frame
 	near = 0
 	for e in enemies:
 		if AttackDirector.get_ring(e) == AttackDirector.Ring.NEAR:
 			near += 1
-	check(AttackDirector.get_ring(enemies[3]) == AttackDirector.Ring.NEAR and near == 2,
-		"1 holder: holder NEAR + 1 next in line (%d NEAR)" % near)
+	var want1 := 1 + (AttackDirector.get_token_count() - 1) + 1
+	check(AttackDirector.get_ring(enemies[3]) == AttackDirector.Ring.NEAR and near == want1,
+		"1 holder: holder NEAR + %d in line (%d NEAR)" % [want1 - 1, near])
 	var next := AttackDirector.get_next_in_line()
 	check(next != null and next != enemies[3], "next in line is a non-holder")
 	check(AttackDirector.get_ring(player) == AttackDirector.Ring.NONE, "unregistered fighter has ring NONE")

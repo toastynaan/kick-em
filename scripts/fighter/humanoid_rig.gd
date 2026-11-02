@@ -158,6 +158,11 @@ static func scaled(v: Vector3, h: float, w: float) -> Vector3:
 ## ShaderMaterial from res://shaders/fighter.gdshader (uniform `albedo`).
 ## May be called before or after the rig enters the tree.
 func build(p_appearance: Dictionary, p_mass_kg: float) -> void:
+	# Masses are written only here (pb.mass). A limb grab (agent G) scales the
+	# held limb's mass on the physics server while gripped; never rebuild then.
+	if controller and controller.is_gripped():
+		push_warning("HumanoidRig.build() skipped: body is gripped by a limb grab")
+		return
 	mass_kg = p_mass_kg
 	appearance = p_appearance
 	height_scale = float(appearance.get("height", 1.0))
@@ -488,6 +493,45 @@ func _free_joints() -> void:
 	for j in _joints.values():
 		PhysicsServer3D.free_rid(j)
 	_joints.clear()
+
+## Widen a joint's Jolt hard limits beyond JOINT_LIMITS (+ margin): cones
+## get `extra_deg` more swing and twist; hinges get `extra_deg` more flexion
+## and `hyper_deg` more extension. 0, 0 restores the built limits.
+## (Broken arms, RagdollController.break_arm.)
+func widen_joint(bone: StringName, extra_deg: float, hyper_deg: float) -> void:
+	if not _joints.has(bone) or not JOINT_LIMITS.has(bone):
+		return
+	var j: RID = _joints[bone]
+	var spec: Dictionary = JOINT_LIMITS[bone]
+	var m := deg_to_rad(JOINT_LIMIT_MARGIN)
+	var xr: Vector2 = spec["x"] * (PI / 180.0)
+	if spec["type"] == &"hinge":
+		var lo := xr.x - m - deg_to_rad(hyper_deg)
+		var hi := xr.y + m + deg_to_rad(extra_deg)
+		PhysicsServer3D.hinge_joint_set_param(j, PhysicsServer3D.HINGE_JOINT_LIMIT_LOWER, -hi)
+		PhysicsServer3D.hinge_joint_set_param(j, PhysicsServer3D.HINGE_JOINT_LIMIT_UPPER, -lo)
+	else:
+		var zr: Vector2 = spec["z"] * (PI / 180.0)
+		var yr: Vector2 = spec["y"] * (PI / 180.0)
+		var span := maxf((xr.y - xr.x) * 0.5, (zr.y - zr.x) * 0.5) + m + deg_to_rad(extra_deg)
+		var twist := maxf(absf(yr.x), absf(yr.y)) + m + deg_to_rad(extra_deg)
+		PhysicsServer3D.cone_twist_joint_set_param(j, PhysicsServer3D.CONE_TWIST_JOINT_SWING_SPAN, minf(span, PI * 0.95))
+		PhysicsServer3D.cone_twist_joint_set_param(j, PhysicsServer3D.CONE_TWIST_JOINT_TWIST_SPAN, minf(twist, PI * 0.95))
+
+## Current Jolt hinge limits of a bone's joint as Vector2(min, max) X angle in
+## degrees (our sign convention), or Vector2.ZERO for a cone.
+func get_hinge_limits(bone: StringName) -> Vector2:
+	if not _joints.has(bone) or JOINT_LIMITS.get(bone, {}).get("type", &"") != &"hinge":
+		return Vector2.ZERO
+	var j: RID = _joints[bone]
+	var lower := PhysicsServer3D.hinge_joint_get_param(j, PhysicsServer3D.HINGE_JOINT_LIMIT_LOWER)
+	var upper := PhysicsServer3D.hinge_joint_get_param(j, PhysicsServer3D.HINGE_JOINT_LIMIT_UPPER)
+	return Vector2(rad_to_deg(-upper), rad_to_deg(-lower))
+
+func get_cone_span(bone: StringName) -> float:
+	if not _joints.has(bone) or JOINT_LIMITS.get(bone, {}).get("type", &"") != &"cone":
+		return 0.0
+	return rad_to_deg(PhysicsServer3D.cone_twist_joint_get_param(_joints[bone], PhysicsServer3D.CONE_TWIST_JOINT_SWING_SPAN))
 
 ## Remove a bone's joint to its parent (used when severing).
 func break_joint(bone: StringName) -> void:

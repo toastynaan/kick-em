@@ -21,6 +21,10 @@ func build_body() -> void:
 	add_part(Bones.L_LOWER_LEG, Vector3(0.11, 0.4, 0.11), Vector3(-0.1, 0.25, 0))
 	add_part(Bones.R_UPPER_LEG, Vector3(0.14, 0.4, 0.14), Vector3(0.1, 0.65, 0))
 	add_part(Bones.R_LOWER_LEG, Vector3(0.11, 0.4, 0.11), Vector3(0.1, 0.25, 0))
+	add_part(Bones.L_HAND, Vector3(0.08, 0.1, 0.09), Vector3(-0.3, 0.86, 0))
+	add_part(Bones.R_HAND, Vector3(0.08, 0.1, 0.09), Vector3(0.3, 0.86, 0))
+	add_part(Bones.L_FOOT, Vector3(0.1, 0.07, 0.25), Vector3(-0.1, 0.04, -0.05))
+	add_part(Bones.R_FOOT, Vector3(0.1, 0.07, 0.25), Vector3(0.1, 0.04, -0.05))
 
 func add_part(bone: StringName, size: Vector3, pos: Vector3, part_basis := Basis(),
 		shared: ShaderMaterial = null) -> MeshInstance3D:
@@ -46,6 +50,16 @@ func add_part(bone: StringName, size: Vector3, pos: Vector3, part_basis := Basis
 
 func get_mesh_parts() -> Array[MeshInstance3D]:
 	return parts
+
+## Parts riding one bone (HumanoidRig API).
+func get_bone_parts(bone: StringName) -> Array[MeshInstance3D]:
+	var out: Array[MeshInstance3D] = []
+	var a: Node3D = attachments.get(bone)
+	if a != null:
+		for c in a.get_children():
+			if c is MeshInstance3D:
+				out.append(c)
+	return out
 
 func get_attachment(bone: StringName) -> Node3D:
 	return attachments.get(bone)

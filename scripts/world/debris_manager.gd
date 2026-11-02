@@ -3,10 +3,15 @@ extends Node
 ## pieces, severed limbs, thrown chunks).
 ## OWNER: agent D (world). CONTRACT STUB.
 ##
-## Round 2 rules:
-## - Two pools. LARGE bodies persist for the round (the arena remembers), at
-##   most LARGE_MAX. SMALL bodies fade Tuning.DEBRIS_FADE_AFTER s after they
-##   register, at most Tuning.DEBRIS_MAX.
+## Rules (round 2, tiers from upgrade 2):
+## - PERSISTENT bodies (big wall chunks, prop tops, lamp poles, pillar chips,
+##   severed limbs, thrown chunks) stay for the round (the arena remembers), at
+##   most LARGE_MAX.
+## - TIMED bodies fade `life` s after they register: small chunks
+##   (Tuning.DEBRIS_FADE_AFTER, Layers.DEBRIS_SMALL) and medium chunks
+##   (MEDIUM_LIFE, Layers.DEBRIS). At most Tuning.DEBRIS_MAX together.
+##   Only about a quarter of a panel's cells persist, so the persistent pool
+##   holds roughly 25 whole-panel breaks before it starts evicting.
 ## - Over a cap the oldest SETTLED body (at rest for SETTLED_AFTER s) fades out
 ##   over FADE_TIME. A body in the air is never removed; only if a pool
 ##   overflows by OVERFLOW_HARD does its oldest body fade regardless.
@@ -17,7 +22,8 @@ extends Node
 
 signal body_registered(body: RigidBody3D)
 
-const LARGE_MAX := 120          ## persistent large chunks (local; candidate for Tuning)
+const LARGE_MAX := 160          ## persistent bodies (local; candidate for Tuning)
+const MEDIUM_LIFE := 30.0       ## s a medium chunk stays (Destructible passes it)
 const FADE_TIME := 0.6          ## s of shrink before free
 const SETTLE_SPEED := 0.15      ## m/s under which a body counts as at rest
 const SETTLED_AFTER := 0.75     ## s at rest -> settled (may be evicted)
@@ -32,6 +38,7 @@ const BOOKKEEP_INTERVAL := 0.1  ## s between age / cap sweeps
 class Entry:
 	var body: RigidBody3D
 	var small := false
+	var life := -1.0          ## s until it fades; < 0 = persistent
 	var age := 0.0
 	var rest := 0.0
 	var fading := false
@@ -40,8 +47,8 @@ class Entry:
 	var last_speed := 0.0
 	var last_land := -INF
 
-var _large: Array = []        ## Array[Entry], oldest first
-var _small: Array = []
+var _large: Array = []        ## Array[Entry], persistent, oldest first
+var _small: Array = []        ## Array[Entry], timed (small and medium), oldest first
 var _acc := 0.0
 var _time := 0.0
 var _last_land := -INF
@@ -51,8 +58,9 @@ func _ready() -> void:
 
 ## Take ownership of a live debris body (already in the tree).
 ## small: put it on Layers.DEBRIS_SMALL so small chunks skip each other; small
-## bodies fade, large ones persist for the round.
-func register(body: RigidBody3D, small := false) -> void:
+## bodies fade after Tuning.DEBRIS_FADE_AFTER. `life` > 0 makes a large-layer
+## body timed too (medium chunks); otherwise large bodies persist for the round.
+func register(body: RigidBody3D, small := false, life := -1.0) -> void:
 	if body == null or not is_instance_valid(body) or _find(body) != null:
 		return
 	if small:
@@ -68,9 +76,11 @@ func register(body: RigidBody3D, small := false) -> void:
 	var e := Entry.new()
 	e.body = body
 	e.small = small
+	e.life = Tuning.DEBRIS_FADE_AFTER if small and life <= 0.0 else life
 	e.last_speed = body.linear_velocity.length()
-	(_small if small else _large).append(e)
-	_enforce(_small if small else _large, Tuning.DEBRIS_MAX if small else LARGE_MAX)
+	var timed := e.life > 0.0
+	(_small if timed else _large).append(e)
+	_enforce(_small if timed else _large, Tuning.DEBRIS_MAX if timed else LARGE_MAX)
 	body_registered.emit(body)
 
 ## Live registered bodies (including ones fading out).
@@ -105,9 +115,9 @@ func get_bodies() -> Array[RigidBody3D]:
 func find_nearest(pos: Vector3, radius: float, large_only := false) -> RigidBody3D:
 	var best: RigidBody3D = null
 	var best_d := radius
-	for pool in ([_large] if large_only else [_large, _small]):
+	for pool in [_large, _small]:
 		for e: Entry in pool:
-			if e.fading or not is_instance_valid(e.body):
+			if e.fading or not is_instance_valid(e.body) or (large_only and e.small):
 				continue
 			var d := e.body.global_position.distance_to(pos)
 			if d < best_d:
@@ -157,6 +167,12 @@ func _physics_process(delta: float) -> void:
 		var i := 0
 		while i < pool.size():
 			var e: Entry = pool[i]
+			# Settled, old bodies are only re-checked on bookkeeping ticks (a hit
+			# wakes them; the next sweep resets their rest time). Checked before
+			# touching the body so the common case costs two field reads.
+			if not bookkeep and not e.fading and e.rest >= SETTLED_AFTER and e.age >= LAND_WATCH_AGE:
+				i += 1
+				continue
 			if not is_instance_valid(e.body) or e.body.is_queued_for_deletion():
 				pool.remove_at(i)
 				continue
@@ -172,10 +188,10 @@ func _physics_process(delta: float) -> void:
 					continue
 				i += 1
 				continue
-			_watch(e, delta)
+			_watch(e, dt_book if bookkeep and e.rest >= SETTLED_AFTER and e.age >= LAND_WATCH_AGE else delta)
 			if bookkeep:
 				e.age += dt_book
-				if e.small and e.age >= Tuning.DEBRIS_FADE_AFTER:
+				if e.life > 0.0 and e.age >= e.life:
 					_start_fade(e)
 			i += 1
 	if bookkeep:

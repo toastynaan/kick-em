@@ -9,7 +9,7 @@ func _key(k: Key) -> void:
 	Input.parse_input_event(e)
 
 func _ready() -> void:
-	get_tree().create_timer(40.0).timeout.connect(func() -> void:
+	get_tree().create_timer(120.0).timeout.connect(func() -> void:
 		print("LAB FAIL (timeout)")
 		get_tree().quit(1))
 	var lab: Node = load("res://scenes/ragdoll_lab.tscn").instantiate()
@@ -34,5 +34,31 @@ func _ready() -> void:
 		await get_tree().physics_frame
 	print("  after G: left %d right %d" % [lab.left.ragdoll.state, lab.right.ragdoll.state])
 	ok = ok and lab.left.ragdoll.state == RagdollController.State.ANIMATED and lab.right.ragdoll.state == RagdollController.State.ANIMATED
+	# Pose browser (Upgrade 2): step through every move and hold.
+	var poser: LabDummy = lab.poser
+	var moves_seen := {}
+	for i in PoseLibrary.ALL_MOVE_IDS.size():
+		_key(KEY_N)
+		for f in 4:
+			await get_tree().physics_frame
+		moves_seen[poser.animator.get_current_move()] = true
+		for f in 110:
+			await get_tree().physics_frame
+	var holds_seen := {}
+	for i in lab._holds.size():
+		_key(KEY_H)
+		for f in 3:
+			await get_tree().physics_frame
+		holds_seen[poser.animator.get_hold_id()] = true
+		_key(KEY_V)
+		for f in 30:
+			await get_tree().physics_frame
+	_key(KEY_J)
+	for k in [KEY_C, KEY_SPACE, KEY_X, KEY_M, KEY_Z, KEY_C]:
+		_key(k)
+		for f in 90:
+			await get_tree().physics_frame
+	print("  pose browser: %d moves, %d holds shown" % [moves_seen.size(), holds_seen.size()])
+	ok = ok and moves_seen.size() >= PoseLibrary.ALL_MOVE_IDS.size() - 2 and holds_seen.size() >= lab._holds.size() - 2
 	print("LAB ", "PASS" if ok else "FAIL")
 	get_tree().quit(0 if ok else 1)
