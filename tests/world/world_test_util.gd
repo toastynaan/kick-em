@@ -57,3 +57,26 @@ static func cleanup() -> void:
 	ImpactResolver.reset()
 	DebrisManager.reset()
 	TimeDirector.reset()
+
+## Round 6: free agent K's clutter (breakables that are not D's Destructibles or
+## Pillars, and loose clutter bodies) within `radius` of `center`, so a test of
+## D's structure flies through a lane K's layout does not own. Returns how many.
+static func clear_clutter_near(tree: SceneTree, center: Vector3, radius: float) -> int:
+	var cands: Array = []
+	cands.append_array(tree.get_nodes_in_group(&"breakables"))
+	cands.append_array(tree.get_nodes_in_group(&"clutter"))
+	# Everything K's layout put under its "Clutter" containers (loose furniture too).
+	for root in tree.root.find_children("Clutter", "", true, false):
+		cands.append_array(root.get_children())
+	var n := 0
+	var done := {}
+	for node: Node in cands:
+		if done.has(node.get_instance_id()) or node is Destructible or node is Pillar or not (node is Node3D) \
+				or node.is_queued_for_deletion():
+			continue
+		done[node.get_instance_id()] = true
+		var p := (node as Node3D).global_position
+		if Vector2(p.x - center.x, p.z - center.z).length() <= radius:
+			node.queue_free()
+			n += 1
+	return n

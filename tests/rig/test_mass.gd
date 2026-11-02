@@ -1,10 +1,27 @@
 extends Node3D
-## Physical bone masses sum to 70 +- 0.5 kg for mass_kg 70 and 140 +- 1 for
-## 140; rig has exactly Bones.ALL / Bones.PHYSICAL; standing proportions.
+## Physical bone masses sum to the archetype mass: Round 5 F0 check "logged
+## ragdoll masses total 70, 75 and 110 kg, within 1 kg" for the player, grunt,
+## stick and heavy (Bones.MASS_70 fractions x the Tuning.ARCHETYPES mass, as
+## Fighter builds them), measured on the rig and on a live RagdollController;
+## legacy brute / duelist too. Rig has exactly Bones.ALL / Bones.PHYSICAL;
+## standing proportions.
 
 func _ready() -> void:
 	var ok := true
-	for case in [[&"player", 70.0, 0.5], [&"brute", 140.0, 1.0], [&"duelist", 65.0, 0.5]]:
+	# Round 5 roster: the archetype mass and the total the doc wants.
+	for case in [[&"player", 70.0], [&"grunt", 75.0], [&"stick", 75.0], [&"heavy", 110.0]]:
+		var mass := float(Tuning.ARCHETYPES[case[0]]["mass"])
+		var d := RigTestUtil.make_dummy(self, case[0], Vector3(randf_range(-20, 20), 0, 0), null, false)
+		await get_tree().physics_frame
+		var total := d.ragdoll.get_total_mass()
+		var rig_total := 0.0
+		for pb in d.rig.get_physical_bones():
+			rig_total += pb.mass
+		var good := absf(total - float(case[1])) <= 1.0 and absf(rig_total - float(case[1])) <= 1.0 and absf(mass - float(case[1])) < 0.001
+		print("ragdoll mass %-7s %.2f kg (rig %.2f kg, archetype %.1f, want %.0f +- 1) %s" % [case[0], total, rig_total, mass, case[1], "ok" if good else "FAILED"])
+		ok = ok and good
+		d.queue_free()
+	for case in [[&"player", 70.0, 0.5], [&"brute", float(Tuning.ARCHETYPES[&"brute"]["mass"]), 1.0], [&"duelist", 65.0, 0.5]]:
 		var cfg: Dictionary = Tuning.ARCHETYPES[case[0]]
 		var rig := HumanoidRig.new()
 		add_child(rig)

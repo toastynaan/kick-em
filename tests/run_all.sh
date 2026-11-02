@@ -1,11 +1,11 @@
 #!/bin/bash
 # Runs every module test scene headless on a private copy and reports PASS/FAIL.
-# Usage: tests/run_all.sh <copy_dir> [module ...]   (modules: rig combat ai world game fx grab input)
+# Usage: tests/run_all.sh <copy_dir> [module ...]   (modules: core rig anim combat ai world game fx grab input defence move clutter)
 # A test fails on a non-zero exit code or any SCRIPT ERROR / Parse Error line.
 set -u
 P="$(cd "$(dirname "$0")/.." && pwd)"
 C="$1"; shift
-MODULES="${*:-rig combat ai world game fx grab input}"
+MODULES="${*:-core rig anim combat ai world game fx grab input defence move clutter}"
 G=/Applications/Godot_4_8.app/Contents/MacOS/Godot
 rsync -a --delete --exclude .godot "$P/" "$C/"
 "$G" --headless --path "$C" --import > /dev/null 2>&1

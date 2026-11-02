@@ -16,10 +16,24 @@ extends Node
 ##   hit_flying_kick, hit_stomp, arm_break, wall_slam, focus_in, focus_out
 ## Round 3: strike_drywall, strike_brick, strike_wood, strike_concrete,
 ##   strike_hold (wall_struck; 5 variants each so rapid jabs do not repeat)
-## Focus: world sounds slow with AudioServer.playback_speed_scale (set by
-##   TimeDirector); the player's own sounds are pitch-compensated by
-##   TimeDirector.player_time_factor() so they stay at normal pitch. Callers
-##   pass the source fighter to play(..., source) to get that treatment.
+## Round 6: snap_wood, glass_tinkle, break_cardboard, break_fabric, creak,
+##   tile_pop, thump_low, step_/strike_ glass, cardboard, fabric.
+## Round 5: impact_flinch .. impact_sever (one stream per hit tier, played on
+##   hit_landed instead of the Upgrade 2 per-move hit_* sounds), boom (under wall
+##   breaks), whoosh_charged, parry, sidestep, step / step_water / step_metal,
+##   land_hard, land_heavy, vault, wind (loop, follows the speed level), splash,
+##   break_glass
+## Slow motion (Round 5, F0): AudioServer.playback_speed_scale is GLOBAL in
+##   4.8: AudioStreamPlaybackResampled multiplies every playback's resample
+##   step by it, whatever bus the player sends to, so a bus alone cannot keep
+##   a sound at speed (tests/fx/test_audio_time measures this). TimeDirector
+##   keeps it equal to Engine.time_scale. The player keeps real time in all
+##   slow motion (except a KO), so the player's own sounds (impacts,
+##   whooshes, footsteps, wind, landings) get pitch_scale x player_pitch_factor()
+##   (= 1 / playback_speed_scale while the player is in real time) and play on
+##   the "Player" bus; everything else plays on the "World" bus, which slows and
+##   drops in pitch with the world and is muffled by a low-pass that follows
+##   the slow-down. Callers pass the source fighter to play(..., source).
 ##
 ## Every id is synthesised at startup on a worker thread into VARIANTS
 ## AudioStreamWAV (16-bit mono PCM, 44.1 kHz): sine / noise oscillators,
@@ -57,11 +71,37 @@ const IDS: Array[StringName] = [
 	&"hit_cross", &"hit_hook", &"hit_uppercut", &"hit_roundhouse", &"hit_flying_kick",
 	&"hit_stomp", &"arm_break", &"wall_slam", &"focus_in", &"focus_out",
 	&"strike_drywall", &"strike_brick", &"strike_wood", &"strike_concrete", &"strike_hold",
+	# Round 5 (Feel Reference: Sound, Contact frame, Movement signals)
+	&"impact_flinch", &"impact_stumble", &"impact_stagger", &"impact_knockdown", &"impact_launch",
+	&"impact_hard_launch", &"impact_sever", &"boom", &"whoosh_charged", &"parry", &"sidestep",
+	&"step", &"step_water", &"step_metal", &"land_hard", &"land_heavy", &"vault", &"wind",
+	&"splash", &"break_glass",
+	# Round 6 (more destruction): materials and sizes
+	&"snap_wood", &"glass_tinkle", &"break_cardboard", &"break_fabric", &"creak", &"tile_pop",
+	&"thump_low", &"step_glass", &"step_cardboard", &"step_fabric", &"strike_glass",
+	&"strike_cardboard", &"strike_fabric",
 ]
+## Round 6: a body hitting a clutter surface layers that surface's knock.
+const SURFACE_IMPACT := {&"glass": &"strike_glass", &"cardboard": &"strike_cardboard", &"fabric": &"strike_fabric",
+	&"wood": &"strike_wood"}
+## Round 5: one impact stream per hit tier (Feel Reference: "impact sounds
+## layered by tier: a slap for flinch, a thud for stagger and up, and a deep
+## boom for launch and wall break"). Each is its own synthesised stream, so
+## every tier is a different sound (F4 check).
+const TIER_SOUND := {
+	HitInfo.Tier.FLINCH: &"impact_flinch", HitInfo.Tier.STUMBLE: &"impact_stumble",
+	HitInfo.Tier.STAGGER: &"impact_stagger", HitInfo.Tier.KNOCKDOWN: &"impact_knockdown",
+	HitInfo.Tier.LAUNCH: &"impact_launch", HitInfo.Tier.HARD_LAUNCH: &"impact_hard_launch",
+	HitInfo.Tier.SEVER: &"impact_sever",
+}
+## Footstep sound by floor surface (anything else: step).
+const STEP_BY_SURFACE := {&"water": &"step_water", &"metal": &"step_metal", &"glass": &"step_glass",
+	&"cardboard": &"step_cardboard", &"fabric": &"step_fabric"}
 ## wall_struck sound by surface.
 const STRIKE_BY_SURFACE := {
 	&"drywall": &"strike_drywall", &"brick": &"strike_brick", &"wood": &"strike_wood",
 	&"concrete": &"strike_concrete",
+	&"glass": &"strike_glass", &"cardboard": &"strike_cardboard", &"fabric": &"strike_fabric",
 }
 const STRIKE_REF_POWER := 60.0    ## a standing kick: plays at the base level and pitch
 const STRIKE_GAP_MS := 70         ## per-surface cooldown (two limbs on one wall in one tick)
@@ -73,7 +113,7 @@ const STRIKE_MIN_DB := -7.0       ## the weakest strike (a jab) is at most this 
 const STRIKE_HOLE_DB := -3.0      ## a hole layers the surface's break sound this much quieter
 const STRIKE_CRACK_DB := -6.0     ## a crack layers the crack sound
 ## Ids synthesised as seamless loops (played until stopped).
-const LOOP_IDS: Array[StringName] = [&"charge_hum"]
+const LOOP_IDS: Array[StringName] = [&"charge_hum", &"wind"]
 
 ## Charge hum: pitch and level (dB) by charge level 0..3, players kept for it.
 const HUM_PITCH: Array[float] = [1.0, 1.2, 1.45, 1.8]
@@ -83,12 +123,23 @@ const HUM_MAX_TIME := 3.0         ## s: a hum with no release event stops anyway
 const HUM_SLEW := 12.0            ## dB per second toward the level's volume
 ## A charged release already whooshed: skip the attack_active whoosh this soon after (ms).
 const RELEASE_WHOOSH_GAP_MS := 400
-## Charged hits (level 2+) layer heavy_hit under the strike sound, this much quieter (dB).
-const CHARGED_LAYER_DB := -6.0
+
+## Buses (Round 5, F0). Both send to Master; created at startup if missing.
+const WORLD_BUS := &"World"
+const PLAYER_BUS := &"Player"
+## World low-pass during slow motion: cutoff = 20 kHz x speed^SLOW_LP_EXP, at
+## least SLOW_LP_MIN (0.5x -> 6.6 kHz, 0.3x -> 2.9 kHz, 0.2x -> 1.5 kHz). The
+## player's own sounds stay crisp on the Player bus, so they cut through.
+const SLOW_LP_EXP := 1.6
+const SLOW_LP_MIN := 1500.0
+const SLOW_LP_OPEN := 20000.0
+## Pitch compensation never goes past this (a 0.2x KO is not compensated anyway).
+const PLAYER_PITCH_MAX := 6.0
 
 ## wall_broken sound by Destructible.surface (anything else: wall_break).
 const BREAK_BY_SURFACE := {
 	&"drywall": &"break_drywall", &"brick": &"break_brick", &"wood": &"break_wood",
+	&"glass": &"break_glass", &"cardboard": &"break_cardboard", &"fabric": &"break_fabric",
 }
 ## debris_landed throttle: a burst of DEBRIS_BURST, refilled at DEBRIS_RATE per
 ## second; one chunk is heard at most once per DEBRIS_BODY_GAP s.
@@ -117,6 +168,15 @@ const BASE_DB := {
 	&"arm_break": 0.0, &"wall_slam": 0.0, &"focus_in": -4.0, &"focus_out": -6.0,
 	&"strike_drywall": -2.0, &"strike_brick": -2.0, &"strike_wood": -2.0, &"strike_concrete": -2.0,
 	&"strike_hold": -3.0,
+	# Round 5: impacts climb in level with the tier (effect size follows the tier).
+	&"impact_flinch": -5.0, &"impact_stumble": -4.0, &"impact_stagger": -2.5, &"impact_knockdown": -1.0,
+	&"impact_launch": 0.0, &"impact_hard_launch": 1.0, &"impact_sever": 1.5, &"boom": -1.0,
+	&"whoosh_charged": -6.0, &"parry": -1.0, &"sidestep": -6.0, &"step": -12.0, &"step_water": -9.0,
+	&"step_metal": -10.0, &"land_hard": -3.0, &"land_heavy": 0.0, &"vault": -8.0, &"wind": -4.0,
+	&"splash": -3.0, &"break_glass": -3.0,
+	&"snap_wood": -4.0, &"glass_tinkle": -8.0, &"break_cardboard": -4.0, &"break_fabric": -3.0,
+	&"creak": -3.0, &"tile_pop": -6.0, &"thump_low": -2.0, &"step_glass": -10.0, &"step_cardboard": -12.0,
+	&"step_fabric": -13.0, &"strike_glass": -3.0, &"strike_cardboard": -4.0, &"strike_fabric": -4.0,
 }
 
 ## Energy (J) at which a sound plays at its base level; louder above, quieter below.
@@ -127,10 +187,6 @@ const REF_ENERGY := {
 	&"hit_cross": 1500.0, &"hit_hook": 2000.0, &"hit_uppercut": 4000.0, &"hit_roundhouse": 4000.0,
 	&"hit_flying_kick": 6000.0, &"hit_stomp": 3000.0, &"wall_slam": 2800.0,
 }
-## Hits at or above this energy (J) use heavy_hit whatever the move.
-const HEAVY_HIT_ENERGY := 7000.0
-## Heavy moves (power punch, e_heavy, e_charge) below this (J) sound like a punch.
-const HEAVY_MOVE_MIN_ENERGY := 2500.0
 ## Body impacts at or above this energy (J) use body_slam instead of thud.
 const SLAM_ENERGY := 2500.0
 
@@ -206,7 +262,58 @@ func _ready() -> void:
 	_hum_db.resize(HUM_POOL)
 	_task_id = WorkerThreadPool.add_task(_generate_all, false, "AudioFX synth")
 	_ensure_limiter()
+	_ensure_buses()
+	for p in _players:
+		p.bus = WORLD_BUS
+	for u in _ui_players:
+		u.bus = WORLD_BUS
+	for h in _hum_players:
+		h.bus = WORLD_BUS
+	_build_round5()
 	_connect_events()
+
+
+## "World" and "Player" buses into Master; the World bus carries the slow-motion
+## low-pass (disabled at normal speed).
+func _ensure_buses() -> void:
+	for bus_name: StringName in [WORLD_BUS, PLAYER_BUS]:
+		if AudioServer.get_bus_index(bus_name) >= 0:
+			continue
+		AudioServer.add_bus()
+		var i := AudioServer.bus_count - 1
+		AudioServer.set_bus_name(i, bus_name)
+		AudioServer.set_bus_send(i, &"Master")
+	var w := AudioServer.get_bus_index(WORLD_BUS)
+	_world_lp_index = -1
+	for i in AudioServer.get_bus_effect_count(w):
+		if AudioServer.get_bus_effect(w, i) is AudioEffectLowPassFilter:
+			_world_lp_index = i
+	if _world_lp_index < 0:
+		var lp := AudioEffectLowPassFilter.new()
+		lp.cutoff_hz = SLOW_LP_OPEN
+		lp.resonance = 0.5
+		AudioServer.add_bus_effect(w, lp)
+		_world_lp_index = AudioServer.get_bus_effect_count(w) - 1
+	AudioServer.set_bus_effect_enabled(w, _world_lp_index, false)
+
+## Current world low-pass cutoff (Hz), or 0 when the filter is off (tests).
+func get_world_lowpass() -> float:
+	var w := AudioServer.get_bus_index(WORLD_BUS)
+	if w < 0 or _world_lp_index < 0 or not AudioServer.is_bus_effect_enabled(w, _world_lp_index):
+		return 0.0
+	return (AudioServer.get_bus_effect(w, _world_lp_index) as AudioEffectLowPassFilter).cutoff_hz
+
+func _update_world_lowpass() -> void:
+	var w := AudioServer.get_bus_index(WORLD_BUS)
+	if w < 0 or _world_lp_index < 0:
+		return
+	var a := AudioServer.playback_speed_scale
+	var on := a < 0.99
+	if AudioServer.is_bus_effect_enabled(w, _world_lp_index) != on:
+		AudioServer.set_bus_effect_enabled(w, _world_lp_index, on)
+	if on:
+		var lp := AudioServer.get_bus_effect(w, _world_lp_index) as AudioEffectLowPassFilter
+		lp.cutoff_hz = maxf(SLOW_LP_OPEN * pow(maxf(a, 0.01), SLOW_LP_EXP), SLOW_LP_MIN)
 
 
 ## Every sound is normalised near full scale, so a hit + whoosh + thud landing
@@ -279,6 +386,10 @@ func stop_all() -> void:
 		_hum_players[i].stop()
 		_hum_players[i].stream = null
 		_hum_fighter[i] = null
+	if _wind != null:
+		_wind.stop()
+		_wind.stream = null
+		_wind_level = 0.0
 	_owned_base.fill(0.0)
 	_owned_base_ui.fill(0.0)
 
@@ -301,8 +412,10 @@ func play(id: StringName, position: Vector3, volume_db := 0.0, pitch := 1.0, sou
 	p.global_position = position
 	p.volume_db = BASE_DB.get(id, 0.0) + volume_db
 	p.pitch_scale = base * (player_pitch_factor() if _owned_base[i] > 0.0 else 1.0)
+	p.bus = PLAYER_BUS if _owned_base[i] > 0.0 else WORLD_BUS
 	p.play()
 	_used = true
+	last_stream[id] = stream
 	sound_played.emit(id, position)
 
 ## Non-positional (UI, slow-motion stings, player feedback). `player_owned`
@@ -321,22 +434,32 @@ func play_ui(id: StringName, volume_db := 0.0, pitch := 1.0, player_owned := fal
 	p.stream = stream
 	p.volume_db = BASE_DB.get(id, 0.0) + volume_db
 	p.pitch_scale = base * (player_pitch_factor() if player_owned else 1.0)
+	p.bus = PLAYER_BUS if player_owned else WORLD_BUS
 	p.play()
 	_used = true
+	last_stream[id] = stream
 	sound_played.emit(id, Vector3.ZERO)
 
 static func is_player_source(source: Node) -> bool:
 	return source != null and is_instance_valid(source) and source.is_in_group(&"player")
 
-## Pitch multiplier that cancels the world slow-down for the player's sounds:
-## TimeDirector.player_time_factor() (1 / time scale in Focus, else 1).
+## Pitch multiplier that cancels the world slow-down for the player's sounds.
+## playback_speed_scale (a) slows every playback; the player runs at
+## player_time_factor() (pf) world seconds per world second, so the player's
+## own sounds need pf x time_scale / a: 1 / a while the player keeps real time
+## (pf = 1 / time_scale), 1 during a KO (pf = 1, the player slows too), and 1
+## if nobody scales the audio (a = 1).
 func player_pitch_factor() -> float:
 	var td := get_node_or_null(^"/root/TimeDirector")
-	if td == null or not td.has_method(&"player_time_factor"):
-		return 1.0
-	return clampf(float(td.call(&"player_time_factor")), 0.25, 4.0)
+	var pf := 1.0
+	if td != null and td.has_method(&"player_time_factor"):
+		pf = float(td.call(&"player_time_factor"))
+	var a := maxf(AudioServer.playback_speed_scale, 0.01)
+	return clampf(pf * Engine.time_scale / a, 1.0 / PLAYER_PITCH_MAX, PLAYER_PITCH_MAX)
 
 func _process(delta: float) -> void:
+	_update_world_lowpass()
+	_update_round5(delta)
 	var f := player_pitch_factor()
 	for i in _players.size():
 		if _owned_base[i] > 0.0:
@@ -429,6 +552,39 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"strike_wood": _make_strike_wood(s)
 		&"strike_concrete": _make_strike_concrete(s)
 		&"strike_hold": _make_strike_hold(s)
+		&"impact_flinch": _make_impact(s, HitInfo.Tier.FLINCH)
+		&"impact_stumble": _make_impact(s, HitInfo.Tier.STUMBLE)
+		&"impact_stagger": _make_impact(s, HitInfo.Tier.STAGGER)
+		&"impact_knockdown": _make_impact(s, HitInfo.Tier.KNOCKDOWN)
+		&"impact_launch": _make_impact(s, HitInfo.Tier.LAUNCH)
+		&"impact_hard_launch": _make_impact(s, HitInfo.Tier.HARD_LAUNCH)
+		&"impact_sever": _make_impact(s, HitInfo.Tier.SEVER)
+		&"boom": _make_boom(s)
+		&"whoosh_charged": _make_whoosh_charged(s)
+		&"parry": _make_parry(s)
+		&"sidestep": _make_sidestep(s)
+		&"step": _make_step(s)
+		&"step_water": _make_step_water(s)
+		&"step_metal": _make_step_metal(s)
+		&"land_hard": _make_land_hard(s)
+		&"land_heavy": _make_land_heavy(s)
+		&"vault": _make_vault(s)
+		&"wind": _make_wind(s)
+		&"splash": _make_splash(s)
+		&"break_glass": _make_break_glass(s)
+		&"snap_wood": _make_snap_wood(s)
+		&"glass_tinkle": _make_glass_tinkle(s)
+		&"break_cardboard": _make_break_cardboard(s)
+		&"break_fabric": _make_break_fabric(s)
+		&"creak": _make_creak(s)
+		&"tile_pop": _make_tile_pop(s)
+		&"thump_low": _make_thump_low(s)
+		&"step_glass": _make_step_glass(s)
+		&"step_cardboard": _make_step_cardboard(s)
+		&"step_fabric": _make_step_fabric(s)
+		&"strike_glass": _make_strike_glass(s)
+		&"strike_cardboard": _make_strike_cardboard(s)
+		&"strike_fabric": _make_strike_fabric(s)
 		_:
 			return PackedFloat32Array()
 	s.normalize(PEAK)
@@ -492,6 +648,9 @@ func _connect_events() -> void:
 	GameEvents.wall_broken.connect(_on_wall_broken)
 	GameEvents.body_impact.connect(_on_body_impact)
 	GameEvents.grab_started.connect(_on_grab_started)
+	GameEvents.grab_started.connect(func(_g: Node3D, v: Node3D) -> void: _stop_hum_of(v))
+	GameEvents.fighter_launched.connect(func(f: Node3D, _v: Vector3) -> void: _stop_hum_of(f))
+	GameEvents.carry_changed.connect(func(_h: Node3D, held: Node3D) -> void: _stop_hum_of(held))
 	GameEvents.grab_broken.connect(_on_grab_broken)
 	GameEvents.thrown.connect(_on_thrown)
 	GameEvents.fighter_died.connect(_on_fighter_died)
@@ -526,31 +685,6 @@ static func energy_pitch(energy: float, ref: float) -> float:
 		return 1.0
 	return clampf(1.0 - 0.06 * log(energy / ref) / log(2.0), 0.85, 1.12)
 
-## Sound for a landed hit, or &"" when another event already covers it
-## (grab -> grab_started, throw -> thrown + the body impact).
-static func hit_sound_for(info: HitInfo) -> StringName:
-	var m := String(info.move_id)
-	match info.kind:
-		&"bowl":
-			return &"body_slam"
-		&"grab", &"throw":
-			return &""
-		&"projectile":
-			return &"thud"
-		&"counter":
-			return &"heavy_hit"
-	var variant := strike_variant(m)
-	if variant != &"":
-		return variant
-	if info.energy >= HEAVY_HIT_ENERGY:
-		return &"heavy_hit"
-	if (m.contains("power") or m.contains("heavy") or m.contains("charge")) \
-			and info.energy >= HEAVY_MOVE_MIN_ENERGY:
-		return &"heavy_hit"
-	if m.contains("kick") or m.contains("sweep"):
-		return &"kick"
-	return &"punch"
-
 static func _pos_of(n: Node3D) -> Vector3:
 	if not is_instance_valid(n):
 		return Vector3.ZERO
@@ -558,38 +692,48 @@ static func _pos_of(n: Node3D) -> Vector3:
 		return n.call(&"get_aim_point")
 	return n.global_position
 
-## Upgrade 2 strike sounds by move id (cross, hook, uppercut, roundhouse,
-## flying kick, stomp / hammer fist); &"" when the move has none.
-static func strike_variant(m: String) -> StringName:
-	if m.contains("uppercut"):
-		return &"hit_uppercut"
-	if m.contains("roundhouse"):
-		return &"hit_roundhouse"
-	if m.contains("flying"):
-		return &"hit_flying_kick"
-	if m.contains("stomp") or m.contains("hammer"):
-		return &"hit_stomp"
-	if m.contains("cross"):
-		return &"hit_cross"
-	if m.contains("hook") or m.contains("backfist"):
-		return &"hit_hook"
-	return &""
-
+## Round 5 contact frame (F4): one impact stream per tier, on the same physics
+## frame as hit_landed. Grabs are covered by grab_started. The attacker owns the
+## sound, so the player's own impacts keep real-time pitch in slow motion.
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null:
 		return
-	var id := hit_sound_for(info)
+	_stop_hum_of(info.victim)  # a hit knocks the victim out of any charge
+	if info.kind == &"grab":
+		return
+	var id := tier_sound_for(info)
 	if id == &"":
 		return
-	var e := maxf(info.energy, info.damage * 25.0)
-	var ref: float = REF_ENERGY.get(id, 2000.0)
-	var vol := energy_db(e, ref)
-	if String(info.move_id).begins_with("jab"):
-		vol -= 2.0
-	var at := _hit_point(info)
-	play(id, at, vol, energy_pitch(e, ref), info.attacker)
-	if info.charge_level >= 2 and id != &"heavy_hit":
-		play(&"heavy_hit", at, CHARGED_LAYER_DB + 2.0 * (info.charge_level - 2), 1.0, info.attacker)
+	# Within a tier the level moves only a little with power (the tier is the size).
+	var vol := clampf((info.power - _tier_floor(FXRules.tier_of(info))) * 0.6, 0.0, 2.0) if info.power > 0.0 else 0.0
+	_last_ms.erase(id)  # two hits in one tick (a sweep on two legs) both land
+	play(id, _hit_point(info), vol, 1.0, info.attacker)
+	hit_sounds.append({"frame": Engine.get_physics_frames(), "tier": FXRules.tier_of(info), "id": id,
+		"stream": last_stream.get(id)})
+	if hit_sounds.size() > 64:
+		hit_sounds.pop_front()
+
+## The tier's impact sound id for a landed hit (&"" for grabs).
+static func tier_sound_for(info: HitInfo) -> StringName:
+	if info == null or info.kind == &"grab":
+		return &""
+	return TIER_SOUND.get(FXRules.tier_of(info), &"impact_flinch")
+
+## Lower P bound of a tier (Tuning.TIER_BANDS), for the small in-tier level step.
+static func _tier_floor(tier: int) -> float:
+	var b := Tuning.TIER_BANDS
+	match tier:
+		HitInfo.Tier.STAGGER:
+			return b[0]
+		HitInfo.Tier.KNOCKDOWN:
+			return b[1]
+		HitInfo.Tier.LAUNCH:
+			return b[2]
+		HitInfo.Tier.HARD_LAUNCH:
+			return b[3]
+		HitInfo.Tier.SEVER:
+			return b[4]
+	return 0.0
 
 func _on_hit_blocked(info: HitInfo) -> void:
 	if info == null:
@@ -634,6 +778,9 @@ func _on_attack_active(attacker: Node3D, move_id: StringName) -> void:
 	if is_instance_valid(attacker) and clock_ms() - int(_last_release.get(attacker.get_instance_id(), -100000)) \
 			< RELEASE_WHOOSH_GAP_MS:
 		return  # the charged release already whooshed
+	if is_instance_valid(attacker) and clock_ms() - int(_strike_whoosh.get(attacker.get_instance_id(), -100000)) \
+			< STRIKE_WHOOSH_COVER_MS:
+		return  # Round 5: strike_started already whooshed this strike
 	play(&"whoosh", _pos_of(attacker), vol, pitch, attacker)
 
 func _on_wall_cracked(wall: Node3D, position: Vector3, energy: float) -> void:
@@ -660,6 +807,8 @@ func _break_sound_deferred(wall_id: int, id: StringName, position: Vector3, ener
 		return
 	var ref: float = REF_ENERGY.get(id, 6000.0)
 	play(id, position, energy_db(energy, ref), energy_pitch(energy, ref))
+	# Round 5: a deep boom under every wall break (Feel Reference: Sound).
+	play(&"boom", position, clampf(energy_db(energy, 6000.0), -6.0, 2.0), energy_pitch(energy, 6000.0))
 
 ## A punch or kick on a wall: per-surface strike sound, volume and pitch by
 ## power, rapid repeats varied and softened; cracks, holes and breaks layer
@@ -739,10 +888,14 @@ func _on_dodge_feedback(defender: Node3D, result: StringName) -> void:
 	play_ui(&"miss", 0.0, 1.12 if result == &"early" else 0.88, is_player_source(defender))
 
 func _on_body_impact(_fighter: Node3D, position: Vector3, _normal: Vector3, energy: float,
-		_surface: StringName) -> void:
+		surface: StringName) -> void:
 	var id := &"body_slam" if energy >= SLAM_ENERGY else &"thud"
 	var ref: float = REF_ENERGY[id]
 	play(id, position, energy_db(energy, ref), energy_pitch(energy, ref))
+	if surface == &"water":  # Round 5 (F11): bodies in the water patch
+		play(&"splash", position, energy_db(energy, 2500.0), energy_pitch(energy, 2500.0))
+	elif SURFACE_IMPACT.has(surface):  # Round 6: a body against glass, cardboard, a sofa
+		play(SURFACE_IMPACT[surface], position, energy_db(energy, 2500.0), energy_pitch(energy, 2500.0))
 
 func _on_grab_started(grabber: Node3D, victim: Node3D) -> void:
 	play(&"grab", _pos_of(victim), 0.0, 1.0, grabber)
@@ -750,8 +903,10 @@ func _on_grab_started(grabber: Node3D, victim: Node3D) -> void:
 func _on_grab_broken(grabber: Node3D, _victim: Node3D, reversal: bool) -> void:
 	play(&"break_grab", _pos_of(grabber), 2.0 if reversal else 0.0, 0.9 if reversal else 1.0)
 
-func _on_thrown(_grabber: Node3D, victim: Node3D, velocity: Vector3) -> void:
-	play(&"throw", _pos_of(victim), 0.0, clampf(velocity.length() / 12.0, 0.8, 1.2))
+## A thrown body: a whoosh, louder and lower the faster it leaves (6 .. 16 m/s).
+func _on_thrown(grabber: Node3D, victim: Node3D, velocity: Vector3) -> void:
+	var k := clampf((velocity.length() - Tuning.THROW_SPEED_TAP) / (Tuning.THROW_SPEED_CAP - Tuning.THROW_SPEED_TAP), 0.0, 1.0)
+	play(&"throw", _pos_of(victim), lerpf(-2.0, 3.0, k), lerpf(1.1, 0.8, k), grabber)
 
 ## KO sting for the player's death; a body thud for anyone else. The last
 ## enemy of a wave is announced by wave_cleared (or round_over for the final
@@ -759,6 +914,7 @@ func _on_thrown(_grabber: Node3D, victim: Node3D, velocity: Vector3) -> void:
 func _on_fighter_died(fighter: Node3D, _info: HitInfo) -> void:
 	if not is_instance_valid(fighter):
 		return
+	_stop_hum_of(fighter)
 	if fighter.is_in_group(&"player"):
 		play_ui(&"ko")
 	else:
@@ -794,6 +950,7 @@ func _on_charge_started(fighter: Node3D, _move_id: StringName) -> void:
 	h.global_position = _pos_of(fighter)
 	h.volume_db = BASE_DB[&"charge_hum"] + _hum_db[slot]
 	h.pitch_scale = HUM_PITCH[0] * (player_pitch_factor() if is_player_source(fighter) else 1.0)
+	h.bus = PLAYER_BUS if is_player_source(fighter) else WORLD_BUS
 	h.play()
 	_used = true
 	sound_played.emit(&"charge_hum", h.global_position)
@@ -814,8 +971,18 @@ func _on_charge_released(fighter: Node3D, _move_id: StringName, level: int) -> v
 	if slot >= 0:
 		_stop_hum(slot)
 	if level > 0:
-		play(&"charge_release", _pos_of(fighter), -4.0 + 2.5 * level, 1.15 - 0.1 * level, fighter)
+		# Round 5: the charged strike's own whoosh comes from strike_started (same
+		# tick); the release pop only plays when no strike follows (a caller
+		# without strike_started yet), so the two never double.
+		_release_deferred.call_deferred(fighter, level, clock_ms())
 		_last_release[fighter.get_instance_id()] = clock_ms()
+
+func _release_deferred(fighter: Node3D, level: int, at_ms: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	if int(_strike_whoosh.get(fighter.get_instance_id(), -100000)) >= at_ms - 10:
+		return
+	play(&"charge_release", _pos_of(fighter), -4.0 + 2.5 * level, 1.15 - 0.1 * level, fighter)
 
 ## Hums currently playing (tests, debug).
 func active_hums() -> int:
@@ -829,6 +996,14 @@ func active_hums() -> int:
 func hum_pitch(fighter: Node3D) -> float:
 	var slot := _hum_slot(fighter)
 	return _hum_players[slot].pitch_scale if slot >= 0 else 0.0
+
+## Stop `fighter`'s charge hum, if any (interrupted charges).
+func _stop_hum_of(fighter: Node3D) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var slot := _hum_slot(fighter)
+	if slot >= 0:
+		_stop_hum(slot)
 
 func _hum_slot(fighter: Node3D) -> int:
 	for i in _hum_fighter.size():
@@ -859,7 +1034,8 @@ func _update_hums(delta: float, pitch_factor: float) -> void:
 			_stop_hum(i)
 			continue
 		_hum_time[i] += delta
-		if _hum_time[i] > HUM_MAX_TIME:
+		# An interrupted charge (down, flying, dead or held) stops its hum, like the glow.
+		if _hum_time[i] > HUM_MAX_TIME or FXRules.cannot_charge(f):
 			_stop_hum(i)
 			continue
 		var lvl := _hum_level[i]
@@ -884,7 +1060,16 @@ func _on_jumped(fighter: Node3D) -> void:
 
 func _on_landed(fighter: Node3D) -> void:
 	if is_instance_valid(fighter):
-		play(&"land", _feet_of(fighter), 0.0, 1.0, fighter)
+		_landed_deferred.call_deferred(fighter, Engine.get_physics_frames())
+
+## Round 5: Traversal emits `landing` (with its level) and `landed` on the same
+## tick; the level's own sound already played, so the plain one stands down.
+func _landed_deferred(fighter: Node3D, frame: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	if int(_landing_frame.get(fighter.get_instance_id(), -1)) >= frame:
+		return
+	play(&"land", _feet_of(fighter), 0.0, 1.0, fighter)
 
 func _on_crouch_changed(fighter: Node3D, crouching: bool) -> void:
 	if is_instance_valid(fighter):
@@ -986,7 +1171,9 @@ class _Synth:
 		return float(_seed) / 1073741823.5 - 1.0
 
 	func ensure(seconds: float) -> void:
-		var n := int(seconds * SR)
+		# ceil + 1: start and length are cut with int() separately, so their
+		# sum can land one sample past int(seconds * SR).
+		var n := int(ceil(seconds * SR)) + 1
 		if buf.size() < n:
 			buf.resize(n)
 
@@ -1564,3 +1751,622 @@ func _make_strike_hold(s: _Synth) -> void:
 	s.noise_burst(0.0, 0.05, 0.7, s.rr(3500.0, 4500.0), 1500.0, 600.0, 0.0003, 0.01)
 	s.tone(0.0, 0.08, f * 3.1, f * 2.8, 0.01, 0.2, 0.0003, 0.012)
 	s.drive(1.7)
+
+
+# =============================================================================
+# Round 5: Feel Reference (docs/Feel Reference — Sifu × Prototype). Every
+# handler listens to GameEvents; gameplay code never calls these.
+# =============================================================================
+
+## A strike_started whoosh covers the move's attack_active whoosh this long (ms).
+const STRIKE_WHOOSH_COVER_MS := 600
+## Footsteps: one fighter's steps at most this often (two feet in one tick).
+const STEP_GAP_MS := 60
+## Footstep level (dB) at walking .. full sprint; pitch drops a little with speed.
+const STEP_DB := Vector2(-7.0, 1.0)
+## Wind loop (Feel Reference: "a wind loop that rises in volume and pitch with
+## sprint_charge"): dB at a whisper .. full speed, pitch at the bottom .. top.
+## The level follows ScreenFX's speed level (sprint_charge, air dashes,
+## pursuit teleports) with a fast attack and a slower release.
+const WIND_DB := Vector2(-34.0, 0.0)
+const WIND_PITCH := Vector2(0.78, 1.32)
+const WIND_ATTACK := 3.0          ## level per real second up
+const WIND_RELEASE := 1.6         ## ...and down
+const WIND_CURVE := 1.4           ## level^this before the dB mapping (quiet until it builds)
+const WIND_OFF := 0.015           ## under this level the loop stops
+## Upgraded caps raise the wind's ceiling with ScreenFX's k (1 at 8 m/s, 1.5 at
+## 12): +WIND_UPGRADE_DB dB and pitch x (1 + WIND_UPGRADE_PITCH) per unit of k - 1.
+const WIND_UPGRADE_DB := 6.0
+const WIND_UPGRADE_PITCH := 0.4
+const PLAYER_POLL := 0.5          ## s between player lookups
+
+## Every hit_landed impact played: {frame, tier, id, stream} (F4 check, newest last).
+var hit_sounds: Array[Dictionary] = []
+## Last stream played per id (tests).
+var last_stream: Dictionary = {}
+var _world_lp_index := -1
+var _strike_whoosh: Dictionary = {}   ## fighter id -> clock ms of its last strike_started whoosh
+var _step_last: Dictionary = {}       ## fighter id -> clock ms of its last footstep sound
+var _landing_frame: Dictionary = {}   ## fighter id -> physics frame of its last `landing`
+var _wind: AudioStreamPlayer
+var _wind_level := 0.0
+var _player: Node3D
+var _player_poll := 0.0
+
+func _build_round5() -> void:
+	_wind = AudioStreamPlayer.new()
+	_wind.name = "Wind"
+	_wind.bus = PLAYER_BUS
+	add_child(_wind)
+	GameEvents.strike_started.connect(_on_strike_started)
+	GameEvents.parried.connect(_on_parried)
+	GameEvents.parry_whiffed.connect(_on_parry_whiffed)
+	GameEvents.teleported.connect(_on_teleported)
+	GameEvents.sidestepped.connect(_on_sidestepped)
+	GameEvents.sprint_started.connect(_on_sprint_started)
+	GameEvents.footstep.connect(_on_footstep)
+	GameEvents.parkour.connect(_on_parkour)
+	GameEvents.wall_run_step.connect(_on_wall_run_step)
+	GameEvents.wall_run_ended.connect(_on_wall_run_ended)
+	GameEvents.landing.connect(_on_landing)
+	GameEvents.prop_broken.connect(_on_prop_broken)
+	GameEvents.prop_thrown.connect(_on_prop_thrown)
+	GameEvents.prop_picked_up.connect(_on_prop_picked_up)
+	GameEvents.body_slammed.connect(_on_body_slammed)
+	GameEvents.armor_absorbed.connect(_on_armor_absorbed)
+	GameEvents.rammed.connect(_on_rammed)
+	GameEvents.limb_severed.connect(_on_limb_severed)
+	_connect_round6()
+
+## Wind level 0..1 now (tests, debug).
+func get_wind_level() -> float:
+	return _wind_level
+
+func _update_round5(delta: float) -> void:
+	var real := delta / maxf(Engine.time_scale, 0.001)
+	_player_poll -= real
+	if _player_poll <= 0.0 or not is_instance_valid(_player):
+		_player_poll = PLAYER_POLL
+		_player = FXRules.player(get_tree())
+	var goal := 0.0
+	var k := 1.0
+	var sfx := get_node_or_null(^"/root/ScreenFX")
+	if sfx != null and sfx.has_method(&"get_speed_level"):
+		goal = float(sfx.call(&"get_speed_level"))
+		k = float(sfx.call(&"get_speed_scale")) if sfx.has_method(&"get_speed_scale") else 1.0
+	elif is_instance_valid(_player):
+		goal = FXRules.sprint_charge(_player)
+	if is_instance_valid(_player) and _player.has_method(&"is_dead") and _player.call(&"is_dead"):
+		goal = 0.0
+	_wind_level = move_toward(_wind_level, goal, (WIND_ATTACK if goal > _wind_level else WIND_RELEASE) * real)
+	if _quitting:
+		return
+	if _wind_level < WIND_OFF:
+		if _wind.playing:
+			_wind.stop()
+		return
+	if not _wind.playing:
+		var stream := _pick_loop(&"wind")
+		if stream == null:
+			return
+		_wind.stream = stream
+		_wind.play()
+		_used = true
+		sound_played.emit(&"wind", Vector3.ZERO)
+	var top_db := WIND_DB.y + WIND_UPGRADE_DB * (k - 1.0)
+	var top_pitch := WIND_PITCH.y * (1.0 + WIND_UPGRADE_PITCH * (k - 1.0))
+	_wind.volume_db = BASE_DB[&"wind"] + lerpf(WIND_DB.x, top_db, pow(_wind_level, WIND_CURVE))
+	_wind.pitch_scale = lerpf(WIND_PITCH.x, top_pitch, _wind_level) * player_pitch_factor()
+
+## Any strike's startup: a whoosh, longer and deeper for a charged one, a touch
+## louder at a sprint. Pitch by the strike class (a jab is quick and light).
+func _on_strike_started(attacker: Node3D, _target: Node3D, move_id: StringName, sprint: bool,
+		charge_level: int) -> void:
+	if not is_instance_valid(attacker):
+		return
+	var cls := FXRules.strike_class(move_id)
+	var pitch: float = {&"jab": 1.2, &"cross": 1.0, &"kick": 0.85, &"sweep": 0.9, &"knee": 1.05,
+		&"elbow": 1.1, &"ground": 0.95}.get(cls, 1.0)
+	var vol: float = {&"jab": -3.0, &"kick": 1.0}.get(cls, 0.0) + (1.5 if sprint else 0.0)
+	_last_ms.erase(&"whoosh")
+	_last_ms.erase(&"whoosh_charged")
+	if charge_level > 0:
+		play(&"whoosh_charged", _pos_of(attacker), vol + 1.5 * charge_level, pitch * (1.08 - 0.07 * charge_level),
+				attacker)
+	else:
+		play(&"whoosh", _pos_of(attacker), vol, pitch, attacker)
+	_strike_whoosh[attacker.get_instance_id()] = clock_ms()
+
+## Parry: a bright metallic deflect between the two fighters.
+func _on_parried(defender: Node3D, attacker: Node3D) -> void:
+	var at := _pos_of(defender)
+	if is_instance_valid(attacker):
+		at = at.lerp(_pos_of(attacker), 0.5)
+	play(&"parry", at, 0.0, 1.0, defender)
+
+## A Block tap with nothing to parry: a soft tick so mashing is felt.
+func _on_parry_whiffed(defender: Node3D) -> void:
+	play_ui(&"miss", -6.0, 0.95, is_player_source(defender))
+
+func _on_teleported(fighter: Node3D, _from: Vector3, to: Vector3, kind: StringName) -> void:
+	var pursuit := kind == &"pursuit"
+	play(&"teleport", to, -3.0 if pursuit else 0.0, 1.1 if pursuit else 1.0, fighter)
+
+func _on_sidestepped(fighter: Node3D, _direction: Vector3) -> void:
+	play(&"sidestep", _pos_of(fighter), 0.0, 1.0, fighter)
+
+## Sprint start: a firmer scuff as the feet dig in (the dust kick is BloodFX).
+func _on_sprint_started(fighter: Node3D) -> void:
+	if is_instance_valid(fighter):
+		_last_ms.erase(&"step")
+		play(&"step", _feet_of(fighter), 3.0, 0.85, fighter)
+
+## Footsteps by surface, louder with sprint_charge (the player's own sound).
+func _on_footstep(fighter: Node3D, position: Vector3, surface: StringName, sprint_charge: float) -> void:
+	var key := fighter.get_instance_id() if is_instance_valid(fighter) else 0
+	var now := clock_ms()
+	if now - int(_step_last.get(key, -100000)) < STEP_GAP_MS:
+		return
+	_step_last[key] = now
+	var id: StringName = STEP_BY_SURFACE.get(surface, &"step")
+	var c := clampf(sprint_charge, 0.0, 1.0)
+	_last_ms.erase(id)
+	play(id, position, lerpf(STEP_DB.x, STEP_DB.y, c), lerpf(1.04, 0.94, c), fighter)
+
+func _on_parkour(fighter: Node3D, kind: StringName, position: Vector3, height: float) -> void:
+	match kind:
+		&"step":
+			_last_ms.erase(&"step")
+			play(&"step", position, -2.0, 1.1, fighter)
+		&"vault", &"air_mantle":
+			play(&"vault", position, 0.0, 1.0, fighter)
+		&"mantle":
+			play(&"vault", position, 1.0, 0.88, fighter)
+			_last_ms.erase(&"step")
+			play(&"step", position, 0.0, 0.9, fighter)
+		&"kickoff":
+			play(&"land", position, 0.0, 1.25, fighter)
+			play(&"strike_hold", position, -6.0, 1.1, fighter)
+	if height >= Tuning.MANTLE_MAX:  # a wall kick-off off something tall: the jump swish too
+		play(&"jump", position, -2.0, 1.0, fighter)
+
+## Wall-run footsteps: quick scuffs on the wall.
+func _on_wall_run_step(fighter: Node3D, position: Vector3, _normal: Vector3) -> void:
+	_last_ms.erase(&"step")
+	play(&"step", position, -1.0, 1.12, fighter)
+
+func _on_wall_run_ended(fighter: Node3D, reason: StringName) -> void:
+	if reason == &"jump" and is_instance_valid(fighter):
+		play(&"jump", _feet_of(fighter), 2.0, 0.95, fighter)
+
+## Landings by level (Feel Reference: Landing has levels); water adds a splash.
+func _on_landing(fighter: Node3D, level: StringName, position: Vector3, vertical_speed: float) -> void:
+	if is_instance_valid(fighter):
+		_landing_frame[fighter.get_instance_id()] = Engine.get_physics_frames()
+	var surface := FXRules.floor_surface(get_viewport().world_3d if is_inside_tree() else null, position)
+	match level:
+		&"heavy":
+			play(&"land_heavy", position, clampf((vertical_speed - Tuning.LAND_HEAVY_SPEED) * 0.4, 0.0, 3.0),
+					1.0, fighter)
+		&"hard":
+			play(&"land_hard", position, 0.0, 1.0, fighter)
+		_:
+			play(&"land", position, clampf((vertical_speed - 5.0) * 0.8, -4.0, 2.0), 1.0, fighter)
+	if surface == &"water":
+		play(&"splash", position, -4.0 if level == &"soft" else 0.0, 1.0, fighter)
+	elif surface == &"metal":
+		play(&"step_metal", position, 2.0, 0.8, fighter)
+
+## A thrown prop broke (Feel Reference: Props): glass for bottles, wood for
+## chair legs, crates and sticks, masonry for bricks.
+func _on_prop_broken(_prop: Node3D, position: Vector3, kind: StringName) -> void:
+	match kind:
+		&"bottle":
+			play(&"break_glass", position)
+		&"brick":
+			play(&"break_brick", position, -6.0, 1.35)
+		&"limb":
+			play(&"thud", position, -4.0, 1.1)
+		_:
+			play(&"break_wood", position, -3.0, 1.2)
+
+func _on_prop_thrown(holder: Node3D, _prop: Node3D, velocity: Vector3) -> void:
+	play(&"throw", _pos_of(holder), -2.0, clampf(velocity.length() / 12.0, 0.85, 1.25), holder)
+
+func _on_prop_picked_up(holder: Node3D, _prop: Node3D) -> void:
+	play(&"grab", _pos_of(holder), -6.0, 1.15, holder)
+
+## Body slam: the body's thud and a heavy landing's boom under it.
+func _on_body_slammed(holder: Node3D, _victim: Node3D, position: Vector3) -> void:
+	play(&"body_slam", position, 2.0, 0.9, holder)
+	play(&"land_heavy", position, -1.0, 1.0, holder)
+
+## A hit soaked by armor (the enemy kept attacking): a metal clank (B stopped playing it).
+func _on_armor_absorbed(info: HitInfo) -> void:
+	if info != null:
+		play(&"clank", info.hit_position, 0.0, 1.0, info.attacker)
+
+## Battering Ram (agent M): a body-on-body thud, heavier when someone goes down.
+func _on_rammed(runner: Node3D, victim: Node3D, result: StringName, self_result: StringName) -> void:
+	if not is_instance_valid(runner) or not is_instance_valid(victim):
+		return
+	var at := (_pos_of(runner) + _pos_of(victim)) * 0.5
+	var down := result == &"knockdown" or self_result == &"knockdown"
+	play(&"impact_knockdown" if down else &"impact_stagger", at, 0.0, 0.85, runner)
+
+## A limb came off: a bone snap at the joint (the impact itself is impact_sever).
+func _on_limb_severed(fighter: Node3D, cut: StringName, _piece: Node3D) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var at := _pos_of(fighter)
+	var rig = fighter.get(&"rig")
+	var bone: StringName = Bones.CUTS.get(cut, &"")
+	if bone != &"" and rig is Node3D and (rig as Node3D).has_method(&"get_bone_global_position"):
+		at = rig.call(&"get_bone_global_position", bone)
+	play(&"arm_break", at, -2.0, 0.9)
+
+
+# --- Round 5 sound designs ----------------------------------------------------------
+
+## Impact by tier. Three layers whose amounts climb with the tier: a skin SLAP
+## (bright noise crack + a short knock) on every tier, a body THUD from stagger
+## up, and a deep BOOM with a rumble tail from launch up. A stumble adds a
+## shoe scuff; a hard launch a sharp crack on top; a sever a bone crunch and a
+## wet tear. Each tier is its own stream.
+func _make_impact(s: _Synth, tier: int) -> void:
+	var t := FXRules.tier_t(tier)
+	# Slap: always there, sharper and shorter on small hits.
+	var slap := lerpf(1.0, 0.55, t)
+	s.noise_burst(0.0, 0.09, 0.95 * slap, s.rr(5200.0, 6800.0), 1800.0, 900.0, 0.0003, s.rr(0.011, 0.016))
+	s.tone(0.0, 0.12, s.rr(190.0, 230.0), 110.0, 0.015, 0.45 * slap, 0.0006, 0.022)
+	if tier == HitInfo.Tier.STUMBLE:
+		s.noise_burst(0.02, 0.22, 0.45, 2200.0, 700.0, 250.0, 0.004, 0.05)  # shoe scuff
+		s.tone(0.0, 0.2, 105.0, 62.0, 0.03, 0.55, 0.001, 0.045)
+	if tier >= HitInfo.Tier.STAGGER:
+		var thud := lerpf(0.7, 1.0, t)
+		var f := s.rr(108.0, 122.0) * lerpf(1.1, 0.8, t)
+		s.tone(0.0, 0.42, f, f * 0.4, 0.04, thud, 0.001, lerpf(0.07, 0.13, t))
+		s.noise_burst(0.0, 0.25, 0.5 * thud, 1100.0, 300.0, 0.0, 0.001, lerpf(0.035, 0.07, t))
+	if tier >= HitInfo.Tier.KNOCKDOWN:
+		s.crackle(0.004, 0.12, lerpf(0.2, 0.45, t), 900.0, 0.04, 3500.0)
+	if tier >= HitInfo.Tier.LAUNCH:
+		var boom := lerpf(0.75, 1.15, (t - 0.6) / 0.4)
+		var fb := s.rr(56.0, 64.0) * lerpf(1.05, 0.85, t)
+		s.tone(0.0, 1.05, fb, fb * 0.5, 0.12, boom, 0.002, lerpf(0.24, 0.38, t))
+		s.noise_burst(0.0, 0.9, 0.55 * boom, 220.0, 70.0, 0.0, 0.008, lerpf(0.22, 0.32, t))
+	if tier >= HitInfo.Tier.HARD_LAUNCH:
+		s.noise_burst(0.0, 0.04, 0.9, 9000.0, 4500.0, 2500.0, 0.0002, 0.007)  # crack on top
+		s.tone(0.0, 0.3, 160.0, 70.0, 0.03, 0.4, 0.001, 0.06)
+	if tier == HitInfo.Tier.SEVER:
+		s.crackle(0.01, 0.28, 0.9, 1800.0, 0.07, 5200.0)  # bone crunch
+		s.noise_burst(0.03, 0.4, 0.55, 1500.0, 500.0, 300.0, 0.01, 0.12)  # wet tear
+		s.tone(0.02, 0.06, 1700.0, 800.0, 0.01, 0.35, 0.0002, 0.01)  # snap
+	s.drive(lerpf(1.6, 2.3, t))
+
+## Deep boom under wall breaks.
+func _make_boom(s: _Synth) -> void:
+	var f := s.rr(46.0, 54.0)
+	s.tone(0.0, 1.3, f, f * 0.55, 0.15, 1.0, 0.003, 0.42)
+	s.tone(0.0, 0.5, f * 2.0, f * 0.9, 0.06, 0.35, 0.002, 0.12)
+	s.noise_burst(0.0, 1.2, 0.6, 180.0, 60.0, 0.0, 0.01, 0.4)
+	s.noise_burst(0.0, 0.06, 0.3, 3000.0, 1200.0, 400.0, 0.0005, 0.015)
+	s.drive(1.8)
+
+## Charged strike: a longer, deeper swing with a low push under it.
+func _make_whoosh_charged(s: _Synth) -> void:
+	var d := 0.55 * s.rr(0.92, 1.08)
+	s.swoosh(0.0, d, 1.0, 320.0, 2300.0 * s.rr(0.9, 1.1), 260.0, s.rr(0.38, 0.46))
+	s.swoosh(0.04, d * 0.8, 0.45, 900.0, 4200.0, 700.0, 0.42)
+	s.tone(0.05, d, 90.0, 55.0, 0.2, 0.3, 0.06, 0.18)
+
+## Parry deflect: a bright ring off the guard, a sharp transient, a low knock.
+func _make_parry(s: _Synth) -> void:
+	var f := s.rr(1250.0, 1400.0)
+	s.modal(0.0, 0.7, f, [1.0, 2.41, 3.89, 5.33], [1.0, 0.55, 0.32, 0.18], [0.28, 0.17, 0.1, 0.06], 0.6)
+	s.noise_burst(0.0, 0.03, 1.0, 9500.0, 6000.0, 3000.0, 0.0002, 0.005)
+	s.tone(0.0, 0.2, 170.0, 80.0, 0.03, 0.6, 0.001, 0.05)
+	s.swoosh(0.02, 0.25, 0.35, 1500.0, 5000.0, 2000.0, 0.2)
+	s.drive(1.3)
+
+## Sidestep: a quick airy swish.
+func _make_sidestep(s: _Synth) -> void:
+	s.swoosh(0.0, 0.22 * s.rr(0.9, 1.1), 1.0, 1100.0, 4600.0, 1700.0, 0.25)
+	s.noise_burst(0.0, 0.05, 0.2, 2500.0, 1200.0, 400.0, 0.001, 0.012)
+
+## Footstep: a short shoe scuff with a small heel knock.
+func _make_step(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.08, 0.8, s.rr(2200.0, 3000.0), 800.0, 220.0, 0.001, s.rr(0.014, 0.02))
+	s.tone(0.0, 0.08, s.rr(85.0, 100.0), 60.0, 0.015, 0.6, 0.0008, 0.02)
+	s.crackle(0.004, 0.05, 0.2, 600.0, 0.02, 3500.0)
+
+## Footstep in shallow water: a slap and a spray of droplets.
+func _make_step_water(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.22, 0.85, s.rr(3500.0, 4500.0), 1400.0, 500.0, 0.002, 0.05)
+	s.crackle(0.01, 0.25, 0.5, 900.0, 0.07, 6000.0)
+	s.tone(0.0, 0.1, s.rr(260.0, 320.0), 520.0, 0.04, 0.25, 0.002, 0.03)
+	s.tone(0.0, 0.08, 90.0, 60.0, 0.02, 0.4, 0.001, 0.02)
+
+## Footstep on a metal plate: a ringing clank.
+func _make_step_metal(s: _Synth) -> void:
+	var f := s.rr(520.0, 600.0)
+	s.modal(0.0, 0.5, f, [1.0, 2.37, 4.08, 6.31], [0.8, 0.5, 0.3, 0.18], [0.16, 0.1, 0.06, 0.04], 0.55)
+	s.tone(0.0, 0.12, 110.0, 70.0, 0.02, 0.7, 0.0008, 0.03)
+	s.noise_burst(0.0, 0.03, 0.5, 7000.0, 3500.0, 1500.0, 0.0002, 0.006)
+	s.drive(1.3)
+
+## Hard landing: a body-weight thud and grit.
+func _make_land_hard(s: _Synth) -> void:
+	s.tone(0.0, 0.32, s.rr(80.0, 90.0), 45.0, 0.04, 1.0, 0.001, 0.09)
+	s.noise_burst(0.0, 0.2, 0.7, 1600.0, 400.0, 150.0, 0.001, 0.05)
+	s.noise_burst(0.0, 0.05, 0.4, 3500.0, 1500.0, 500.0, 0.0005, 0.012)
+	s.crackle(0.01, 0.2, 0.35, 700.0, 0.06, 3200.0)
+	s.drive(1.7)
+
+## Heavy landing: a boom, a floor crack and crumbling chunks.
+func _make_land_heavy(s: _Synth) -> void:
+	s.tone(0.0, 1.0, s.rr(52.0, 60.0), 30.0, 0.12, 1.0, 0.002, 0.32)
+	s.noise_burst(0.0, 0.05, 0.9, 7000.0, 3000.0, 1200.0, 0.0003, 0.01)
+	s.noise_burst(0.0, 0.7, 0.7, 1800.0, 200.0, 80.0, 0.002, 0.2)
+	s.crackle(0.0, 0.6, 0.7, 700.0, 0.15, 3800.0)
+	s.knocks(0.08, 0.6, 6, 120.0, 230.0, 0.4, 0.04)
+	s.drive(2.0)
+
+## Vault: a cloth swish and a palm slap on the top.
+func _make_vault(s: _Synth) -> void:
+	s.swoosh(0.0, 0.3, 0.8, 600.0, 2400.0, 800.0, 0.35)
+	s.noise_burst(0.03, 0.06, 0.6, 4200.0, 1800.0, 700.0, 0.0004, 0.012)
+	s.tone(0.03, 0.08, 150.0, 90.0, 0.02, 0.35, 0.0006, 0.02)
+
+## Speed wind: a seamless 2 s loop of airy band noise with slow gusts. The
+## gusts complete whole cycles in the loop, and the tail is crossfaded (equal
+## power) into the head so the loop point never clicks.
+func _make_wind(s: _Synth) -> void:
+	var sr := _Synth.SR
+	var n := int(2.0 * sr)
+	var x := int(0.25 * sr)
+	var g := PackedFloat32Array()
+	g.resize(n + x)
+	var lp1 := 0.0
+	var lp2 := 0.0
+	var hp := 0.0
+	var a_lp := 1.0 - exp(-TAU * 1300.0 / sr)
+	var a_hp := 1.0 - exp(-TAU * 260.0 / sr)
+	var hiss := 0.0
+	var a_h := 1.0 - exp(-TAU * 5200.0 / sr)
+	for k in n + x:
+		var t := k / sr
+		var w := s.noise()
+		lp1 += a_lp * (w - lp1)
+		lp2 += a_lp * (lp1 - lp2)
+		hp += a_hp * (lp2 - hp)
+		hiss += a_h * (s.noise() - hiss)
+		var gust := 0.72 + 0.18 * sin(TAU * 1.0 * t + 0.6) + 0.1 * sin(TAU * 2.5 * t + 1.9)
+		g[k] = ((lp2 - hp) * 7.0 + hiss * 0.12) * gust
+	s.buf.resize(n)
+	for k in n:
+		if k < x:
+			var u := float(k) / x
+			s.buf[k] = g[k] * sqrt(u) + g[n + k] * sqrt(1.0 - u)
+		else:
+			s.buf[k] = g[k]
+
+## A body hitting shallow water: a heavy splash and falling droplets.
+func _make_splash(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.5, 1.0, 3800.0, 900.0, 250.0, 0.003, 0.13)
+	s.tone(0.0, 0.25, 90.0, 55.0, 0.04, 0.7, 0.001, 0.07)
+	s.crackle(0.05, 0.6, 0.6, 600.0, 0.18, 6500.0)
+	s.tone(0.02, 0.15, 300.0, 700.0, 0.05, 0.2, 0.002, 0.05)
+	s.drive(1.4)
+
+## A bottle shattering: a bright crash and a shower of glass tinkles.
+func _make_break_glass(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.12, 1.0, 11000.0, 6000.0, 3500.0, 0.0002, 0.025)
+	for i in 9:
+		var f := s.rr(2600.0, 6800.0)
+		var t0 := s.rr(0.0, 0.35)
+		s.modal(t0, 0.3, f, [1.0, 1.73, 2.61], [0.6, 0.35, 0.2], [0.05, 0.035, 0.02], s.rr(0.15, 0.3))
+	s.crackle(0.01, 0.45, 0.5, 1300.0, 0.12, 9000.0)
+	s.tone(0.0, 0.08, 220.0, 120.0, 0.02, 0.3, 0.001, 0.02)
+
+
+# =============================================================================
+# Round 6: more destruction (docs/ARCHITECTURE.md, "Round 6"). Sounds are
+# layered by material and size; slow-motion pitch rules are unchanged (the
+# player's own breaks keep real-time pitch, everything else slows).
+# =============================================================================
+
+const DestructionFXScript := preload("res://scripts/fx/destruction_fx.gd")
+## Break level (dB) at the smallest .. biggest break, and pitch (bigger is lower).
+const BREAK_DB := Vector2(-9.0, 2.0)
+const BREAK_PITCH := Vector2(1.18, 0.88)
+const BLAST_REF := 6000.0         ## power x radius / 2.5 at which the blast thump plays at its base level
+
+## Every Round 6 sound played for an event: {frame, event, ids} (tests).
+var destruction_sounds: Array[Dictionary] = []
+var _r6_connected := false
+
+func _connect_round6() -> void:
+	if _r6_connected:
+		return
+	_r6_connected = true
+	GameEvents.furniture_broken.connect(_on_furniture_broken)
+	GameEvents.structure_collapsed.connect(_on_structure_collapsed)
+	GameEvents.floor_damaged.connect(_on_floor_damaged)
+	GameEvents.world_blast.connect(_on_world_blast)
+
+func _log_r6(event: StringName, ids: Array) -> void:
+	destruction_sounds.append({"frame": Engine.get_physics_frames(), "event": event, "ids": ids})
+	if destruction_sounds.size() > 64:
+		destruction_sounds.pop_front()
+
+## A clutter object broke: its material's break, louder and lower the bigger.
+func _on_furniture_broken(node: Node3D, position: Vector3, kind: StringName, energy: float, by: Node3D) -> void:
+	var surface := DestructionFXScript.surface_for(node, kind)
+	var sz := DestructionFXScript.break_size(kind, energy)
+	var vol := lerpf(BREAK_DB.x, BREAK_DB.y, sz)
+	var pitch := lerpf(BREAK_PITCH.x, BREAK_PITCH.y, sz)
+	var ids: Array[StringName] = []
+	match surface:
+		&"glass":
+			ids = [&"break_glass", &"glass_tinkle"]
+			_play_fresh(&"break_glass", position, vol, pitch, by)
+			_play_fresh(&"glass_tinkle", position, vol - 2.0, 1.0 + (1.0 - sz) * 0.15, by)
+		&"cardboard":
+			ids = [&"break_cardboard"]
+			_play_fresh(&"break_cardboard", position, vol, pitch, by)
+		&"fabric":
+			ids = [&"break_fabric"]
+			_play_fresh(&"break_fabric", position, vol, pitch, by)
+		&"concrete", &"brick":
+			ids = [&"break_brick", &"strike_concrete"]
+			_play_fresh(&"break_brick", position, vol - 2.0, pitch * 1.25, by)
+			_play_fresh(&"strike_concrete", position, vol - 4.0, pitch, by)
+		_:  # wood: a splinter crack-snap over the wood break
+			ids = [&"break_wood", &"snap_wood"]
+			_play_fresh(&"break_wood", position, vol, pitch, by)
+			_play_fresh(&"snap_wood", position, vol - 1.0, pitch * 1.05, by)
+	_log_r6(&"furniture", ids)
+
+## Structure gave way: a creak (D drops overhead pieces Tuning.PILLAR_COLLAPSE_DELAY
+## after the snap); the boom comes when the heavy piece lands (collapse_boom).
+func _on_structure_collapsed(_node: Node3D, position: Vector3, kind: StringName) -> void:
+	_play_fresh(&"creak", position, 0.0 if kind == &"overhead" else -4.0, 1.0 if kind == &"overhead" else 1.2)
+	_log_r6(&"collapse", [&"creak"])
+
+## DestructionFX: a heavy fallen piece landed near a fresh collapse.
+func collapse_boom(position: Vector3, energy: float) -> void:
+	_play_fresh(&"boom", position, clampf(energy_db(energy, 4000.0), -4.0, 3.0), energy_pitch(energy, 4000.0) * 0.9)
+	_play_fresh(&"land_heavy", position, -3.0, 1.0)
+	_log_r6(&"collapse_landing", [&"boom", &"land_heavy"])
+
+## Floor damage by level: a crack, a crack and a low thump, then a crumble.
+func _on_floor_damaged(position: Vector3, _radius: float, level: int, _surface: StringName) -> void:
+	if level <= 0:
+		return  # no new level (a lone tile pop): the tick is DestructionFX's
+	var ids: Array[StringName] = [&"crack"]
+	match clampi(level, 1, 3):
+		1:
+			_play_fresh(&"crack", position, -5.0, 1.1)
+		2:
+			_play_fresh(&"crack", position, -1.0, 0.95)
+			_play_fresh(&"thump_low", position, -3.0, 1.05)
+			ids.append(&"thump_low")
+		3:
+			_play_fresh(&"crack", position, 0.0, 0.88)
+			_play_fresh(&"break_brick", position, -3.0, 0.85)
+			_play_fresh(&"thump_low", position, 0.0, 0.95)
+			ids.append_array([&"break_brick", &"thump_low"])
+	# Tile pops (surface &"tile") tick through DestructionFX.tile_pop(), which throttles bursts.
+	_log_r6(&"floor", ids)
+
+## A blast: a low thump scaled by power and radius.
+func _on_world_blast(center: Vector3, radius: float, power: float, _source: StringName) -> void:
+	var e := power * radius / 2.5
+	_play_fresh(&"thump_low", center, clampf(energy_db(e, BLAST_REF), -10.0, 3.0),
+			clampf(energy_pitch(e, BLAST_REF), 0.8, 1.15))
+	_log_r6(&"blast", [&"thump_low"])
+
+## A plaza tile popping out: a ceramic tick-crack (DestructionFX throttles bursts).
+func tile_pop(position: Vector3) -> void:
+	_play_fresh(&"tile_pop", position, 0.0, 1.0)
+
+## play() without the 25 ms same-id guard: Round 6 events are throttled at their source.
+func _play_fresh(id: StringName, position: Vector3, volume_db := 0.0, pitch := 1.0, source: Node3D = null) -> void:
+	_last_ms.erase(id)
+	play(id, position, volume_db, pitch, source)
+
+
+# --- Round 6 sound designs ----------------------------------------------------------
+
+## A sharp wood crack-snap (fibres giving way).
+func _make_snap_wood(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.04, 1.0, 9000.0, 5000.0, 2200.0, 0.0002, 0.006)
+	s.tone(0.0, 0.06, s.rr(1100.0, 1400.0), 380.0, 0.01, 0.45, 0.0002, 0.012)
+	s.crackle(0.003, 0.18, 0.7, 2200.0, 0.05, 6000.0)
+	s.tone(0.0, 0.18, 190.0, 110.0, 0.03, 0.4, 0.001, 0.04)
+	s.drive(1.5)
+
+## The tail of a glass break: sparse high pings thinning out over a second.
+func _make_glass_tinkle(s: _Synth) -> void:
+	s.ensure(1.2)
+	var n := 16
+	for i in n:
+		var u := float(i) / n
+		var t0 := 0.08 + pow(u, 1.5) * 1.0 + s.rr(-0.02, 0.02)
+		var f := s.rr(2800.0, 7200.0)
+		s.modal(maxf(t0, 0.0), 0.18, f, [1.0, 1.61, 2.47], [0.7, 0.35, 0.15], [0.04, 0.025, 0.015],
+				s.rr(0.25, 0.5) * (1.0 - 0.6 * u))
+
+## Cardboard: a papery crumple over a soft hollow thump.
+func _make_break_cardboard(s: _Synth) -> void:
+	s.crackle(0.0, 0.45, 0.8, 1100.0, 0.12, 2600.0)
+	s.noise_burst(0.0, 0.2, 0.6, 1800.0, 600.0, 250.0, 0.002, 0.06)
+	s.tone(0.0, 0.2, s.rr(105.0, 125.0), 70.0, 0.03, 0.6, 0.002, 0.05)
+	s.crackle(0.08, 0.3, 0.35, 300.0, 0.15, 1800.0)
+	s.drive(1.3)
+
+## Fabric (a sofa): a muffled heavy thump and a cloth tear.
+func _make_break_fabric(s: _Synth) -> void:
+	s.tone(0.0, 0.35, s.rr(85.0, 95.0), 52.0, 0.05, 1.0, 0.002, 0.11)
+	s.noise_burst(0.0, 0.3, 0.7, 700.0, 250.0, 0.0, 0.002, 0.1)
+	s.noise_burst(0.05, 0.3, 0.35, 2600.0, 1500.0, 900.0, 0.01, 0.08)
+	s.crackle(0.05, 0.25, 0.3, 700.0, 0.08, 2400.0)
+	s.lowpass(3000.0)
+	s.drive(1.4)
+
+## Structure creak: a slow groan with a pitch wobble and a strained squeal.
+func _make_creak(s: _Synth) -> void:
+	s.tone(0.0, 0.75, s.rr(68.0, 76.0), 96.0, 0.35, 0.8, 0.08, 0.5, 2, 5.0, 0.03)
+	s.tone(0.05, 0.6, s.rr(380.0, 430.0), 520.0, 0.3, 0.25, 0.1, 0.35, 1, 7.0, 0.02)
+	s.crackle(0.0, 0.7, 0.25, 160.0, 0.4, 1500.0)
+	s.lowpass(1600.0)
+	s.drive(1.4)
+
+## A plaza tile popping: a ceramic tick and a small crack.
+func _make_tile_pop(s: _Synth) -> void:
+	var f := s.rr(2200.0, 2700.0)
+	s.modal(0.0, 0.2, f, [1.0, 1.73, 2.9], [0.8, 0.4, 0.2], [0.03, 0.02, 0.012], 0.5)
+	s.noise_burst(0.0, 0.03, 0.8, 7000.0, 3500.0, 1500.0, 0.0002, 0.005)
+	s.tone(0.0, 0.08, 220.0, 140.0, 0.02, 0.35, 0.0005, 0.02)
+	s.crackle(0.005, 0.1, 0.3, 900.0, 0.03, 4000.0)
+
+## A low thump (blasts, craters): a sub hit with a dull rumble.
+func _make_thump_low(s: _Synth) -> void:
+	s.tone(0.0, 0.6, s.rr(46.0, 52.0), 30.0, 0.08, 1.0, 0.002, 0.17)
+	s.noise_burst(0.0, 0.5, 0.6, 160.0, 70.0, 0.0, 0.005, 0.15)
+	s.noise_burst(0.0, 0.04, 0.25, 1500.0, 600.0, 200.0, 0.0006, 0.01)
+	s.drive(1.6)
+
+## Footstep on broken glass: a bright crunch of grit.
+func _make_step_glass(s: _Synth) -> void:
+	s.crackle(0.0, 0.14, 0.8, 1600.0, 0.04, 7500.0)
+	s.noise_burst(0.0, 0.05, 0.4, 5000.0, 2500.0, 1200.0, 0.0005, 0.01)
+	s.modal(0.01, 0.1, s.rr(3500.0, 5000.0), [1.0, 1.6], [0.4, 0.2], [0.02, 0.012], 0.3)
+
+## Footstep on cardboard: a papery scuff.
+func _make_step_cardboard(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.08, 0.7, 2000.0, 700.0, 350.0, 0.001, 0.025)
+	s.crackle(0.0, 0.1, 0.4, 700.0, 0.04, 2200.0)
+	s.tone(0.0, 0.07, 110.0, 80.0, 0.02, 0.4, 0.001, 0.02)
+
+## Footstep on fabric (a sofa cushion): a soft muffled pat.
+func _make_step_fabric(s: _Synth) -> void:
+	s.tone(0.0, 0.1, 82.0, 58.0, 0.02, 0.8, 0.002, 0.025)
+	s.noise_burst(0.0, 0.08, 0.5, 650.0, 300.0, 0.0, 0.002, 0.025)
+
+## A knock on glass that holds: a thud and a short ring.
+func _make_strike_glass(s: _Synth) -> void:
+	s.tone(0.0, 0.15, 160.0, 110.0, 0.02, 0.7, 0.0008, 0.03)
+	s.modal(0.0, 0.45, s.rr(1700.0, 2000.0), [1.0, 2.32, 3.9], [0.6, 0.3, 0.15], [0.12, 0.07, 0.04], 0.5)
+	s.noise_burst(0.0, 0.02, 0.5, 9000.0, 5000.0, 3000.0, 0.0002, 0.004)
+
+## A hit on cardboard: a hollow papery thump.
+func _make_strike_cardboard(s: _Synth) -> void:
+	s.tone(0.0, 0.16, s.rr(135.0, 150.0), 88.0, 0.02, 0.8, 0.001, 0.045)
+	s.noise_burst(0.0, 0.1, 0.5, 1800.0, 700.0, 300.0, 0.001, 0.035)
+	s.crackle(0.01, 0.1, 0.25, 600.0, 0.04, 2400.0)
+
+## A hit on fabric (a sofa): a muffled thump.
+func _make_strike_fabric(s: _Synth) -> void:
+	s.tone(0.0, 0.2, s.rr(92.0, 100.0), 60.0, 0.03, 0.9, 0.002, 0.06)
+	s.noise_burst(0.0, 0.15, 0.5, 500.0, 220.0, 0.0, 0.002, 0.05)

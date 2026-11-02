@@ -51,18 +51,34 @@ func run() -> void:
 	await wait_until(func() -> bool: return p.can_act(), 1200)
 	await ticks(10)
 
-	# Input intent relative to facing (forward + P / back + P).
+	# Input intent (Round 5): the player's stick against the camera ("back" is
+	# toward the camera: S), whatever way he faces; a fighter without a
+	# PlayerController reads move_input against facing.
 	var dummy := spawn_dummy(&"grunt", Vector3(0, 0, -30), Vector3.BACK)
 	await ticks(2)
-	p.snap_facing(Vector3.FORWARD)
-	p.move_input = Vector3.FORWARD
-	check(p.get_input_intent() == &"forward", "stick along facing -> forward")
-	p.move_input = Vector3.BACK
-	check(p.get_input_intent() == &"back", "stick against facing -> back")
-	p.move_input = Vector3.RIGHT
-	check(p.get_input_intent() == &"neutral", "stick sideways -> neutral")
-	p.move_input = Vector3.FORWARD * 0.1
-	check(p.get_input_intent() == &"neutral", "tiny stick -> neutral")
+	for facing: Vector3 in [Vector3.FORWARD, Vector3.RIGHT, Vector3.BACK]:
+		p.snap_facing(facing)
+		press(&"move_forward")
+		check(p.get_input_intent() == &"forward", "W -> forward (facing %s)" % facing)
+		release(&"move_forward")
+		press(&"move_back")
+		check(p.get_input_intent() == &"back", "S -> back, toward the camera (facing %s)" % facing)
+		press(&"move_right")
+		check(p.get_input_intent() == &"back", "S + D (45 degrees) -> back (facing %s)" % facing)
+		release(&"move_back")
+		check(p.get_input_intent() == &"neutral", "D -> neutral (facing %s)" % facing)
+		release(&"move_right")
+		check(p.get_input_intent() == &"neutral", "no stick -> neutral")
+	dummy.snap_facing(Vector3.FORWARD)
+	dummy.move_input = Vector3.FORWARD
+	check(dummy.get_input_intent() == &"forward", "no controller: move_input along facing -> forward")
+	dummy.move_input = Vector3.BACK
+	check(dummy.get_input_intent() == &"back", "no controller: move_input against facing -> back")
+	dummy.move_input = Vector3.RIGHT
+	check(dummy.get_input_intent() == &"neutral", "no controller: sideways -> neutral")
+	dummy.move_input = Vector3.FORWARD * 0.1
+	check(dummy.get_input_intent() == &"neutral", "no controller: tiny stick -> neutral")
+	dummy.move_input = Vector3.ZERO
 	dummy.queue_free()
 	done()
 

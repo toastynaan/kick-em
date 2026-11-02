@@ -5,6 +5,16 @@ extends Node3D
 ## Keys: 1 drop both, 2 launch forward, 3 explosion between them, 4 launch at
 ## the wall, 5 toggle active/passive muscles, G get up, P cycle the right
 ## dummy's profile, S slow motion, R reset, Esc back to the menu.
+## Round 5 (Feel Reference): L one arm limp while the rest animates (POSES
+## dummy), 6-0 tier reactions on the POSES dummy, each with its contact-frame
+## hitstop (6 jab to the head, 7 hook to the head, 8 stagger, 9 sweep, 0
+## knockdown), T severing launch on a fresh dummy (loose limb + wound cap),
+## Y hold the right dummy on a moving hand (legs dangle), U kill the left
+## dummy (dead body: freezes after 4 s at rest).
+## Wall range (F3 wall table, D's Destructible panels; watch it, D's
+## tests/world/test_worked_example proves the numbers): Q picks drywall /
+## brick / concrete, W picks the power P (5, 7, 9, 11), F launches a fresh 70 kg
+## fighter straight into the panel at Power.launch_velocity(P), E rebuilds them.
 ## OWNER: agent A.
 
 const LEFT_POS := Vector3(-1.6, 0, 0)
@@ -31,6 +41,30 @@ var _move_i := -1
 var _hold_i := -1
 var _shown := "-"
 var _holds: Array[StringName] = []
+# Round 5
+const LIMP_ARM: Array[StringName] = [Bones.L_UPPER_ARM, Bones.L_LOWER_ARM]
+const SEVER_POS := Vector3(-4.5, 0, 3.0)
+var _limp_on := false
+var _sever_dummy: LabDummy
+var _hand: Node3D
+var _hand_t := 0.0
+var _last_reaction := "-"
+# Wall range
+const RANGE_SURFACES: Array[StringName] = [&"drywall", &"brick", &"concrete"]
+const RANGE_X: Array[float] = [12.0, 16.0, 20.0]
+const RANGE_PANEL_Z := -4.0
+const RANGE_LAUNCH_Z := -0.5     ## launch spot: the body flies 3.5 m into the panel
+const RANGE_P: Array[float] = [5.0, 7.0, 9.0, 11.0]
+const RANGE_ARCHETYPE := &"thrower"   ## 70 kg, the body of the doc's wall table
+## Loaded at run time so the lab never fails to compile while another
+## module's file is mid-edit (Fighter pulls in all of combat).
+const DESTRUCTIBLE_PATH := "res://scripts/world/destructible.gd"
+const FACTORY_PATH := "res://scripts/game/fighter_factory.gd"
+var _panels: Array[Node3D] = []
+var _range_i := 0
+var _range_p := 0
+var _range_fighter: Node3D
+var _range_result := "-"
 
 func _ready() -> void:
 	_build_world()
@@ -46,8 +80,26 @@ func _ready() -> void:
 	_holds.assign(PoseLibrary.ALL_HOLD_IDS)
 	for id in PoseLibrary.CHARGEABLE:
 		_holds.append(PoseLibrary.charge_hold_of(id))
+	_hand = Node3D.new()
+	_hand.name = "LabHand"
+	add_child(_hand)
+	_build_panels()
+	GameEvents.wall_cracked.connect(func(w: Node3D, _p: Vector3, e: float) -> void:
+		if w in _panels:
+			_range_result = "%s cracked (%.0f J)" % [w.get(&"surface"), e])
+	GameEvents.wall_broken.connect(func(w: Node3D, _p: Vector3, e: float, _v: Vector3) -> void:
+		if w in _panels:
+			_range_result = "%s BROKEN (%.0f J)" % [w.get(&"surface"), e])
 	_build_ui()
 	_reset()
+
+## The lab "hand" for the hold demo: runs a loop with hops (Prototype 1, 0-6 s).
+func _physics_process(delta: float) -> void:
+	_hand_t += delta
+	var a := _hand_t * 1.6
+	var hop := maxf(0.0, sin(_hand_t * 2.4)) * 0.9
+	_hand.global_position = RIGHT_POS + Vector3(cos(a) * 2.2, 1.45 + hop, sin(a) * 2.2 - 0.5)
+	_hand.global_basis = Basis.looking_at(Vector3(-sin(a), 0, cos(a)), Vector3.UP)
 
 func _make_dummy(archetype: StringName, pos: Vector3, profile: RagdollProfile) -> LabDummy:
 	var d := LabDummy.new()
@@ -153,10 +205,12 @@ func _build_ui() -> void:
 		+ "1 drop (go limp)   2 launch forward   3 explosion between them   4 launch into the wall\n" \
 		+ "5 toggle active/passive muscles   G get up   P cycle right profile   S slow motion   R reset   Esc menu\n" \
 		+ "Mouse drag or arrow keys: orbit   wheel or +/-: zoom\n" \
-		+ "POSES dummy: N/B next/prev move  M replay  H next hold (incl. charges)  J release  V charge level  C crouch  Space jump  X break arm  Z heal"
+		+ "POSES dummy: N/B next/prev move  M replay  H next hold (incl. charges)  J release  V charge level  C crouch  Space jump  X break arm  Z heal\n" \
+		+ "ROUND 5: L limp left arm (rest animated)   6 jab head  7 hook head  8 stagger  9 sweep  0 knockdown (with hitstop)   T severing launch   Y hold right dummy   U kill left dummy\n" \
+		+ "WALL RANGE (x 12-20): Q panel   W power P   F launch a 70 kg body into it   E rebuild the panels"
 	layer.add_child(help)
 	status = Label.new()
-	status.position = Vector2(16, 120)
+	status.position = Vector2(16, 162)
 	status.add_theme_font_size_override(&"font_size", 16)
 	status.add_theme_color_override(&"font_outline_color", Color.BLACK)
 	status.add_theme_constant_override(&"outline_size", 6)
@@ -165,10 +219,20 @@ func _build_ui() -> void:
 func _process(_delta: float) -> void:
 	if status:
 		var names := ["ANIMATED", "FLINCH", "STAGGER", "LAUNCHED", "GROUNDED", "GETUP", "DEAD"]
-		status.text = "muscles: %s   right profile: %s\nleft: %s   right: %s   (%.3f / %.3f ms per tick)\nposes: %s   stance %s   charge level %d" % [
+		var rc := poser.ragdoll
+		var st := ""
+		for b in [Bones.HEAD, Bones.SPINE, Bones.CHEST, Bones.L_UPPER_ARM, Bones.L_LOWER_ARM, Bones.R_UPPER_ARM,
+				Bones.L_LOWER_LEG, Bones.R_LOWER_LEG]:
+			st += "%s %.2f  " % [String(b).replace("Left", "L").replace("Right", "R"), rc.get_bone_strength(b)]
+		var p: float = RANGE_P[_range_p]
+		status.text = "muscles: %s   right profile: %s\nleft: %s%s   right: %s%s   (%.3f / %.3f ms per tick)\nposes: %s   stance %s   charge level %d   limp arm %s   last reaction %s (%s)\nstrength: %s\nloose limbs %d   awake corpses %d\nwall range: %s, P %.0f (%.1f m/s at %.0f deg)   last: %s" % [
 			"ACTIVE" if _active else "PASSIVE", _right_profiles[_right_profile_i],
-			names[left.ragdoll.state], names[right.ragdoll.state], left.ragdoll.last_tick_ms, right.ragdoll.last_tick_ms,
-			_shown, poser.stance, poser.animator.charge_level]
+			names[left.ragdoll.state], " (settled)" if left.ragdoll.is_settled() else "",
+			names[right.ragdoll.state], " (held)" if right.ragdoll.is_held() else "",
+			left.ragdoll.last_tick_ms, right.ragdoll.last_tick_ms,
+			_shown, poser.stance, poser.animator.charge_level, "ON" if _limp_on else "off", _last_reaction,
+			names[rc.state], st, HumanoidRig.loose_limb_count(), RagdollController.awake_dead_count(),
+			RANGE_SURFACES[_range_i], p, Power.launch_speed(p), Power.launch_angle(p), _range_result]
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_LEFT or event.button_mask & MOUSE_BUTTON_MASK_RIGHT):
@@ -241,6 +305,40 @@ func _unhandled_input(event: InputEvent) -> void:
 				poser.ragdoll.break_arm(BodyZones.Zone.ARM_R)
 			KEY_Z:
 				poser.ragdoll.heal_arms()
+			KEY_L:
+				_limp_on = not _limp_on
+				if _limp_on:
+					poser.ragdoll.limp_chain(LIMP_ARM, 1.0, 0.0)
+				else:
+					poser.ragdoll.restore_chain(LIMP_ARM)
+			KEY_6:
+				_react(&"jab")
+			KEY_7:
+				_react(&"hook")
+			KEY_8:
+				_react(&"stagger")
+			KEY_9:
+				_react(&"sweep")
+			KEY_0:
+				_react(&"knockdown")
+			KEY_T:
+				_sever_demo()
+			KEY_Y:
+				if right.ragdoll.is_held():
+					right.ragdoll.end_held()
+				else:
+					right.ragdoll.auto_getup = true
+					right.ragdoll.begin_held(Bones.CHEST, _hand, null)
+			KEY_U:
+				left.ragdoll.kill(Vector3(0, 1.0, 2.0))
+			KEY_Q:
+				_range_i = (_range_i + 1) % RANGE_SURFACES.size()
+			KEY_W:
+				_range_p = (_range_p + 1) % RANGE_P.size()
+			KEY_F:
+				_range_launch()
+			KEY_E:
+				_build_panels()
 			KEY_R:
 				_reset()
 			KEY_ESCAPE:
@@ -268,7 +366,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_update_camera()
 
 func _step_move(step: int) -> void:
-	var ids := PoseLibrary.ALL_MOVE_IDS
+	var ids := PoseLibrary.all_move_ids()   # every move incl. Round 5 (stumble steps, fast get-up...)
 	_move_i = wrapi(_move_i + step, 0, ids.size()) if _move_i >= 0 or step > 0 else ids.size() - 1
 	var id: StringName = ids[_move_i]
 	_shown = "move " + String(id)
@@ -277,11 +375,87 @@ func _step_move(step: int) -> void:
 	var tell := String(id).begins_with("e_")
 	poser.animator.play_move(id, 0.5 if tell else 0.3, 0.15, 0.45)
 
+## A tier reaction on the POSES dummy, hit from the camera side, then its
+## contact-frame hitstop (B's order: reaction, then TimeDirector.hitstop).
+func _react(kind: StringName) -> void:
+	var d := poser
+	var rc := d.ragdoll
+	rc.auto_getup = true
+	var into := d.global_basis.z      # from its front toward its back (it faces -basis.z)
+	var tier := HitInfo.Tier.FLINCH
+	match kind:
+		&"jab":
+			rc.flinch(into, Bones.HEAD, 1.0)
+		&"hook":
+			rc.flinch(d.global_basis.x * -1.0 + into * 0.3, Bones.HEAD, 1.0)
+		&"stagger":
+			tier = HitInfo.Tier.STAGGER
+			rc.stagger(into, 0.75)
+		&"sweep":
+			tier = HitInfo.Tier.STUMBLE
+			rc.stumble(d.global_basis.x, Bones.L_LOWER_LEG)
+		&"knockdown":
+			tier = HitInfo.Tier.KNOCKDOWN
+			rc.set_getup_after(1.6)
+			rc.knockdown(into, Bones.CHEST)
+	TimeDirector.hitstop([d], Power.hitstop_for(tier))
+	_last_reaction = String(kind)
+
+## Severing launch on a fresh dummy: launch at P 9 speed, take the right arm.
+func _sever_demo() -> void:
+	if is_instance_valid(_sever_dummy):
+		_sever_dummy.queue_free()
+	_sever_dummy = _make_dummy(&"grunt", SEVER_POS, RagdollProfile.realistic())
+	_sever_dummy.global_transform = Transform3D(Basis.looking_at(Vector3.BACK, Vector3.UP), SEVER_POS)
+	_sever_dummy.ragdoll.auto_getup = true
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if not is_instance_valid(_sever_dummy):
+		return
+	var p := 9.0
+	_sever_dummy.ragdoll.launch(Power.launch_velocity(p, Vector3.FORWARD), _sever_dummy.global_position + Vector3.UP, Bones.R_LOWER_ARM)
+	_sever_dummy.rig.sever(&"arm_r")
+	TimeDirector.hitstop([_sever_dummy], Power.hitstop_for(HitInfo.Tier.SEVER))
+	_last_reaction = "sever arm_r"
+
+## Drywall, brick and concrete panels (D's Destructible, built as YardBuilder
+## does), exterior face toward the launch spots.
+func _build_panels() -> void:
+	for d in _panels:
+		if is_instance_valid(d):
+			d.queue_free()
+	_panels.clear()
+	for i in RANGE_SURFACES.size():
+		var d: Node3D = load(DESTRUCTIBLE_PATH).new()
+		d.set(&"surface", RANGE_SURFACES[i])
+		d.set(&"size", Vector3(3.0, 3.0, 0.25))
+		d.name = "Range_" + String(RANGE_SURFACES[i])
+		d.transform = Transform3D(Basis.looking_at(Vector3.FORWARD, Vector3.UP), Vector3(RANGE_X[i], 1.5, RANGE_PANEL_Z))
+		add_child(d)
+		_panels.append(d)
+	_range_result = "-"
+
+## A fresh 70 kg fighter launched straight at the selected panel with the
+## launch velocity of power P (30 degrees up under P 7, 18 from P 7).
+func _range_launch() -> void:
+	if is_instance_valid(_range_fighter):
+		_range_fighter.queue_free()
+	var pos := Vector3(RANGE_X[_range_i], 0, RANGE_LAUNCH_Z)
+	_range_fighter = load(FACTORY_PATH).spawn_dummy(self, RANGE_ARCHETYPE, Transform3D(Basis(), pos))
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if not is_instance_valid(_range_fighter):
+		return
+	var p: float = RANGE_P[_range_p]
+	_range_result = "flying (P %.0f)" % p
+	_range_fighter.call(&"launch", Power.launch_velocity(p, Vector3.FORWARD), _range_fighter.call(&"get_center_of_mass"), Bones.CHEST)
+
 func _both(f: Callable) -> void:
 	for d in [left, right]:
 		f.call(d)
 
 func _reset() -> void:
+	_limp_on = false
 	for pair in [[left, LEFT_POS], [right, RIGHT_POS], [poser, POSE_POS]]:
 		var d: LabDummy = pair[0]
 		d.ragdoll.force_recover()

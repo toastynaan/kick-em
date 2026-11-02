@@ -10,9 +10,21 @@ extends StaticBody3D
 ##
 ## Local frame: the panel face is the XY plane, thickness along Z. Local +Z is
 ## the "exterior" face (the yard builder points it at the courtyard).
-## Concrete panels never break: they sit on Layers.WORLD (so a launched body's
-## set_ignore_breakables never lets bones pass through them) and only show a
-## crack decal from Tuning.SURFACES.concrete.decal_from J.
+## Round 5 (Feel Reference: Launch speed and walls): every surface breaks by
+## E = 1/2 M v^2 (speed straight into the face) against Tuning.SURFACES; a hit
+## from Tuning.CRACK_FRACTION of the break energy cracks the panel and lowers
+## its break energy by half the hit's energy. Concrete panels (15,000 J) never
+## break in one hit at the 18 m/s cap; a second one does. Only panels with
+## `unbreakable` (arena boundary) never break: they sit on Layers.WORLD (so a
+## launched body's set_ignore_breakables never lets bones pass through them)
+## and only crack (decal). Panels are runnable (WorldTags) while intact.
+##
+## Round 6: part of the breakable contract (group "breakables", receive_impact,
+## receive_strike, receive_blast). Cells a hole leaves without support (no path
+## through standing cells to a side in `support_mask`) fall Tuning.COLLAPSE_DELAY
+## s later, after GameEvents.structure_collapsed (kind &"panel") so the dust and
+## creak come first: no panel ever keeps floating cells. Door frames are kinds
+## &"jamb" (breaks whole) and &"lintel" (falls when a jamb under it breaks).
 ##
 ## Events: this node emits GameEvents.wall_broken (every hole or full break,
 ## strike-made holes included) and GameEvents.wall_cracked itself, so
@@ -33,20 +45,28 @@ signal holed(position: Vector3, count: int, full: bool)
 @export var style: StringName = &""
 ## Fracture pattern variant (0..PanelFracture.VARIANTS-1); -1 picks one from the position.
 @export var variant := -1
-## &"panel" (local holes) or a prop that breaks whole: &"crate", &"desk", &"lamp".
+## &"panel" (local holes) or a prop that breaks whole: &"crate", &"desk", &"lamp",
+## and the Round 6 door frames &"jamb" and &"lintel".
 @export var kind: StringName = &"panel"
 ## > 0 overrides the surface's break energy (props).
 @export var break_energy_override := -1.0
+## Arena boundary: never breaks, only cracks (Round 5 lead decision 7).
+@export var unbreakable := false
+## Panel sides that hold cells up (PanelFracture.SIDE_*): walls between columns
+## are held left, right and below; free-standing partitions and low walls only below.
+@export var support_mask := PanelFracture.SUPPORT_SIDES
 var break_energy := 2000.0
 var absorption := 0.3
 ## True once (nearly) every cell is gone.
 var is_broken := false
 var is_cracked := false
 
+## Panels lower than this (low walls) are vaulted, not run along.
+const RUNNABLE_MIN_HEIGHT := 2.0
 ## Chunk density, kg/m^3. Game values: a 0.25 m drywall panel is a stud wall,
 ## not solid gypsum, and a chunk must never stop a 70 kg body dead.
 const DENSITY := {&"drywall": 80.0, &"brick": 220.0, &"concrete": 400.0, &"wood": 120.0}
-const PROP_DENSITY := {&"crate": 500.0, &"desk": 600.0, &"lamp": 300.0}
+const PROP_DENSITY := {&"crate": 500.0, &"desk": 600.0, &"lamp": 300.0, &"jamb": 300.0, &"lintel": 200.0}
 ## Share of the body's exit velocity given to chunks near / far from the hit.
 const CHUNK_SHARE_NEAR := 1.15
 const CHUNK_SHARE_FAR := 0.6
@@ -79,7 +99,11 @@ const LOOSEN_TILT := 0.07                 ## rad
 ## Speed (m/s) a struck-out cell leaves the wall along the strike.
 const STRIKE_PUSH := 2.5
 ## Props: strike HP before they break (crate ~2 kicks, desk ~3, lamp ~6).
-const PROP_STRIKE_HP := {&"crate": 110.0, &"desk": 170.0, &"lamp": 330.0}
+const PROP_STRIKE_HP := {&"crate": 110.0, &"desk": 170.0, &"lamp": 330.0, &"jamb": 200.0, &"lintel": 300.0}
+## Blasts (Round 6): from this share of the crack energy a blast pops chips; from
+## the crack energy itself it cracks (and weakens) the panel or prop. Blasts never
+## break walls or furniture; glass shatters.
+const BLAST_CHIP_SHARE := 0.4
 ## Weakened walls: a fully damaged footprint needs (1 - WEAKEN_MAX) of the
 ## break energy. A wall gives at its worst spot: the weakness is at least
 ## WEAK_SPOT_SHARE x the most damaged part of the footprint (a hole counts as 1).
@@ -114,6 +138,9 @@ var strike_holes := 0
 ## strike (HUD: no banner for every jab that widens a hole); false after an
 ## impact, scripted or breach break.
 var last_break_by_strike := false
+## A door frame's lintel (on each jamb): it falls when a jamb under it breaks.
+var lintel: Destructible = null
+var _collapse_pending := false
 var _built := false
 var _rng := RandomNumberGenerator.new()
 
@@ -132,6 +159,10 @@ func _build() -> void:
 	absorption = data["absorption"]
 	collision_layer = Layers.WORLD if is_unbreakable() else Layers.DESTRUCTIBLE
 	collision_mask = 0
+	set_meta(&"surface", &"wood" if kind == &"crate" or kind == &"desk" else surface)
+	add_to_group(&"breakables")
+	if kind == &"panel":
+		add_to_group(&"runnable")
 	if variant < 0:
 		var p := global_position if is_inside_tree() else position
 		variant = absi(int(floor(p.x * 1.3) * 7 + floor(p.z * 1.7) * 13 + floor(p.y))) % PanelFracture.VARIANTS
@@ -177,10 +208,12 @@ func _build() -> void:
 
 func _material() -> Material:
 	match kind:
-		&"crate", &"desk":
+		&"crate", &"desk", &"jamb", &"lintel":
 			return WorldMaterials.panel(&"wood", &"planks")
 		&"lamp":
 			return WorldMaterials.frame()
+	if style == &"boards":
+		return WorldMaterials.panel(&"wood", &"planks")
 	return WorldMaterials.panel(surface, style)
 
 func _build_lamp_extras() -> void:
@@ -227,13 +260,25 @@ static func _lamp_head(top: Vector3) -> Node3D:
 	return root
 
 func is_unbreakable() -> bool:
-	return is_inf(break_energy) or surface == &"concrete" and kind == &"panel"
+	return unbreakable or is_inf(break_energy)
 
-## Energy at or above which a hit cracks this panel (INF for concrete).
+## Energy at or above which a hit cracks this panel (INF for unbreakable ones:
+## they only ever crack, so bones never ignore them).
 func get_crack_threshold() -> float:
 	if is_unbreakable():
 		return INF
 	return Tuning.CRACK_FRACTION * break_energy
+
+## The collision box (ImpactResolver sweeps against it; Pillar has the same).
+func get_box_transform() -> Transform3D:
+	return global_transform
+
+## WorldTags (wall runs): an intact wall panel at least RUNNABLE_MIN_HEIGHT
+## tall is runnable; a cracked, holed or broken one is not, nor a low wall, and
+## props never are.
+func is_runnable() -> bool:
+	return kind == &"panel" and size.y >= RUNNABLE_MIN_HEIGHT and not is_cracked and not is_broken \
+		and _alive_count == _alive.size()
 
 ## World-space unit normal of the face nearest `from` (the side a body hits).
 ## Panels use their two big faces; props pick the box face toward `from`.
@@ -295,10 +340,14 @@ func receive_impact(energy: float, hit_pos: Vector3, velocity: Vector3, footprin
 	if is_broken:
 		return &"break"
 	if is_unbreakable():
-		var from: float = Tuning.SURFACES.get(surface, {}).get("decal_from", INF)
-		if energy >= from:
+		# Boundary: cracks (decal) from the surface's crack energy, never breaks.
+		var data: Dictionary = Tuning.SURFACES.get(surface, Tuning.SURFACES[&"concrete"])
+		if energy >= Tuning.CRACK_FRACTION * float(data["break_energy"]):
 			is_cracked = true
 			spawn_crack_decal(self, hit_pos, get_face_normal(hit_pos - velocity), energy)
+			cracked.emit(hit_pos, energy)
+			GameEvents.wall_cracked.emit(self, hit_pos, energy)
+			return &"crack"
 		return &"bounce"
 	var fp := footprint
 	if kind == &"panel" and not fp.has_area():
@@ -315,6 +364,58 @@ func receive_impact(energy: float, hit_pos: Vector3, velocity: Vector3, footprin
 		_crack(hit_pos, energy, velocity)
 		return &"crack"
 	return &"bounce"
+
+## Round 6 breakable contract: a blast (WorldDamage) reached this object with
+## `power` J (already attenuated by distance) from `center`. Glass shatters;
+## anything else cracks (and is weakened by the crack rule) from its crack
+## energy, or pops chips from BLAST_CHIP_SHARE of it. Walls and props never
+## break from a blast. Returns &"break", &"crack", &"chip" or &"hold".
+func receive_blast(center: Vector3, _radius: float, power: float, _source: StringName) -> StringName:
+	if not _built:
+		_build()
+	if is_broken or power <= 0.0:
+		return &"hold"
+	var p := nearest_point(center)
+	var away := p - center
+	away = away.normalized() if away.length() > 0.01 else Vector3.UP
+	if surface == &"glass":
+		_break_all(p, away * 2.0, power)
+		return &"break"
+	var data: Dictionary = Tuning.SURFACES.get(surface, Tuning.SURFACES[&"drywall"])
+	var crack_at := Tuning.CRACK_FRACTION * (float(data["break_energy"]) if is_unbreakable() else break_energy)
+	var n := get_face_normal(center)
+	if power >= crack_at:
+		if is_unbreakable():
+			is_cracked = true
+			spawn_crack_decal(self, p, n, power)
+			cracked.emit(p, power)
+			GameEvents.wall_cracked.emit(self, p, power)
+		else:
+			_crack(p, power, away)
+		_spawn_strike_chips(p, n, -n, minf(power * 0.05, 120.0))
+		return &"crack"
+	if power >= BLAST_CHIP_SHARE * crack_at:
+		_spawn_strike_chips(p, n, -n, minf(power * 0.05, 60.0))
+		return &"chip"
+	return &"hold"
+
+## The point of this object's box nearest `world_pos`.
+func nearest_point(world_pos: Vector3) -> Vector3:
+	var xf := global_transform
+	var lp := xf.affine_inverse() * world_pos
+	var h := size * 0.5
+	return xf * lp.clamp(-h, h)
+
+## Cells standing with no path to a supported side right now (tests, debug):
+## 0 except during the Tuning.COLLAPSE_DELAY after a hole.
+func get_floating_cell_count() -> int:
+	if not _built or is_broken or kind != &"panel":
+		return 0
+	return _unsupported_cells().size()
+
+## True while unsupported cells wait to fall.
+func is_collapse_pending() -> bool:
+	return _collapse_pending
 
 ## Scripted full break (the whole panel goes).
 func force_break(hit_pos: Vector3, velocity: Vector3) -> void:
@@ -481,17 +582,7 @@ func _break_cells(hit_pos: Vector3, velocity: Vector3, energy: float, footprint:
 	for i in hit:
 		_alive[i] = 0
 	_alive_count -= hit.size()
-	var dropped := _unsupported_cells()
-	for i in dropped:
-		_alive[i] = 0
-	_alive_count -= dropped.size()
-	if _alive_count <= maxi(2, int(ceil(_alive.size() * FULL_BREAK_LEFT))):
-		for i in _alive.size():
-			if _alive[i] == 1:
-				dropped.append(i)
-				_alive[i] = 0
-		_alive_count = 0
-		is_broken = true
+	var dropped := _settle_cells()
 	is_cracked = true
 	_reveal_cracks(lp, CRACK_RADIUS)
 	_spawn_chunks(hit, dropped, hit_pos, velocity)
@@ -524,6 +615,8 @@ func _break_all(hit_pos: Vector3, velocity: Vector3, energy: float, by_strike :=
 	GameEvents.wall_broken.emit(self, hit_pos, energy, velocity)
 	if kind == &"crate" or kind == &"desk":
 		_break_props_above()
+	if kind == &"jamb" and lintel != null and is_instance_valid(lintel) and not lintel.is_broken:
+		lintel.collapse_after(Tuning.COLLAPSE_DELAY)
 
 ## A stacked prop resting on this one falls apart with it (no floating crates).
 func _break_props_above() -> void:
@@ -537,6 +630,70 @@ func _break_props_above() -> void:
 		if absf(bottom - top) < 0.08 and flat.length() < (size.x + d.size.x) * 0.4:
 			d.call_deferred(&"force_break", d.global_position, Vector3(0, -1.0, 0))
 
+## After cells were taken out: a panel that is nearly gone loses everything left
+## now (returned for spawning, is_broken set); otherwise cells left without
+## support fall after Tuning.COLLAPSE_DELAY (structure_collapsed first).
+func _settle_cells() -> PackedInt32Array:
+	var dropped := _unsupported_cells()
+	if _alive_count - dropped.size() <= maxi(2, int(ceil(_alive.size() * FULL_BREAK_LEFT))):
+		var all := PackedInt32Array()
+		for i in _alive.size():
+			if _alive[i] == 1:
+				all.append(i)
+				_alive[i] = 0
+		_alive_count = 0
+		is_broken = true
+		return all
+	if not dropped.is_empty():
+		_schedule_collapse(dropped)
+	return PackedInt32Array()
+
+## Unsupported cells creak (structure_collapsed: dust and sound first), then fall.
+func _schedule_collapse(cells: PackedInt32Array) -> void:
+	if _collapse_pending or not is_inside_tree():
+		return
+	_collapse_pending = true
+	var c := Vector2.ZERO
+	for i in cells:
+		c += (_fs.chunks[i] as PanelFracture.Chunk).centroid
+	c /= float(cells.size())
+	GameEvents.structure_collapsed.emit(self, global_transform * Vector3(c.x, c.y, 0.0), &"panel")
+	get_tree().create_timer(Tuning.COLLAPSE_DELAY, false, true).timeout.connect(_do_collapse)
+
+func _do_collapse() -> void:
+	_collapse_pending = false
+	if is_broken or not is_inside_tree():
+		return
+	var dropped := _unsupported_cells()
+	if dropped.is_empty():
+		return
+	for i in dropped:
+		_alive[i] = 0
+	_alive_count -= dropped.size()
+	if _alive_count <= maxi(2, int(ceil(_alive.size() * FULL_BREAK_LEFT))):
+		for i in _alive.size():
+			if _alive[i] == 1:
+				dropped.append(i)
+				_alive[i] = 0
+		_alive_count = 0
+		is_broken = true
+	var xf := global_transform
+	for i in dropped:
+		_spawn_chunk(i, xf, (_fs.chunks[i] as PanelFracture.Chunk).centroid, Vector3.DOWN, 0.5, true)
+	_rebuild()
+
+## A lintel or other piece held up by something that broke: it creaks
+## (structure_collapsed), then falls whole after `delay` s.
+func collapse_after(delay: float) -> void:
+	if is_broken or _collapse_pending or not is_inside_tree():
+		return
+	_collapse_pending = true
+	GameEvents.structure_collapsed.emit(self, global_position, kind)
+	get_tree().create_timer(delay, false, true).timeout.connect(func() -> void:
+		_collapse_pending = false
+		if is_instance_valid(self) and not is_broken:
+			_break_all(global_position, Vector3.DOWN * 0.5, 0.0))
+
 ## Alive cells not connected (through alive neighbours) to a supported side.
 func _unsupported_cells() -> PackedInt32Array:
 	var n := _alive.size()
@@ -545,7 +702,7 @@ func _unsupported_cells() -> PackedInt32Array:
 	reached.fill(0)
 	var queue: Array[int] = []
 	for i in n:
-		if _alive[i] == 1 and ((_fs.chunks[i] as PanelFracture.Chunk).edge_mask & PanelFracture.SUPPORT_SIDES) != 0:
+		if _alive[i] == 1 and ((_fs.chunks[i] as PanelFracture.Chunk).edge_mask & support_mask) != 0:
 			reached[i] = 1
 			queue.append(i)
 	while not queue.is_empty():
@@ -568,13 +725,17 @@ func _spawn_chunks(blast: PackedInt32Array, drop: PackedInt32Array, hit_pos: Vec
 	var dir := velocity / speed if speed > 0.01 else -get_face_normal(hit_pos)
 	var exit_speed := speed * sqrt(maxf(1.0 - absorption, 0.0))
 	for i in blast:
-		_spawn_chunk(i, xf, lp, dir, exit_speed, false)
+		_spawn_chunk(i, xf, lp, dir, exit_speed, false, speed)
 	for i in drop:
-		_spawn_chunk(i, xf, lp, dir, exit_speed, true)
+		_spawn_chunk(i, xf, lp, dir, exit_speed, true, speed)
 
-func _spawn_chunk(i: int, xf: Transform3D, lp: Vector2, dir: Vector3, exit_speed: float, dropped: bool) -> void:
+## `ref_speed`: the break's reference speed (the hitting body's) for
+## DebrisManager.hold_young; below exit_speed it is exit_speed.
+func _spawn_chunk(i: int, xf: Transform3D, lp: Vector2, dir: Vector3, exit_speed: float, dropped: bool,
+		ref_speed := -1.0) -> void:
 	var c: PanelFracture.Chunk = _fs.chunks[i]
-	var body := RigidBody3D.new()
+	# A lintel's halves come down on whoever stands in the doorway (FallingPiece).
+	var body: RigidBody3D = FallingPiece.new() if kind == &"lintel" else RigidBody3D.new()
 	body.name = "Chunk"
 	var mi := MeshInstance3D.new()
 	mi.mesh = c.mesh
@@ -616,8 +777,9 @@ func _spawn_chunk(i: int, xf: Transform3D, lp: Vector2, dir: Vector3, exit_speed
 	(get_parent() if get_parent() else self).add_child(body)
 	body.linear_velocity = v
 	body.angular_velocity = w
-	var persist := c.persist or kind == &"lamp"
-	DebrisManager.register(body, c.small and kind != &"lamp", -1.0 if persist else DebrisManager.MEDIUM_LIFE)
+	# Round 5: every piece stays for the round (DebrisManager caps the total).
+	DebrisManager.register(body, c.small and kind != &"lamp")
+	DebrisManager.hold_young(body, maxf(ref_speed, exit_speed))
 	last_chunks.append(body)
 
 static var _chunk_pm: PhysicsMaterial
@@ -744,17 +906,7 @@ func _strike_panel(hit_pos: Vector3, n: Vector3, direction: Vector3, power: floa
 	for i in out:
 		_alive[i] = 0
 	_alive_count -= out.size()
-	var dropped := _unsupported_cells()
-	for i in dropped:
-		_alive[i] = 0
-	_alive_count -= dropped.size()
-	if _alive_count <= maxi(2, int(ceil(_alive.size() * FULL_BREAK_LEFT))):
-		for i in _alive.size():
-			if _alive[i] == 1:
-				dropped.append(i)
-				_alive[i] = 0
-		_alive_count = 0
-		is_broken = true
+	var dropped := _settle_cells()
 	is_cracked = true
 	_reveal_cracks(lp, 0.6 + 0.6 * frac)
 	_spawn_chunks_struck(out, dropped, lp, direction)

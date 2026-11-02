@@ -32,7 +32,7 @@ class ButtonEvent:
 ## on the same tick as an attack press is already in effect when the attack
 ## arrives (crouch + kick is the sweep, jump + kick the flying kick).
 const ACTIONS: Array[StringName] = [&"crouch", &"jump", &"focus",
-	&"punch", &"kick", &"grab", &"block", &"dash"]
+	&"punch", &"heavy", &"kick", &"grab", &"block", &"dash"]
 
 ## Player seconds since this node started (only advances while poll() runs).
 var clock := 0.0

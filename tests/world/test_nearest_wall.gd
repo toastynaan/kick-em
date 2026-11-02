@@ -12,17 +12,20 @@ func _ready() -> void:
 	yard.build()
 	await get_tree().physics_frame
 	await get_tree().physics_frame
-	_case("2 m from the west offices", Vector3(-9.0, 1.0, 0.0), 8.0, Vector3(-1, 0, 0))
+	# (z = 3.6: the Round 5 platform at x -8..-5, z -2..2 and the Round 6
+	# partition at x -7.1, z 4.6..7.0 are not the nearest faces here.)
+	_case("1.7 m from the west offices", Vector3(-9.3, 1.0, 3.6), 8.0, Vector3(-1, 0, 0))
+	_case("beside the platform", Vector3(-9.0, 1.0, 0.0), 8.0, Vector3(1, 0, 0))
 	_case("2.5 m from the north garage", Vector3(2.0, 1.0, -8.5), 8.0, Vector3(0, 0, -1))
 	_case("beside the pillar at (6, 6)", Vector3(4.8, 1.0, 6.0), 8.0, Vector3(1, 0, 0))
 	_case("courtyard centre, max 5 m", Vector3(0.0, 1.0, 0.0), 5.0, Vector3.ZERO)
 	_case("south strip", Vector3(-3.0, 1.0, 9.0), 8.0, Vector3(0, 0, 1))
 	# A hole in the facade straight ahead does not hide the wall plane.
 	for d in yard.get_destructibles():
-		if d.kind == &"panel" and d.global_position.distance_to(Vector3(-11.125, 1.5, 0.0)) < 0.1:
+		if d.kind == &"panel" and d.global_position.distance_to(Vector3(-11.125, 1.5, -6.0)) < 0.1:
 			d.break_hole(d.global_position, Vector3(-8, 0, 0), Rect2(-0.6, -1.5, 1.2, 2.2))
 	await get_tree().physics_frame
-	_case("through a facade hole", Vector3(-9.5, 1.0, 0.0), 8.0, Vector3(-1, 0, 0))
+	_case("through a facade hole", Vector3(-9.5, 1.0, -6.0), 8.0, Vector3(-1, 0, 0))
 	# Props are skipped: the office desk at (-12.8, z=2.1) is not a wall.
 	_case("in an office beside a desk", Vector3(-12.2, 1.0, 2.1), 8.0, Vector3(1, 0, 0))
 	var t0 := Time.get_ticks_usec()

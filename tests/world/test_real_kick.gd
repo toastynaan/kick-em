@@ -1,12 +1,16 @@
 extends Node3D
-## Worked example with REAL moves (round 2): a player Fighter sparta-kicks a
-## 70 kg Grunt standing 2 m (COM) in front of a single panel. Standing kick
-## (Tuning.KICK_LAUNCH) and dash-in kick, into drywall, brick and concrete.
-## Prints the launch speed, the measured wall energy and the outcome.
-## Expected (spec table): standing kick breaks drywall and bounces off brick
-## and concrete; a dash kick breaks drywall and cracks brick.
+## Round 5 worked examples through REAL strikes (Feel Reference: Launch speed and
+## walls). A player Fighter charges a strike to level 3 on a 70 kg dummy whose
+## COM stands 2 m in front of a single panel; B's power score sets the tier and
+## launch, the wall decides on E = 1/2 M v^2 straight into it.
+##   level-3 standing kick:  P = 2.5 x 3.2 = 8.0, hard launch 12 m/s at 18 deg,
+##     4,559 J: breaks drywall, cracks brick, bounces off concrete.
+##   level-3 standing cross: P = 2.0 x 3.2 = 6.4, launch 8.8 m/s at 30 deg,
+##     2,033 J: breaks drywall ("just"), bounces off brick.
+## Prints P, tier, the launch speed, the measured wall energy and the outcome.
 
 const WALL_DIST := 2.0
+const HOLD := 1.05          ## s: past CHARGE_LEVELS[2] (1.0 s) = level 3
 var _decisions: Array = []
 var _hits: Array = []
 var _ok := true
@@ -19,49 +23,45 @@ func _ready() -> void:
 	WorldTestUtil.make_floor(self, 200.0)
 	await get_tree().physics_frame
 	if not await WorldTestUtil.real_ragdoll_available(self):
-		print("[realkick] SKIP: real ragdoll unavailable")
+		print("[realkick] FAIL: real ragdoll unavailable")
 		get_tree().quit(1)
 		return
 	var lane := 0
-	for dash in [false, true]:
-		for surface: StringName in [&"drywall", &"brick", &"concrete"]:
-			var expect: StringName = &"bounce"
-			if surface == &"drywall":
-				expect = &"break"
-			elif surface == &"brick" and dash:
-				expect = &"crack"
-			await _case(surface, dash, expect, lane)
-			lane += 1
+	var kick_expect := {&"drywall": &"break", &"brick": &"crack", &"concrete": &"bounce"}
+	for surface: StringName in [&"drywall", &"brick", &"concrete"]:
+		await _case(CombatController.Action.KICK, "L3 kick ", 8.0, surface, kick_expect[surface], lane)
+		lane += 1
+	var cross_expect := {&"drywall": &"break", &"brick": &"bounce"}
+	for surface: StringName in [&"drywall", &"brick"]:
+		await _case(CombatController.Action.HEAVY, "L3 cross", 6.4, surface, cross_expect[surface], lane)
+		lane += 1
 	print("")
 	for r in _rows:
 		print("[realkick] ", r)
 	print("[realkick] RESULT: ", "PASS" if _ok else "FAIL")
 	get_tree().quit(0 if _ok else 1)
 
-func _case(surface: StringName, dash: bool, expect: StringName, lane: int) -> void:
+func _case(action: int, label: String, want_p: float, surface: StringName, expect: StringName, lane: int) -> void:
 	_decisions.clear()
 	_hits.clear()
 	var z := float(lane) * 12.0
-	var victim := FighterFactory.spawn_dummy(self, &"grunt", Transform3D(Basis.looking_at(Vector3(1, 0, 0)), Vector3(0, 0.05, z)))
+	var victim := FighterFactory.spawn_dummy(self, &"player", Transform3D(Basis.looking_at(Vector3(1, 0, 0)),
+		Vector3(0, 0.05, z)), Fighter.TEAM_ENEMY)
 	var attacker := FighterFactory.spawn_dummy(self, &"player",
-		Transform3D(Basis.looking_at(Vector3(-1, 0, 0)), Vector3(3.6 if dash else 1.3, 0.05, z)), Fighter.TEAM_PLAYER)
+		Transform3D(Basis.looking_at(Vector3(-1, 0, 0)), Vector3(1.1, 0.05, z)), Fighter.TEAM_PLAYER)
 	for i in 20:
 		await get_tree().physics_frame
 	var com := victim.get_center_of_mass()
 	var panel := WorldTestUtil.make_panel(self, surface, Vector3(com.x - WALL_DIST - 0.125, 0, z))
 	await get_tree().physics_frame
-	if dash:
-		attacker.move_input = attacker.get_forward()
-		attacker.combat.press(CombatController.Action.DASH)
-		await _wait(0.12)
-		attacker.move_input = Vector3.ZERO
-	attacker.combat.press(CombatController.Action.KICK)
+	attacker.combat.force_hold_charge = true   # tap vs hold like the player's buttons
+	attacker.combat.press(action)
+	await _wait(HOLD)
+	attacker.combat.release(action)
 	var t0 := TimeDirector.now()
 	while _hits.is_empty() and TimeDirector.now() - t0 < 1.5:
 		await get_tree().physics_frame
-	var launch := -1.0
-	if not _hits.is_empty():
-		launch = (_hits[0] as HitInfo).launch_velocity.length()
+	var info: HitInfo = _hits[0] if not _hits.is_empty() else null
 	var t1 := TimeDirector.now()
 	var dec: Dictionary = {}
 	while TimeDirector.now() - t1 < 2.0 and dec.is_empty():
@@ -71,10 +71,14 @@ func _case(surface: StringName, dash: bool, expect: StringName, lane: int) -> vo
 				dec = d
 	var e: float = dec.get("energy", -1.0)
 	var outcome: StringName = dec.get("outcome", &"none")
-	var ok := outcome == expect
-	var label := "dash-in kick" if dash else "standing kick"
-	_rows.append("%-13s %-8s launch %.2f m/s -> E=%6.0f J -> %-6s (expect %-6s) %s" % [
-		label, surface, launch, e, outcome, expect, "PASS" if ok else "FAIL"])
+	var p := info.power if info else -1.0
+	var lv := info.launch_velocity if info else Vector3.ZERO
+	var ok := outcome == expect and absf(p - want_p) < 0.05
+	var spec_e := 0.5 * victim.get_total_mass() * pow(Power.launch_speed(want_p) * cos(deg_to_rad(Power.launch_angle(want_p))), 2.0)
+	_rows.append("%s %-8s P=%.2f (want %.1f) tier=%s launch %.2f m/s at %.0f deg -> E=%6.0f J (table %5.0f) -> %-6s (expect %-6s) %s" % [
+		label, surface, p, want_p, HitInfo.tier_name(info.tier) if info else &"-", lv.length(),
+		rad_to_deg(asin(clampf(lv.normalized().y, -1.0, 1.0))) if lv.length() > 0.01 else 0.0, e, spec_e, outcome, expect,
+		"PASS" if ok else "FAIL"])
 	print("[realkick] ", _rows[_rows.size() - 1])
 	_ok = _ok and ok
 	victim.queue_free()

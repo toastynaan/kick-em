@@ -137,7 +137,9 @@ func _ready() -> void:
 	_check("spinning backfist lands behind", behind > 0.5 and bf_hit.y > 1.2, "%.2f m behind, y %.2f" % [behind, bf_hit.y])
 
 	# --- Tell glow heights (agent C glows STRIKE_BONES[id][0] during the tell) ------
-	for spec in [[&"e_hook", 1.55, 1.8], [&"e_sweep", -1.0, 0.25], [&"e_kick", 0.3, 1.1]]:
+	# Round 5: e_hook is the grunt's cross (a straight punch at the head), so its
+	# glow reads "head level" when it stays above the shoulder line (1.46 m).
+	for spec in [[&"e_hook", 1.46, 1.8], [&"e_sweep", -1.0, 0.25], [&"e_kick", 0.3, 1.1]]:
 		var id: StringName = spec[0]
 		var b: StringName = PoseLibrary.STRIKE_BONES[id][0]
 		d.animator.play_move(id, 0.45, 0.07, 0.3)

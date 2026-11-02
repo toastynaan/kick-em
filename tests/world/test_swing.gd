@@ -21,6 +21,9 @@ func _ready() -> void:
 	GameEvents.impact_damaged.connect(func(f: Node3D, d: float, e: float, s: StringName, p: Vector3) -> void: _damage.append([f, d, e, s, p]))
 	ImpactResolver.wall_decided.connect(func(f: Node3D, w: Node3D, o: StringName, e: float, _p: Vector3) -> void: _decisions.append([f, w, o, e]))
 	ImpactResolver.impact_info.connect(func(info: HitInfo) -> void: _infos.append(info))
+	# Round 5: a bowl is a preset-tier hit (kind &"bowl") whose attacker is the launcher.
+	ImpactResolver.bowl_dealt.connect(func(_f: Node3D, _v: Node3D, _s: float, _t: int, info: HitInfo) -> void:
+		_infos.append(info))
 	WorldTestUtil.make_floor(self)
 	await get_tree().physics_frame
 	if not await WorldTestUtil.real_ragdoll_available(self):
@@ -88,7 +91,7 @@ func _ready() -> void:
 	var launcher_ok := ImpactResolver.get_launcher(body) == holder and ImpactResolver.is_thrown_flight(body)
 	await WorldTestUtil.wait_game(self, 0.8)
 	var hit2 := _bowls.any(func(b: Array) -> bool: return b[0] == body and b[1] == target2)
-	var credit := _infos.filter(func(i: HitInfo) -> bool: return i.victim == target2 and i.move_id == &"bowl")
+	var credit := _infos.filter(func(i: HitInfo) -> bool: return i.victim == target2 and i.kind == &"bowl")
 	var credit_ok: bool = credit.size() >= 1 and credit[0].attacker == holder
 	# A break-free (zero velocity) is not a throw.
 	var bystander := FighterFactory.spawn_dummy(self, &"grunt", Transform3D(Basis(), Vector3(-6, 0.05, 6)))

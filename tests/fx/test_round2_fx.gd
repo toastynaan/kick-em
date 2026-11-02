@@ -112,11 +112,18 @@ func _ready() -> void:
 	elif sp.amount_ratio >= 1.0:
 		fails.append("armor spark not smaller than a block spark")
 
-	# Concrete: hard body hits kick up dust and chips; light ones do not.
+	# Concrete: every body impact (above Tuning.IMPACT_MIN_ENERGY) kicks up dust
+	# (Round 5: a body hitting the floor hard -> dust puff); only hard hits
+	# throw chips.
 	var dust_i: int = BloodFX._dust_next
 	GameEvents.body_impact.emit(f, Vector3(0, 1.0, -3.0), Vector3(0, 0, 1), 600.0, &"concrete")
-	if BloodFX._dust_next != dust_i:
-		fails.append("concrete dust below IMPACT_DUST_ENERGY")
+	var soft_puff: GPUParticles3D = BloodFX._puffs[dust_i]
+	var soft_chips: GPUParticles3D = BloodFX._chips[dust_i]
+	if BloodFX._dust_next == dust_i or not soft_puff.visible:
+		fails.append("no dust on a 600 J concrete impact")
+	if soft_chips.visible:
+		fails.append("chips on a light concrete impact")
+	dust_i = BloodFX._dust_next
 	GameEvents.body_impact.emit(f, Vector3(0, 1.0, -3.0), Vector3(0, 0, 1), 4000.0, &"concrete")
 	var puff: GPUParticles3D = BloodFX._puffs[dust_i]
 	var chips: GPUParticles3D = BloodFX._chips[dust_i]

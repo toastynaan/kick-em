@@ -1,10 +1,13 @@
 extends "res://tests/combat/combat_test_base.gd"
 ## Round 3 wall strikes: the player's punches and kicks call receive_strike on
-## the wall under the striking limb, once per move, with power = damage x
-## charge x dash; the floor is never struck; a fighter in reach wins; the feel
-## (no whiff, no combo credit, recoil off a wall that holds).
+## the wall under the striking limb, once per move. Round 5: power =
+## CombatController.WALL_POWER_PER_P x P (charge and run speed count as on a
+## body; a tapped kick keeps Round 3's 60); the floor is never struck; a
+## fighter in reach wins; the feel (no whiff, no combo credit, recoil off a
+## wall that holds).
 
 const FakeWall := preload("res://tests/combat/fake_wall.gd")
+const TraversalDouble := preload("res://tests/combat/traversal_double.gd")
 const L := CombatController.Action.LIGHT
 const K := CombatController.Action.KICK
 var _x := 0.0
@@ -33,11 +36,12 @@ func _strike(p: Fighter, action: int, hold := 0.0) -> void:
 	await ticks(4)
 
 func run() -> void:
-	var jab := MoveLibrary.get_move(&"jab1").damage
-	var kick := MoveLibrary.get_move(&"sparta_kick").damage
-	print("power per move")
+	var per := CombatController.WALL_POWER_PER_P
+	var jab := per * Power.base_of(&"jab")
+	var kick := per * Power.base_of(&"kick")
+	print("power per move (%.0f x P)" % per)
 	var cases := [["jab", L, 0.0, jab], ["kick", K, 0.0, kick],
-		["level 3 kick", K, 0.95, kick * Tuning.CHARGE_DAMAGE[3]]]
+		["level 3 kick", K, 1.05, kick * Tuning.CHARGE_MULT[3]]]
 	for c: Array in cases:
 		var lw: Array = await _wall_lane(0.75)
 		var p: Fighter = lw[0]
@@ -56,16 +60,19 @@ func run() -> void:
 		check(count_events(&"attack_whiff") == 0, "%s: no whiff" % c[0])
 		check(p.combat.get_combo_count() == 0, "%s: no combo credit" % c[0])
 
-	print("dash momentum adds STRIKE_DASH_BONUS")
-	var dl: Array = await _wall_lane(2.4)
+	print("run speed adds its bonus (a full-sprint kick: P 5.5)")
+	var dl: Array = await _wall_lane(0.75)
 	var pd: Fighter = dl[0]
-	pd.move_input = Vector3.FORWARD
-	pd.combat.press(CombatController.Action.DASH)
-	await wait_real(0.12)
-	pd.move_input = Vector3.ZERO
+	var tv: Traversal = TraversalDouble.new()
+	pd.add_child(tv)
+	tv.setup(pd)
+	pd.traversal = tv
+	tv.set(&"speed", 8.0)
+	tv.set(&"sprinting", true)
 	await _strike(pd, K)
-	check(dl[1].calls.size() == 1 and is_equal_approx(dl[1].calls[0][3], kick * (1.0 + Tuning.STRIKE_DASH_BONUS)),
-		"dash-in kick power %.1f" % (dl[1].calls[0][3] if not dl[1].calls.is_empty() else -1.0))
+	var want_sp := per * (Power.base_of(&"kick") + Power.speed_bonus(8.0, 8.0))
+	check(dl[1].calls.size() == 1 and is_equal_approx(dl[1].calls[0][3], want_sp),
+		"sprint kick power %.1f (want %.1f)" % [dl[1].calls[0][3] if not dl[1].calls.is_empty() else -1.0, want_sp])
 
 	print("feel: recoil off a wall that holds")
 	var hl: Array = await _wall_lane(0.75, &"hold")

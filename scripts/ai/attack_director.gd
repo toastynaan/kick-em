@@ -1,22 +1,33 @@
 extends Node
-## Autoload "AttackDirector": attack tokens and rings (spec: Enemies and AI,
-## rules 1-6). OWNER: agent C (AI).
+## Autoload "AttackDirector": attack tokens, rings and swing spacing (Feel
+## Reference: Enemies have to be readable first; original spec rules 1-6).
+## OWNER: agent C (AI).
 ##
-## 1. Tuning.TOKENS[difficulty] tokens; an enemy needs one to start an attack.
-##    It comes back when the attack ends, or the holder is hit, launched,
-##    grabbed, dies, or sits on it too long.
+## 1. At most Tuning.TOKEN_MAX tokens (Easy: Tuning.TOKENS[0]); an enemy needs
+##    one to start an attack. It comes back when the attack ends (a string's
+##    follow-up keeps it), or the holder is hit out of its attack, launched,
+##    grabbed, dies, starts fleeing, or sits on it too long.
 ## 2. Rings: token holders and the next in line (one per free token plus one
 ##    standby; on-screen enemies first, then who waited longest) are NEAR, the
-##    rest FAR. Crowd pacing spaces grants by Tuning.ATTACK_INTERVAL x CROWD_PACE.
+##    rest FAR. Everyone waiting circles in Tuning.CIRCLE_RING (the brain picks
+##    the radius). Crowd pacing spaces grants by Tuning.ATTACK_INTERVAL x CROWD_PACE.
 ## 3. No grants while the player is in hitstun, down (launched / grounded /
 ##    getting up), held by a grab, or while the camera is busy (follow-cam).
+##    While the player is knocked down, holders keep their token and get
+##    Tuning.DOWNED_FREE_SWINGS free swings at him; the rest wait.
 ## 4. An enemy must have been inside the camera view for
 ##    Tuning.ONSCREEN_BEFORE_TOKEN s before it gets a token.
-## 5. Tells: GameEvents.attack_tell spawns a TellGlint above the attacker.
-## 6. Two holders' first active frames are at least Tuning.SWING_SPACING s
-##    apart: grants are staggered, and request_swing() picks a tell length
-##    (inside [TELL_MIN, TELL_MAX]) that keeps the active frames spaced.
-## Clocks: world_now() (scaled game time, the enemies' time) for token
+## 5. Tells: GameEvents.attack_tell spawns a TellGlint (orange limb glow on
+##    strikes, blue on both hands for grabs) from wind-up to first active frame.
+## 6. Two holders' first active frames are at least Tuning.TOKEN_ACTIVE_GAP
+##    apart by design (plus ACTIVE_GAP_MARGIN): every swing reserves its first
+##    active frame (a string reserves each hit's), and request_swing() refuses
+##    a swing whose active frame would land inside another holder's gap. The
+##    enemy then waits a beat; its startup itself never changes, so each move
+##    always has the same, learnable timing.
+## Enemy startup: enemy_startup_frames() (Tuning.ENEMY_STARTUP, faster from
+## Tuning.ENEMY_STARTUP_SHRINK_FROM; set_wave() at each wave start).
+## Clocks: world_now() (scaled game time, the enemies' own time) for token
 ## timeouts, grant gaps, pacing and swing spacing; now() = TimeDirector.now()
 ## (real time, physics ticks) for the on-screen rule. B reports time to the
 ## active frame in real seconds; it is converted to world time here.
@@ -34,8 +45,14 @@ const GRANT_GAP := 0.25
 ## A holder whose attack started but whose combat no longer reports an attack
 ## for this long (missed attack_ended) loses its token.
 const ATTACK_LOST_GRACE := 0.3
-## Step used when searching for a tell length that satisfies the spacing rule.
-const TELL_SEARCH_STEP := 0.025
+## Frames (s) added to Tuning.TOKEN_ACTIVE_GAP when scheduling. A heavy keeps
+## winding up through flinches (ignore_flinch) and each flinch hitstop (0.04 s)
+## pushes his active frame back; this margin keeps two such delays from
+## squeezing two hits into one parry window.
+const ACTIVE_GAP_MARGIN := 4.0 / 60.0
+## A string's follow-up reservation is an estimate (the first hit's recovery
+## is cut when it lands); it is held this much wider on each side.
+const FOLLOWUP_SLACK := 4.0 / 60.0
 ## Crowd pacing: after a grant, the next one waits Tuning.ATTACK_INTERVAL x this
 ## (s), so a crowd attacks about every 1-1.5 s on Normal, 2-3 s on Easy.
 ## A lone enemy (duel) and urgent requests (counter, whiff punish) skip it.
@@ -47,16 +64,49 @@ const LINE_FAR := 8.0
 ## Navigation (AINavGrid): path queries allowed per physics tick across all
 ## enemies, and the delay before re-testing cells round a broken wall (its
 ## collision shapes are rebuilt the frame after the break).
-const NAV_QUERIES_PER_TICK := 3
+const NAV_QUERIES_PER_TICK := 2
 const NAV_REFRESH_DELAY := 0.25
+## Cells re-tested per tick in a slow background sweep (a full 93x93 grid every
+## ~6 s, ~25 us per tick), so props, crates and walls that move, break or
+## appear (the Yard's low walls, crates and platform) reach the grid without
+## an event.
+const NAV_SWEEP_CELLS := 12
+## Waypoint searches (AIBrain._find_waypoint: many sweeps) allowed per tick.
+const ROUTE_SEARCHES_PER_TICK := 1
+# Round 6: the world changes under the grid (clutter, structure).
+## s between polls of breakables that change without an event: static clutter
+## knocked loose (its collision goes), rigid props on Layers.DESTRUCTIBLE that
+## capsules bump into and that get shoved about.
+const DYNAMIC_POLL := 0.5
+const DYNAMIC_MOVE := 0.3            ## m a polled obstacle may move before its cells are re-tested
+const DYNAMIC_RADIUS := 1.2          ## m re-tested round a changed clutter object
+const BREAK_RADIUS := 1.6            ## m re-tested round furniture_broken
+const COLLAPSE_RADIUS := 2.5         ## m re-tested round structure_collapsed...
+const COLLAPSE_AGAIN := 1.5          ## ...and again this long after (what fell has come down)
+## Hazards waiting enemies keep out of (optional Round 6 polish): the floor
+## where glass broke (shards) and the footprint under a cracked pillar's beam.
+const GLASS_HAZARD_RADIUS := 1.0
+const BEAM_HAZARD_MARGIN := 0.7      ## m beyond the beam's footprint
+const BEAM_HALF_LENGTH := 1.1        ## m (Pillar.HEAD_LENGTH / 2)
+const HAZARD_MAX := 32
+const HAZARD_TURN := 20.0            ## degrees per step a ring spot rotates out of a hazard
+## Startup frames of legacy enemy moves Tuning.ENEMY_STARTUP does not list
+## (their Upgrade 2 tells): kept for the legacy archetypes' tests.
+const LEGACY_STARTUP := {&"e_throw_debris": 30.0, &"e_sweep": 26.0}
 
 ## Set by the camera while the launch follow-cam runs: no new tokens then.
 var camera_busy := false
+## 1-based current wave (0 = Duel / none); enemy startup shrinks from
+## Tuning.ENEMY_STARTUP_SHRINK_FROM.
+var wave_index := 0
 
 var _player: Fighter = null
 var _enemies: Array[Fighter] = []
-## Fighter -> {"granted": float, "active_at": float, "attacking": bool, "started": float}
+## Fighter -> {"granted": float, "active_at": float, "attacking": bool, "started": float,
+##             "reserved": Array[float] (later hits of a string), "followup": bool}
 var _holders: Dictionary = {}
+## [world time, Fighter] of recent first active frames (spacing across releases).
+var _recent_actives: Array = []
 ## Fighter -> now() when it entered the camera view, or -1.0 while off screen.
 var _onscreen_since: Dictionary = {}
 ## Fighter -> now() of its last turn end (or registration): line order.
@@ -67,12 +117,25 @@ var _last_grant := -INF
 var _next_paced_grant := -INF
 var _last_denial: Dictionary = {}  ## Fighter -> String (debugging)
 var _last_request: Dictionary = {} ## Fighter -> world time of its last token request
+## Fighter -> swings it started at the player during the current knockdown.
+var _down_swings: Dictionary = {}
 ## Shared navigation grid (built at round start, a few rows per tick).
 var nav: AINavGrid = null
 var _nav_budget := 0
+var _route_budget := 0
 var _nav_refresh: Array = []       ## [due time, centre, radius]
 var _rng := RandomNumberGenerator.new()
 var _world_time := 0.0
+var _next_slot := 0
+var _dyn_poll_at := 0.0
+var _dyn_tracked := {}               ## CollisionObject3D -> [position, collision_layer]
+var _glass_hazards: Array[Vector3] = []
+var _beam_hazards: Array = []        ## [centre (flat), axis (flat unit)] under cracked pillars' beams
+## Closest gap (world s) between first active frames of different enemies
+## since the last reset (soak tests; INF before two).
+var min_active_gap := INF
+var _last_active_t := -INF
+var _last_active_by: Node3D = null
 
 func _ready() -> void:
 	GameEvents.hit_landed.connect(_on_hit_landed)
@@ -80,7 +143,14 @@ func _ready() -> void:
 	GameEvents.grab_started.connect(_on_grab_started)
 	GameEvents.fighter_died.connect(_on_fighter_died)
 	GameEvents.attack_tell.connect(_on_attack_tell)
+	GameEvents.attack_active.connect(_on_attack_active)
 	GameEvents.wall_broken.connect(_on_wall_broken)
+	GameEvents.wall_broken_by.connect(_on_wall_broken_by)
+	GameEvents.wave_started.connect(_on_wave_started)
+	GameEvents.fleeing_changed.connect(_on_fleeing_changed)
+	GameEvents.carry_changed.connect(_on_carry_changed)
+	GameEvents.furniture_broken.connect(_on_furniture_broken)
+	GameEvents.structure_collapsed.connect(_on_structure_collapsed)
 	GameEvents.dazed.connect(func(f: Node3D, _d: float) -> void: _drop(f))
 	GameEvents.stumbled.connect(func(f: Node3D, _d: float) -> void: _drop(f))
 	GameEvents.tripped.connect(func(f: Node3D) -> void: _drop(f))
@@ -115,6 +185,7 @@ func unregister_enemy(enemy: Fighter) -> void:
 	_last_turn.erase(enemy)
 	_last_denial.erase(enemy)
 	_last_request.erase(enemy)
+	_down_swings.erase(enemy)
 	_line.erase(enemy)
 	if is_instance_valid(enemy):
 		if enemy.combat and enemy.combat.attack_ended.is_connected(_on_enemy_attack_ended):
@@ -134,7 +205,7 @@ func request_token(enemy: Fighter, urgent := false, cut_line := false) -> bool:
 	if _holders.has(enemy):
 		if _holders[enemy]["attacking"]:
 			return true
-		if _enemy_can_attack(enemy) and not is_player_down_or_held():
+		if _enemy_can_attack(enemy) and (not is_player_down_or_held() or _may_swing_at_downed(enemy)):
 			return true
 		release_token(enemy, _enemy_can_attack(enemy))
 		return false
@@ -146,7 +217,9 @@ func request_token(enemy: Fighter, urgent := false, cut_line := false) -> bool:
 	_last_denial[enemy] = reason
 	if reason != "":
 		return false
-	_holders[enemy] = {"granted": t_now, "active_at": INF, "attacking": false, "started": INF}
+	var none: Array[float] = []
+	_holders[enemy] = {"granted": t_now, "active_at": INF, "attacking": false, "started": INF,
+		"reserved": none, "followup": false}
 	_last_grant = t_now
 	var pace: float = CROWD_PACE[clampi(Tuning.difficulty, 0, CROWD_PACE.size() - 1)]
 	_next_paced_grant = t_now + _rng.randf_range(Tuning.ATTACK_INTERVAL.x, Tuning.ATTACK_INTERVAL.y) * pace
@@ -157,13 +230,13 @@ func request_token(enemy: Fighter, urgent := false, cut_line := false) -> bool:
 ## Why request_token() would refuse `enemy` now ("" = it would grant).
 func _denial(enemy: Fighter, urgent: bool, t_now: float, cut_line := false) -> String:
 	if not _enemy_can_attack(enemy):
-		return "enemy busy"
+		return "fleeing" if _is_fleeing(enemy) else "enemy busy"
 	var p := get_player()
 	if p == null or p.is_dead():
 		return "no player"
 	if p.is_down():
 		return "player down"
-	if p.combat and p.combat.held_by != null:
+	if _player_held(p):
 		return "player held"
 	if p.is_in_hitstun():
 		return "player hitstun"
@@ -185,7 +258,7 @@ func _denial(enemy: Fighter, urgent: bool, t_now: float, cut_line := false) -> S
 
 ## Turn order among enemies that are actually asking: another enemy that
 ## waited longer (older last turn) and asked within LINE_ASK_WINDOW goes
-## first, so a slow enemy (Shield, Brute) is not starved by quick ones.
+## first, so a slow enemy (Heavy) is not starved by quick ones.
 func _waiting_ahead_of(enemy: Fighter, t_now: float) -> Fighter:
 	var mine: float = _last_turn.get(enemy, 0.0)
 	for e in _enemies:
@@ -235,6 +308,34 @@ func get_token_holders() -> Array[Fighter]:
 			out.append(e)
 	return out
 
+# --- Round 5: waves and enemy startup ------------------------------------------
+
+## GameMode (J) calls this at each wave start with the 1-based wave number.
+## GameEvents.wave_started (0-based index) sets it too, so it stays right
+## whichever lands first.
+func set_wave(index: int) -> void:
+	wave_index = maxi(index, 0)
+
+## Enemy startup frames for `move_id` this wave: Tuning.ENEMY_STARTUP; early in
+## a run never under Tuning.ENEMY_STARTUP_EARLY_MIN; from wave
+## Tuning.ENEMY_STARTUP_SHRINK_FROM, Tuning.ENEMY_STARTUP_SHRINK frames faster
+## per wave, never under Tuning.ENEMY_STARTUP_MIN. Moves the table does not
+## list (legacy archetypes) keep their old tells (LEGACY_STARTUP).
+func enemy_startup_frames(move_id: StringName) -> float:
+	var f: float = Tuning.ENEMY_STARTUP.get(move_id, LEGACY_STARTUP.get(move_id, Tuning.ENEMY_STARTUP_EARLY_MIN))
+	if wave_index >= Tuning.ENEMY_STARTUP_SHRINK_FROM:
+		f -= Tuning.ENEMY_STARTUP_SHRINK * float(wave_index - Tuning.ENEMY_STARTUP_SHRINK_FROM + 1)
+		return maxf(f, Tuning.ENEMY_STARTUP_MIN)
+	return maxf(f, Tuning.ENEMY_STARTUP_EARLY_MIN)
+
+## The same in seconds of the enemy's own time.
+func enemy_startup_s(move_id: StringName) -> float:
+	return Tuning.frames(enemy_startup_frames(move_id))
+
+## Minimum world seconds kept between two holders' first active frames.
+func active_gap() -> float:
+	return Tuning.TOKEN_ACTIVE_GAP + ACTIVE_GAP_MARGIN
+
 ## Clear all state (round restart).
 func reset() -> void:
 	camera_busy = false
@@ -247,16 +348,25 @@ func reset() -> void:
 	_onscreen_since.clear()
 	_last_turn.clear()
 	_line.clear()
+	_recent_actives.clear()
+	_down_swings.clear()
 	nav = null
 	_nav_refresh.clear()
+	_dyn_tracked.clear()
+	_glass_hazards.clear()
+	_beam_hazards.clear()
 	_last_grant = -INF
 	_next_paced_grant = -INF
 	_player = null
+	wave_index = 0
+	min_active_gap = INF
+	_last_active_t = -INF
+	_last_active_by = null
 
 # --- Additions (AI module) ---------------------------------------------------
 
 func get_token_count() -> int:
-	return Tuning.TOKENS[clampi(Tuning.difficulty, 0, Tuning.TOKENS.size() - 1)]
+	return mini(Tuning.TOKENS[clampi(Tuning.difficulty, 0, Tuning.TOKENS.size() - 1)], Tuning.TOKEN_MAX)
 
 func get_player() -> Fighter:
 	if _player != null and is_instance_valid(_player) and _player.is_inside_tree():
@@ -283,6 +393,12 @@ func get_next_in_line() -> Fighter:
 		_update_line()
 	return _line[0] if not _line.is_empty() else null
 
+## A small integer per brain (registration order), so periodic work (path
+## re-plans, route searches) is spread over different ticks.
+func claim_slot() -> int:
+	_next_slot += 1
+	return _next_slot
+
 ## Rule 3: the player can be attacked (not in hitstun, not down, not held,
 ## camera not following a launch).
 func is_player_open() -> bool:
@@ -291,18 +407,38 @@ func is_player_open() -> bool:
 		return false
 	if p.is_in_hitstun() or p.is_down():
 		return false
-	if p.combat and p.combat.held_by != null:
+	if _player_held(p):
 		return false
 	return not is_camera_busy()
 
 ## The long rule-3 states: down (launched / grounded / getting up), held, or dead.
-## A holder that has not started its attack loses its token in these; during
-## the short ones (hitstun, follow-cam) it keeps it but may not swing.
+## A holder that has not started its attack loses its token while the player
+## is held; while he is down it keeps it for its free swing (DOWNED_FREE_SWINGS).
 func is_player_down_or_held() -> bool:
 	var p := get_player()
 	if p == null or p.is_dead() or p.is_down():
 		return true
-	return p.combat != null and p.combat.held_by != null
+	return _player_held(p)
+
+## The player is on the ground after a knockdown (not held, not dead).
+func is_player_knocked_down() -> bool:
+	var p := get_player()
+	return p != null and not p.is_dead() and p.is_down() and not _player_held(p)
+
+func _player_held(p: Fighter) -> bool:
+	return p.carry != null and p.carry.is_held()
+
+## Free swings `enemy` has left at the knocked-down player.
+func free_swings_left(enemy: Fighter) -> int:
+	return maxi(Tuning.DOWNED_FREE_SWINGS - int(_down_swings.get(enemy, 0)), 0)
+
+## A holder may swing at the knocked-down player: a free swing left, the
+## player not in his get-up invulnerability.
+func _may_swing_at_downed(enemy: Fighter) -> bool:
+	if not is_player_knocked_down() or free_swings_left(enemy) <= 0:
+		return false
+	var p := get_player()
+	return not p.is_invulnerable() and not is_camera_busy()
 
 func is_camera_busy() -> bool:
 	if camera_busy:
@@ -326,37 +462,39 @@ func onscreen_time(enemy: Fighter) -> float:
 	var since: float = _onscreen_since.get(enemy, -1.0)
 	return _now() - since if since >= 0.0 else 0.0
 
-## Rule 6. The holder is in range and wants to swing with a tell of
-## `preferred_tell` s (plus `extra_startup` s of startup after the tell).
-## Returns the tell to pass to start_enemy_attack(), inside
-## [TELL_MIN, TELL_MAX] and as close to `preferred_tell` as spacing allows,
-## or -1.0 if it must wait (no token, player not open, or no spaced slot).
-## A non-negative return reserves that active time until the attack starts
-## or the token is released.
-func request_swing(enemy: Fighter, preferred_tell: float, extra_startup := 0.0) -> float:
-	if not _holders.has(enemy) or not is_player_open():
+## Rule 6. The holder is in range and wants to start a move whose startup is
+## `startup` s (its own time; AIBrain passes enemy_startup_s()). `followups`
+## are the expected first active frames of a string's later hits, in s after
+## this one's. Returns `startup` if every one of those active frames is at
+## least active_gap() from every other holder's (and from any active frame in
+## the last active_gap()), else -1.0: the enemy waits a beat and asks again.
+## Also -1.0 with no token or while the player is not open (a holder may still
+## take its free swing at a knocked-down player). A non-negative return
+## reserves those active frames until the attack starts or the token goes.
+## The startup is never stretched: each move keeps its learnable timing.
+func request_swing(enemy: Fighter, startup: float, followups: Array = []) -> float:
+	if not _holders.has(enemy):
+		return -1.0
+	if not is_player_open() and not _may_swing_at_downed(enemy):
 		return -1.0
 	var t_now := world_now()
-	var pref := clampf(preferred_tell, Tuning.TELL_MIN, Tuning.TELL_MAX)
-	var candidates: Array[float] = [pref]
-	var step := TELL_SEARCH_STEP
-	var up := pref + step
-	while up <= Tuning.TELL_MAX + 0.0001:
-		candidates.append(minf(up, Tuning.TELL_MAX))
-		up += step
-	var down := pref - step
-	while down >= Tuning.TELL_MIN - 0.0001:
-		candidates.append(maxf(down, Tuning.TELL_MIN))
-		down -= step
-	for tell in candidates:
-		var active_at := t_now + tell + extra_startup
-		if _swing_is_spaced(enemy, active_at):
-			_holders[enemy]["active_at"] = active_at
-			return tell
-	return -1.0
+	var first := t_now + maxf(startup, 0.0)
+	var times: Array[float] = [first]
+	for off: float in followups:
+		times.append(first + off)
+	if not _swing_is_spaced(enemy, times, FOLLOWUP_SLACK if followups.size() > 0 else 0.0):
+		return -1.0
+	var entry: Dictionary = _holders[enemy]
+	entry["active_at"] = first
+	var rest: Array[float] = []
+	for i in range(1, times.size()):
+		rest.append(times[i])
+	entry["reserved"] = rest
+	return startup
 
 ## The brain started its attack; `time_to_active` is the real seconds until
-## the first active frame (combat.time_to_active()).
+## the first active frame (combat.time_to_active()). `followup` marks a
+## string's later hit (it keeps the token past the previous hit's end).
 func notify_attack_started(enemy: Fighter, time_to_active: float) -> void:
 	if not _holders.has(enemy):
 		return
@@ -364,17 +502,32 @@ func notify_attack_started(enemy: Fighter, time_to_active: float) -> void:
 	var t_now := world_now()
 	entry["attacking"] = true
 	entry["started"] = t_now
+	entry["followup"] = false
 	if is_finite(time_to_active):
 		entry["active_at"] = t_now + time_to_active * Engine.time_scale
+	if is_player_knocked_down():
+		_down_swings[enemy] = int(_down_swings.get(enemy, 0)) + 1
 
 ## The brain could not start the attack it reserved a slot for.
 func cancel_swing(enemy: Fighter) -> void:
 	if _holders.has(enemy) and not _holders[enemy]["attacking"]:
+		var none: Array[float] = []
 		_holders[enemy]["active_at"] = INF
+		_holders[enemy]["reserved"] = none
+
+## The holder's string continues: keep the token when its current attack ends
+## (AIBrain calls this before the follow-up; attack_ended would release it).
+func hold_for_followup(enemy: Fighter) -> void:
+	if _holders.has(enemy):
+		_holders[enemy]["followup"] = true
 
 ## Scheduled first-active time of a holder's attack (INF if none).
 func get_scheduled_active(enemy: Fighter) -> float:
 	return _holders[enemy]["active_at"] if _holders.has(enemy) else INF
+
+## Scheduled first-active times of a holder's string hits after the first.
+func get_reserved_actives(enemy: Fighter) -> Array:
+	return (_holders[enemy]["reserved"] as Array).duplicate() if _holders.has(enemy) else []
 
 # --- Internals ---------------------------------------------------------------
 
@@ -400,16 +553,21 @@ func _camera() -> Camera3D:
 func _enemy_can_attack(enemy: Fighter) -> bool:
 	if enemy.is_dead() or enemy.is_down() or enemy.is_in_hitstun():
 		return false
+	if _is_fleeing(enemy):
+		return false
 	return not is_enemy_impaired(enemy)
+
+func _is_fleeing(enemy: Fighter) -> bool:
+	return enemy.has_method(&"is_fleeing") and enemy.is_fleeing()
 
 ## Upgrade 2 states that keep an enemy out of the rotation: held by a grab,
 ## dazed, stumbling (tripped enemies are down).
 func is_enemy_impaired(enemy: Fighter) -> bool:
+	if enemy.carry != null and enemy.carry.is_held():
+		return true
 	var c := enemy.combat
 	if c == null:
 		return false
-	if c.held_by != null:
-		return true
 	if c.has_method(&"is_dazed") and c.is_dazed():
 		return true
 	return c.has_method(&"is_stumbling") and c.is_stumbling()
@@ -420,13 +578,32 @@ func _onscreen_long_enough(enemy: Fighter, t_now: float) -> bool:
 	var since: float = _onscreen_since.get(enemy, -1.0)
 	return since >= 0.0 and t_now - since >= Tuning.ONSCREEN_BEFORE_TOKEN
 
-func _swing_is_spaced(enemy: Fighter, active_at: float) -> bool:
+## Every time in `times` is at least active_gap() from every other holder's
+## reserved active frames and from any first active frame that happened in
+## the last active_gap(). Estimated times (a string's later hits, ours with
+## `slack`, theirs always) are kept FOLLOWUP_SLACK further.
+func _swing_is_spaced(enemy: Fighter, times: Array[float], slack := 0.0) -> bool:
+	var gap := active_gap()
 	for other in _holders:
 		if other == enemy:
 			continue
-		var t: float = _holders[other]["active_at"]
-		if is_finite(t) and absf(t - active_at) < Tuning.SWING_SPACING:
-			return false
+		var entry: Dictionary = _holders[other]
+		var theirs: Array[Vector2] = []  # (time, extra gap)
+		if is_finite(float(entry["active_at"])):
+			theirs.append(Vector2(float(entry["active_at"]), 0.0))
+		for r: float in entry["reserved"]:
+			theirs.append(Vector2(r, FOLLOWUP_SLACK))
+		for i in times.size():
+			var g := gap + (slack if i > 0 else 0.0)
+			for t: Vector2 in theirs:
+				if absf(t.x - times[i]) < g + t.y:
+					return false
+	for rec: Array in _recent_actives:
+		if rec[1] == enemy:
+			continue
+		for t: float in times:
+			if absf(float(rec[0]) - t) < gap:
+				return false
 	return true
 
 func _process(_delta: float) -> void:
@@ -446,8 +623,12 @@ func _process(_delta: float) -> void:
 func _physics_process(delta: float) -> void:
 	_world_time += delta
 	_nav_tick()
+	_route_budget = ROUTE_SEARCHES_PER_TICK
 	var t_now := world_now()
+	var knocked_down := is_player_knocked_down()
 	var player_gone := is_player_down_or_held()
+	if not knocked_down:
+		_down_swings.clear()
 	for e in _holders.keys():
 		if not is_instance_valid(e):
 			_holders.erase(e)
@@ -456,27 +637,38 @@ func _physics_process(delta: float) -> void:
 		var attacking: bool = entry["attacking"]
 		if not _enemy_can_attack(e):
 			release_token(e)
-		elif not attacking and player_gone:
+		elif not attacking and player_gone and not (knocked_down and free_swings_left(e) > 0):
 			# Rule 3: an approaching holder does not keep its token while the
-			# player is down or held; it asks again later, keeping its place.
+			# player is held (or down with its free swing used); it asks again
+			# later, keeping its place.
 			release_token(e, true)
 		elif not attacking and t_now - float(entry["granted"]) > HOLD_TIMEOUT:
 			release_token(e)
 		elif attacking and e.combat and not e.combat.is_attacking() \
-				and t_now - float(entry["started"]) > ATTACK_LOST_GRACE:
+				and t_now - float(entry["started"]) > ATTACK_LOST_GRACE and not entry["followup"]:
 			release_token(e)
+		elif attacking and e.combat and e.combat.is_attacking():
+			# Keep the reservation true to the real active frame (a hitstop on
+			# a heavy that winds up through a flinch pushes it back).
+			var tta: float = e.combat.time_to_active()
+			if is_finite(tta) and tta > 0.0:
+				entry["active_at"] = t_now + tta * Engine.time_scale
 	for e in _enemies.duplicate():
 		if not is_instance_valid(e):
 			_enemies.erase(e)
 			_onscreen_since.erase(e)
 			_last_turn.erase(e)
+	var keep: Array = []
+	for rec: Array in _recent_actives:
+		if t_now - float(rec[0]) < active_gap() + 0.05:
+			keep.append(rec)
+	_recent_actives = keep
 	_update_line()
 
 ## Pick the next in line: one enemy per free token plus one standby (just one
-## when every token is out), the
-## eligible ones that waited longest (ties: nearest), preferring enemies inside
-## the camera view. Members keep their place while eligible, unless off screen
-## while someone else is on screen.
+## when every token is out), the eligible ones that waited longest (ties:
+## nearest), preferring enemies inside the camera view. Members keep their
+## place while eligible, unless off screen while someone else is on screen.
 func _update_line() -> void:
 	var cam := _camera()
 	# One per free token plus one on standby, so a ready enemy is waiting
@@ -527,7 +719,7 @@ func _line_far(e: Fighter) -> float:
 func _line_eligible(e: Fighter) -> bool:
 	if not is_instance_valid(e) or not e in _enemies or _holders.has(e):
 		return false
-	if e.is_dead() or e.is_down():
+	if e.is_dead() or e.is_down() or _is_fleeing(e):
 		return false
 	var b := e.brain as AIBrain
 	return b == null or b.is_fighting()
@@ -540,14 +732,21 @@ func nav_ready() -> bool:
 
 ## A path from `from` to `to` (world points), or empty when the grid is not
 ## ready or this tick's query budget is spent (ask again next tick).
-func nav_path(from: Vector3, to: Vector3) -> PackedVector3Array:
+func nav_path(from: Vector3, to: Vector3, wide := false) -> PackedVector3Array:
 	if not nav_ready() or _nav_budget <= 0:
 		return PackedVector3Array()
 	_nav_budget -= 1
-	return nav.find_path(from, to)
+	return nav.find_path(from, to, wide)
 
 func nav_has_budget() -> bool:
 	return _nav_budget > 0
+
+## One waypoint search (AIBrain._find_waypoint) this tick; false = try next tick.
+func take_route_budget() -> bool:
+	if _route_budget <= 0:
+		return false
+	_route_budget -= 1
+	return true
 
 ## Throw the grid away and build it again (tests that move walls around).
 func rebuild_nav() -> void:
@@ -564,6 +763,11 @@ func _nav_tick() -> void:
 	if not nav.ready:
 		nav.step_build()
 		return
+	nav.sweep_step(NAV_SWEEP_CELLS)
+	nav.expire_penalties()
+	if _now() >= _dyn_poll_at:
+		_dyn_poll_at = _now() + DYNAMIC_POLL
+		_poll_dynamic()
 	if _nav_refresh.is_empty():
 		return
 	var t_now := _now()
@@ -575,17 +779,129 @@ func _nav_tick() -> void:
 			keep.append(r)
 	_nav_refresh = keep
 
+## Re-test the grid round `position` shortly (a wall, crate or prop changed).
+func queue_nav_refresh(position: Vector3, radius: float) -> void:
+	_nav_refresh.append([_now() + NAV_REFRESH_DELAY, position, radius])
+
 func _on_wall_broken(wall: Node3D, position: Vector3, _energy: float, _velocity: Vector3) -> void:
 	var radius := 2.0
 	if wall is Destructible:
 		var sz: Vector3 = (wall as Destructible).size
 		radius = clampf(maxf(sz.x, sz.z) * 0.5 + 0.8, 1.5, 3.0)
-	var due := _now() + NAV_REFRESH_DELAY
-	_nav_refresh.append([due, position, radius])
-	if wall and wall.global_position.distance_to(position) > 1.0:
-		_nav_refresh.append([due, wall.global_position, radius])
+	queue_nav_refresh(position, radius)
+	if wall and is_instance_valid(wall) and wall.is_inside_tree() and wall.global_position.distance_to(position) > 1.0:
+		queue_nav_refresh(wall.global_position, radius)
+
+## Clutter broke: its collision is gone at once. Glass leaves shards: a hazard.
+func _on_furniture_broken(node: Node3D, position: Vector3, kind: StringName, _energy: float, _by: Node3D) -> void:
+	queue_nav_refresh(position, BREAK_RADIUS)
+	if node != null and is_instance_valid(node) and node.is_inside_tree() \
+			and node.global_position.distance_to(position) > 0.5:
+		queue_nav_refresh(node.global_position, BREAK_RADIUS)
+	if kind == &"glass":
+		_glass_hazards.append(Vector3(position.x, 0.0, position.z))
+		if _glass_hazards.size() > HAZARD_MAX:
+			_glass_hazards.remove_at(0)
+
+## Structure came down (panel cells, a pillar's beam, a lintel): re-test now
+## and again once the pieces have landed wherever physics put them.
+func _on_structure_collapsed(node: Node3D, position: Vector3, _kind: StringName) -> void:
+	var ground := Vector3(position.x, 0.0, position.z)
+	queue_nav_refresh(ground, COLLAPSE_RADIUS)
+	_nav_refresh.append([_now() + COLLAPSE_AGAIN, ground, COLLAPSE_RADIUS])
+	if node != null and is_instance_valid(node) and node.is_inside_tree():
+		var at := node.global_position
+		if Vector2(at.x - ground.x, at.z - ground.z).length() > 1.0:
+			queue_nav_refresh(Vector3(at.x, 0.0, at.z), COLLAPSE_RADIUS)
+
+## Breakables that change without an event: a static clutter object whose
+## collision went (knocked loose, broken) and rigid props on
+## Layers.DESTRUCTIBLE (capsules collide with them) that moved. Also keeps
+## the cracked-pillar beam hazards current.
+func _poll_dynamic() -> void:
+	var seen := {}
+	for n in get_tree().get_nodes_in_group(&"breakables"):
+		var co := n as CollisionObject3D
+		if co == null or not co.is_inside_tree():
+			continue
+		var dynamic := co is RigidBody3D
+		if not dynamic and not co.is_in_group(&"clutter"):
+			continue
+		seen[co] = true
+		var pos := co.global_position
+		var layer := co.collision_layer
+		if not _dyn_tracked.has(co):
+			_dyn_tracked[co] = [pos, layer]
+			continue
+		var rec: Array = _dyn_tracked[co]
+		var was_blocking: bool = (int(rec[1]) & Layers.DESTRUCTIBLE) != 0
+		var blocking := (layer & Layers.DESTRUCTIBLE) != 0
+		var moved: bool = (pos - (rec[0] as Vector3)).length() > DYNAMIC_MOVE
+		if was_blocking != blocking or ((blocking or was_blocking) and moved):
+			queue_nav_refresh(rec[0], DYNAMIC_RADIUS)
+			if moved:
+				queue_nav_refresh(pos, DYNAMIC_RADIUS)
+			_dyn_tracked[co] = [pos, layer]
+	for co in _dyn_tracked.keys():
+		if not seen.has(co):
+			var rec: Array = _dyn_tracked[co]
+			if (int(rec[1]) & Layers.DESTRUCTIBLE) != 0:
+				queue_nav_refresh(rec[0], DYNAMIC_RADIUS)  # freed: its cells are open now
+			_dyn_tracked.erase(co)
+	_beam_hazards.clear()
+	for n in get_tree().get_nodes_in_group(&"pillars"):
+		if not is_instance_valid(n) or not bool(n.get(&"is_cracked")) or bool(n.get(&"is_broken")):
+			continue
+		var head := n.get(&"head") as Node3D
+		if head == null or not is_instance_valid(head) or not head.is_inside_tree():
+			continue
+		var axis := head.global_basis.z
+		axis.y = 0.0
+		axis = axis.normalized() if axis.length() > 0.01 else Vector3.FORWARD
+		var c := head.global_position
+		_beam_hazards.append([Vector3(c.x, 0.0, c.z), axis])
+
+## True where a waiting enemy should not stand: on broken glass, or under a
+## cracked pillar's beam.
+func is_hazard(p: Vector3) -> bool:
+	var f := Vector3(p.x, 0.0, p.z)
+	for g in _glass_hazards:
+		if f.distance_to(g) < GLASS_HAZARD_RADIUS:
+			return true
+	for h: Array in _beam_hazards:
+		var c: Vector3 = h[0]
+		var axis: Vector3 = h[1]
+		var along := clampf((f - c).dot(axis), -BEAM_HALF_LENGTH, BEAM_HALF_LENGTH)
+		if f.distance_to(c + axis * along) < BEAM_HAZARD_MARGIN:
+			return true
+	return false
+
+## A ring spot `goal` round `center` that is not a hazard: the spot itself, or
+## the nearest one rotated round the centre in HAZARD_TURN steps (up to 100
+## degrees each way); `goal` when every candidate is a hazard.
+func avoid_hazards(goal: Vector3, center: Vector3) -> Vector3:
+	if (_glass_hazards.is_empty() and _beam_hazards.is_empty()) or not is_hazard(goal):
+		return goal
+	var off := Vector3(goal.x - center.x, 0.0, goal.z - center.z)
+	for k in range(1, 6):
+		for sgn: float in [1.0, -1.0]:
+			var c := center + off.rotated(Vector3.UP, deg_to_rad(HAZARD_TURN * k) * sgn)
+			c.y = goal.y
+			if not is_hazard(c):
+				return c
+	return goal
+
+func get_hazard_counts() -> Vector2i:
+	return Vector2i(_glass_hazards.size(), _beam_hazards.size())
+
+func _on_wall_broken_by(_flyer: Node3D, wall: Node3D, _energy: float) -> void:
+	if wall and is_instance_valid(wall) and wall.is_inside_tree():
+		queue_nav_refresh(wall.global_position, 2.5)
 
 # --- Events ------------------------------------------------------------------
+
+func _on_wave_started(index: int, _total: int) -> void:
+	set_wave(index + 1)
 
 func _on_enemy_attack_started(_move_id: StringName, enemy: Fighter) -> void:
 	if _holders.has(enemy):
@@ -599,18 +915,46 @@ func _on_enemy_attack_incoming(_move_id: StringName, time_to_active: float, enem
 		_holders[enemy]["active_at"] = world_now() + time_to_active * Engine.time_scale
 
 func _on_enemy_attack_ended(_move_id: StringName, enemy: Fighter) -> void:
+	if _holders.has(enemy) and _holders[enemy]["followup"]:
+		# The string goes on: the next hit's reservation becomes the current one.
+		var entry: Dictionary = _holders[enemy]
+		entry["attacking"] = false
+		entry["followup"] = false  # used up: the brain asks again before a further hit
+		entry["granted"] = world_now()
+		entry["started"] = INF
+		var rest: Array = entry["reserved"]
+		entry["active_at"] = rest.pop_front() if not rest.is_empty() else INF
+		return
 	if _last_turn.has(enemy):
 		_last_turn[enemy] = world_now()
 	release_token(enemy)
+
+## A first active frame: logged for spacing across releases and for the
+## minimum-gap statistic (soak tests).
+func _on_attack_active(attacker: Node3D, _move_id: StringName) -> void:
+	if not attacker is Fighter or not attacker in _enemies:
+		return
+	var t := world_now()
+	if _last_active_by != null and _last_active_by != attacker and is_instance_valid(_last_active_by):
+		min_active_gap = minf(min_active_gap, t - _last_active_t)
+	_last_active_t = t
+	_last_active_by = attacker
+	_recent_actives.append([t, attacker])
 
 ## Dazed, stumbling or tripped: give the token back at once.
 func _drop(f: Node3D) -> void:
 	if f is Fighter:
 		release_token(f as Fighter)
 
+## A hit takes the token back, unless the holder is still mid-attack (a
+## heavy's wind-up ignores flinches): it keeps its swing and its slot.
 func _on_hit_landed(info: HitInfo) -> void:
-	if info and info.victim is Fighter:
-		release_token(info.victim as Fighter)
+	if info == null or not info.victim is Fighter:
+		return
+	var v := info.victim as Fighter
+	if _holders.has(v) and v.combat != null and v.combat.is_attacking() and not v.is_down():
+		return
+	release_token(v)
 
 func _on_fighter_launched(f: Node3D, _velocity: Vector3) -> void:
 	if f is Fighter:
@@ -619,6 +963,14 @@ func _on_fighter_launched(f: Node3D, _velocity: Vector3) -> void:
 func _on_grab_started(_grabber: Node3D, victim: Node3D) -> void:
 	if victim is Fighter:
 		release_token(victim as Fighter)
+
+func _on_carry_changed(_holder: Node3D, held: Node3D) -> void:
+	if held is Fighter and _holders.has(held):
+		release_token(held as Fighter)
+
+func _on_fleeing_changed(f: Node3D, fleeing: bool) -> void:
+	if fleeing and f is Fighter:
+		release_token(f as Fighter)
 
 func _on_fighter_died(f: Node3D, _info: HitInfo) -> void:
 	if f is Fighter and f in _enemies:

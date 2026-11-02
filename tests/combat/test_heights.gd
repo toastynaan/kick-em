@@ -1,8 +1,10 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Upgrade 2 heights (U3): highs pass over a crouch, lows under a jump, a
-## crouching guard stops lows and not mids, standing grabs whiff on a croucher,
-## a jumping fighter takes an air counter; crouch / jump / rising / back moves;
-## the player's guard covers only the front. Stances are faked (FakeFighter).
+## Heights (Upgrade 2, kept in Round 5): highs pass over a crouch, lows under
+## a jump, a crouching guard stops lows and not mids, standing grabs whiff on a
+## croucher; a jumping player hit by an enemy is not launched (Round 5: enemies
+## never launch the player; the Upgrade 2 air counter is gone); crouch / air /
+## rising / back moves (any attack in the air is a dropping strike); the
+## player's guard covers only the front. Stances are faked (FakeFighter).
 
 const L := CombatController.Action.LIGHT
 const K := CombatController.Action.KICK
@@ -88,7 +90,7 @@ func run() -> void:
 	await wait_real(0.8)
 	check(count_events(&"grab_started") == 0, "e_grab whiffed on the crouching player")
 
-	print("air counter")
+	print("no air counter: a jumping player takes the hook's own tier")
 	pe = await _lane(true, false, 1.2)
 	p = pe[0]
 	e = pe[1]
@@ -97,11 +99,8 @@ func run() -> void:
 	e.combat.start_enemy_attack(&"e_hook", 0.35)
 	await wait_until(func() -> bool: return count_events(&"hit_landed") > 0, 2.0)
 	var info: HitInfo = last_event(&"hit_landed")[1] if count_events(&"hit_landed") > 0 else null
-	check(info != null and info.air_counter and info.reaction == HitInfo.Reaction.LAUNCH,
-		"a jumping player hit by a hook takes an air counter launch")
-	if info:
-		var want := 5.0 * Tuning.AIR_COUNTER_LAUNCH
-		check(info.launch_velocity.length() >= want - 0.3, "x AIR_COUNTER_LAUNCH (%.2f m/s)" % info.launch_velocity.length())
+	check(info != null and not info.air_counter and info.tier == HitInfo.Tier.FLINCH \
+		and info.launch_velocity == Vector3.ZERO, "a jumping player hit by a hook flinches, no launch")
 	await wait_real(2.0)
 
 	print("stance moves")
@@ -110,7 +109,7 @@ func run() -> void:
 	await ticks(10)
 	var cases := [
 		["crouch + P", "crouch", L, &"crouch_punch"], ["crouch + K", "crouch", K, &"leg_sweep"],
-		["jump + K", "air", K, &"flying_kick"], ["jump + P", "air", L, &"hammer_fist"],
+		["jump + K", "air", K, &"drop_strike"], ["jump + P", "air", L, &"drop_strike"],
 		["back + P", "back", L, &"backfist"], ["SWEEP action", "", CombatController.Action.SWEEP, &"leg_sweep"]]
 	for c: Array in cases:
 		f.fake_crouch = c[1] == "crouch"

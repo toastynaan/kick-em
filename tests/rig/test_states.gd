@@ -1,9 +1,11 @@
 extends Node3D
 ## State machine coverage: flinch returns to ANIMATED after FLINCH_TIME;
-## weak stagger recovers; strong stagger tips into LAUNCHED; freeze zeroes
-## and restores bone velocities; air recovery; kill -> settled (corpse
-## frozen, cheap); sever returns a registered RigidBody3D and hides the
-## parts; set_ignore_breakables toggles the DESTRUCTIBLE bit.
+## a stagger recovers on its feet after Tuning.REACT_STAGGER.fade and even a
+## strong one never tips into a launch (Round 5: "a stagger keeps the legs
+## animated and never turns into a launch by itself"); freeze zeroes and
+## restores bone velocities; air recovery; kill -> settled (corpse frozen on
+## Layers.DEAD_BODY, cheap); sever returns a RigidBody3D and hides the parts;
+## set_ignore_breakables toggles the DESTRUCTIBLE bit.
 
 var _ok := true
 
@@ -36,22 +38,22 @@ func _ready() -> void:
 	_check("flinch moves head then recovers", rc.state == RagdollController.State.ANIMATED and moved > 0.005, "head moved %.3f m" % moved)
 	_check("capsule stays on in flinch", not (d.get_node("Capsule") as CollisionShape3D).disabled)
 
-	# Weak stagger
+	# Stagger
 	var p0 := d.global_position
 	rc.stagger(Vector3(0, 0, 1), 0.5)
 	_check("stagger enters STAGGER", rc.state == RagdollController.State.STAGGER)
-	await _frames(int((0.3 + 0.45 * 0.5) * 120.0) + 6)
-	_check("weak stagger recovers", rc.state == RagdollController.State.ANIMATED, "pushed %.2f m" % d.global_position.distance_to(p0))
+	await _frames(int(float(Tuning.REACT_STAGGER["fade"]) * 120.0) + 6)
+	_check("stagger recovers on its feet", rc.state == RagdollController.State.ANIMATED, "pushed %.2f m" % d.global_position.distance_to(p0))
 
-	# Strong stagger tips over
+	# A strong stagger never tips into a launch (Round 5).
 	var tipped := false
 	rc.stagger(Vector3(0, 0, 1), 1.2)
 	for i in 300:
 		await get_tree().physics_frame
-		if rc.state == RagdollController.State.LAUNCHED:
+		if rc.state == RagdollController.State.LAUNCHED or rc.is_full_ragdoll():
 			tipped = true
 			break
-	_check("strong stagger tips into LAUNCHED", tipped)
+	_check("strong stagger never tips into a launch", not tipped and rc.state == RagdollController.State.ANIMATED)
 	rc.force_recover()
 	await _frames(4)
 	_check("force_recover -> ANIMATED", rc.state == RagdollController.State.ANIMATED and not d.rig.top_level)
@@ -114,8 +116,8 @@ func _ready() -> void:
 			break
 	_check("corpse settles and freezes", settled[0] and rc.state == RagdollController.State.DEAD)
 	var hips_pb := d.rig.get_physical_bone(Bones.HIPS)
-	_check("corpse bones static colliders", PhysicsServer3D.body_get_mode(hips_pb.get_rid()) == PhysicsServer3D.BODY_MODE_STATIC
-		and PhysicsServer3D.body_get_collision_layer(hips_pb.get_rid()) == Layers.RAGDOLL)
+	_check("corpse bones static DEAD_BODY colliders", PhysicsServer3D.body_get_mode(hips_pb.get_rid()) == PhysicsServer3D.BODY_MODE_STATIC
+		and PhysicsServer3D.body_get_collision_layer(hips_pb.get_rid()) == Layers.DEAD_BODY)
 	await _frames(30)
 	_check("corpse costs ~nothing", rc.last_tick_ms < 0.01, "%.4f ms" % rc.last_tick_ms)
 

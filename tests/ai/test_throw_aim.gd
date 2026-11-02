@@ -1,7 +1,8 @@
 extends Node
 ## Enemy throws aim at walls (round 2, item 4): find_throw_aim() prefers the
 ## breakable wall in front over a nearer plain wall, skips lanes with an
-## enemy, and a real Brute grab throws the player along that aim.
+## enemy, and a real Brute grab throws the player along that aim (Round 5:
+## the hold is G's Carry, which reads combat.throw_aim for the grab-throw).
 ## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
@@ -96,10 +97,11 @@ func _run() -> void:
 	var t0 := Util.game_now()
 	var aim_seen := Vector3.ZERO
 	while thrown_dir == Vector3.ZERO and Util.game_now() - t0 < 4.0:
-		if brute.combat.holding != null and brute.combat.throw_aim != Vector3.ZERO:
+		var holds := brute.carry != null and brute.carry.is_holding()
+		if holds and brute.combat.throw_aim != Vector3.ZERO:
 			aim_seen = brute.combat.throw_aim
 		await get_tree().physics_frame
-	if not started or brute.combat.holding == null and thrown_dir == Vector3.ZERO and aim_seen == Vector3.ZERO:
+	if not started or thrown_dir == Vector3.ZERO and aim_seen == Vector3.ZERO:
 		print("[ai] info: the grab did not connect (started %s); throw direction not checked" % started)
 	else:
 		check(aim_seen != Vector3.ZERO, "throw_aim set while holding (%s)" % str(aim_seen.snapped(Vector3.ONE * 0.01)))

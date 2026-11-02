@@ -1,7 +1,9 @@
 extends Node
-## Tell glint (rule 5): GameEvents.attack_tell spawns a billboard star above
-## the attacker: white for strikes, red for grabs, unshaded, no depth test,
-## render layer VIS_FX, pulsing, gone shortly after the tell.
+## Tell glint (rule 5; Feel Reference: Enemies have to be readable first):
+## GameEvents.attack_tell spawns a tell: ORANGE for strikes (and the Duelist's
+## counter, a strike), BLUE for grabs (cannot be parried); the star fallback is
+## unshaded, no depth test, render layer VIS_FX, pulsing, gone shortly after
+## the tell; a closing ring meets it as the parry / teleport window opens.
 ## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
@@ -46,7 +48,7 @@ func _run() -> void:
 		_finish()
 		return
 	var g := gl[0]
-	check(g.get_color().r > 0.9 and g.get_color().g < 0.3, "grab tell glints red")
+	check(g.get_color() == Tuning.TELL_COLOR_GRAB and g.get_color().b > 0.9 and g.get_color().r < 0.3, "grab tell glows blue (Tuning.TELL_COLOR_GRAB)")
 	check(g.layers == Layers.VIS_FX, "glint on render layer VIS_FX")
 	var mat := g.material_override as StandardMaterial3D
 	check(mat != null and mat.shading_mode == BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -62,11 +64,13 @@ func _run() -> void:
 	var hi: float = scales.max()
 	check(hi - lo > 0.2, "scale pulses during the tell (%.2f..%.2f)" % [lo, hi])
 
-	# A new tell replaces the glint; a strike is white.
+	# A new tell replaces the glint; a strike is orange.
 	GameEvents.attack_tell.emit(enemy, &"strike", 0.4)
 	await get_tree().process_frame
 	gl = _glints(enemy)
-	check(gl.size() == 1 and gl[0].get_color() == TellGlint.STRIKE_COLOR, "strike tell glints white, replaces the old one")
+	var col := gl[0].get_color() if gl.size() == 1 else Color.BLACK
+	check(gl.size() == 1 and col == Tuning.TELL_COLOR_STRIKE and col.r > 0.9 and col.g > 0.3 and col.g < 0.6 and col.b < 0.2,
+		"strike tell glows orange %s, replaces the old one" % str(col))
 
 	var t0 := Util.game_now()
 	while not _glints(enemy).is_empty() and Util.game_now() - t0 < 2.0:
@@ -75,19 +79,23 @@ func _run() -> void:
 	check(_glints(enemy).is_empty() and life < 0.4 + TellGlint.FLASH_TIME + 0.1,
 		"glint fades and frees after the tell (%.2f s)" % life)
 
-	# A teleport counter glints blue, with a strong closing ring.
+	# The Duelist's teleport counter is a strike (parry it): orange, with a
+	# strong closing ring.
 	GameEvents.attack_tell.emit(enemy, &"counter", 0.3)
 	await get_tree().process_frame
 	gl = _glints(enemy)
-	check(gl.size() == 1 and gl[0].get_color() == TellGlint.COUNTER_COLOR, "counter tell glints blue")
+	check(gl.size() == 1 and gl[0].get_color() == TellGlint.STRIKE_COLOR, "counter tell glows orange (a strike)")
+	check(gl.size() == 1 and gl[0].get_ring() != null and TellGlint.RING_ALPHA[&"counter"] > TellGlint.RING_ALPHA[&"strike"],
+		"counter: stronger closing ring")
 	await _wait_glints_gone(enemy)
 
-	# Closing ring: present on strikes and counters, absent on grabs; it meets
-	# the star exactly when the perfect-dodge window opens.
+	# Closing ring: on strikes, counters and grabs (a grab is answered with a
+	# teleport in the same window); it meets the glow exactly when the parry
+	# window opens.
 	GameEvents.attack_tell.emit(enemy, &"grab", 0.4)
 	await get_tree().process_frame
 	gl = _glints(enemy)
-	check(gl.size() == 1 and gl[0].get_ring() == null, "no closing ring on a grab")
+	check(gl.size() == 1 and gl[0].get_ring() != null, "a grab gets the teleport-timing ring too")
 	await _wait_glints_gone(enemy)
 	var tell := 0.5
 	GameEvents.attack_tell.emit(enemy, &"strike", tell)
@@ -98,8 +106,8 @@ func _run() -> void:
 	if ring_ok:
 		var g2 := gl[0]
 		var meet := g2.get_meet_time()
-		check(absf(meet - (tell - Tuning.PERFECT_DODGE_WINDOW)) < 0.001,
-			"ring meets the star at active - dodge window (%.3f s of %.2f)" % [meet, tell])
+		check(absf(meet - (tell - Tuning.PARRY_WINDOW)) < 0.001,
+			"ring meets the glow at active - parry window (%.3f s of %.2f)" % [meet, tell])
 		var early := g2.get_ring_scale()
 		var t0g := Util.game_now()
 		var at_meet := -1.0

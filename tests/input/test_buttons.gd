@@ -1,8 +1,10 @@
 extends "res://tests/input/input_test_base.gd"
-## Key map and InputInterpreter: a tap reaches combat, press/release pairs,
-## player-time stamps, presses made while Cmd is held are dropped (with their
-## release), crouch on the same tick as an attack press is already in effect,
-## and disabling the controller lets go of held buttons.
+## Key map and InputInterpreter (Round 5 controls): a tap reaches combat,
+## punch -> LIGHT, heavy -> HEAVY, kick -> KICK, grab -> GRAB, block -> BLOCK,
+## focus is a press (Focus mode), press/release pairs, player-time stamps,
+## presses made while Cmd is held are dropped (with their release), crouch on
+## the same tick as an attack press is already in effect, and disabling the
+## controller lets go of held buttons.
 
 var _starts: Array[StringName] = []
 var _crouched_at_start: Array[bool] = []
@@ -41,6 +43,27 @@ func run() -> void:
 	check(_starts.size() >= 1, "kick tap starts an attack (%s)" % [_starts])
 	await _settle(p)
 
+	# --- Heavy (RMB / L / Y) presses HEAVY. ------------------------------------
+	_starts.clear()
+	press(&"heavy")
+	await ticks(1)
+	release(&"heavy")
+	await ticks(2)
+	check(interp.last_press_time(&"heavy") > 0.0, "heavy press read by the interpreter")
+	check(_starts.size() >= 1, "heavy tap starts an attack (%s)" % [_starts])
+	await _settle(p)
+
+	# --- Focus is a press: Focus mode starts, nothing to hold. -------------------
+	p.focus = 1.0
+	press(&"focus")
+	await ticks(1)
+	release(&"focus")
+	await ticks(3)
+	check(p.is_focusing(), "focus press starts Focus mode, released at once")
+	p.end_focus()
+	TimeDirector.reset()
+	await ticks(30)
+
 	# --- Block: press holds the guard, release drops it (release reaches combat).
 	press(&"block")
 	await ticks(4)
@@ -68,7 +91,7 @@ func run() -> void:
 	await ticks(3)
 	check(interp.dropped_presses == dropped0 + 1, "Cmd + grab press dropped (dropped=%d)" % interp.dropped_presses)
 	check(not interp.is_held(&"grab"), "dropped grab is not held")
-	check(_starts.is_empty() and not p.combat.is_attacking(), "Cmd + F did not grab")
+	check(_starts.is_empty() and not p.combat.is_attacking(), "Cmd + G did not grab")
 	_key(KEY_META, false)
 	await ticks(2)
 	check(not interp.is_held(&"grab"), "letting go of Cmd while F is down does not revive the press")
@@ -78,19 +101,31 @@ func run() -> void:
 
 	# A raw key event that carries the Cmd modifier is dropped as well.
 	var dropped1 := interp.dropped_presses
-	_key(KEY_F, true, true)
+	_key(KEY_G, true, true)
 	await ticks(3)
-	check(interp.dropped_presses == dropped1 + 1, "F event with meta_pressed dropped")
-	check(_starts.is_empty(), "F event with meta_pressed did not grab")
-	_key(KEY_F, false)
+	check(interp.dropped_presses == dropped1 + 1, "G event with meta_pressed dropped")
+	check(_starts.is_empty(), "G event with meta_pressed did not grab")
+	_key(KEY_G, false)
 	await ticks(3)
 
-	# Without Cmd the same button grabs again.
+	# Without Cmd the same button grabs again (CombatController's grab move, or
+	# Carry's grab once G's module is on: then the accepted press is what we see).
+	var dropped2 := interp.dropped_presses
+	var t_grab := interp.now()
+	var carry_on := p.carry != null and p.carry.is_enabled()
+	var grabbing := false
 	press(&"grab")
-	await ticks(1)
-	release(&"grab")
-	await ticks(2)
-	check(_starts.size() >= 1, "grab without Cmd starts an attack (%s)" % [_starts])
+	for i in 10:
+		await get_tree().physics_frame
+		if i == 1:
+			release(&"grab")
+		grabbing = grabbing or (carry_on and p.carry.is_busy())
+	check(interp.dropped_presses == dropped2 and interp.last_press_time(&"grab") >= t_grab, "grab press without Cmd accepted")
+	if carry_on:
+		check(grabbing, "grab without Cmd starts Carry's grab (busy)")
+	else:
+		check(_starts.size() >= 1, "grab without Cmd starts an attack (%s)" % [_starts])
+	await wait_until(func() -> bool: return not (carry_on and p.carry.is_busy()), 240)
 	await _settle(p)
 
 	# --- Crouch + punch on the same tick: the press already sees the crouch. ---

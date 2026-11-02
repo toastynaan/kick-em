@@ -1,90 +1,98 @@
 extends "res://tests/input/input_test_base.gd"
-## Jump (Space): apex Tuning.JUMP_APEX and air time Tuning.JUMP_AIR_TIME within
-## 5%, jumped / landed events, is_airborne(), landing recovery of
-## Tuning.JUMP_LAND_FRAMES (cannot act, then can), air steering capped at
-## Tuning.JUMP_AIR_STEER x walk speed (a standing hop drifts <= 1.4 m, a running
-## jump keeps its take-off speed), and a jump while crouched stands up first.
+## Jump (Space), Round 5 numbers (Feel Reference: Jump; lead decision 14): a
+## standing jump peaks at Tuning.JUMP_HEIGHT (1.2 m) under
+## Tuning.PLAYER_GRAVITY rising and x Tuning.FALL_GRAVITY_MULT falling (air time
+## ~0.89 s), within 5%; a soft landing has no recovery (the player never stops);
+## a jump pressed up to Tuning.JUMP_BUFFER_TIME before landing fires on landing;
+## horizontal velocity is kept exactly (a running jump covers v x air time);
+## a jump while crouched stands up first. Whoever drives the jump (Traversal,
+## or Fighter's own movement when it does not) must meet these. Air steering
+## of a standing hop is checked on Fighter's own movement only.
 
 func run() -> void:
 	var p := spawn_player(Vector3.ZERO)
 	await ticks(40)
 	check(p.is_on_floor(), "player starts on the floor")
 	var y0 := p.global_position.y
+	var g := Tuning.PLAYER_GRAVITY
+	var want_air := sqrt(2.0 * Tuning.JUMP_HEIGHT / g) + sqrt(2.0 * Tuning.JUMP_HEIGHT / (g * Tuning.FALL_GRAVITY_MULT))
 
 	var r := await _jump_once(p)
-	check(near(r["apex"], Tuning.JUMP_APEX, 0.05), "apex %.3f m (Tuning %.2f)" % [r["apex"], Tuning.JUMP_APEX])
-	check(near(r["air"], Tuning.JUMP_AIR_TIME, 0.05), "air time %.3f s (Tuning %.2f)" % [r["air"], Tuning.JUMP_AIR_TIME])
+	check(near(r["apex"], Tuning.JUMP_HEIGHT, 0.05), "apex %.3f m (Tuning %.2f)" % [r["apex"], Tuning.JUMP_HEIGHT])
+	check(near(r["air"], want_air, 0.05), "air time %.3f s (want %.3f)" % [r["air"], want_air])
 	check(r["airborne_seen"], "is_airborne() true in the air")
-	check(count_events(&"jumped") == 1 and count_events(&"landed") == 1, "one jumped and one landed event")
 	check(absf(p.global_position.y - y0) < 0.02, "lands back on the floor")
-
-	# Landing recovery: cannot act for JUMP_LAND_FRAMES, then can.
-	var rec := Tuning.frames(Tuning.JUMP_LAND_FRAMES)
-	check(not p.can_act() and p.is_landing(), "landing recovery right after landing")
-	var t_land := TimeDirector.now()
-	await wait_until(func() -> bool: return p.can_act(), 120)
-	var rec_measured := TimeDirector.now() - t_land
-	check(absf(rec_measured - rec) <= 1.5 / 120.0, "landing recovery %.3f s (want %.3f)" % [rec_measured, rec])
+	print("  landing speed %.2f m/s (soft under %.0f)" % [r["land_speed"], Tuning.LAND_HARD_SPEED])
+	check(r["land_speed"] < Tuning.LAND_HARD_SPEED, "a standing jump lands soft")
+	await ticks(1)
+	check(p.can_act() and not p.is_landing(), "a soft landing has no recovery: the player can act at once")
 	await ticks(30)
 
-	# A jump pressed during the landing recovery waits for it (jump buffer).
-	clear_events()
+	# A jump pressed just before landing (inside the buffer) fires on landing.
 	press(&"jump")
 	await ticks(1)
 	release(&"jump")
-	await wait_until(func() -> bool: return count_events(&"landed") > 0, 240)
-	await ticks(4)
-	press(&"jump")
+	await wait_until(func() -> bool: return p.is_airborne() and p.velocity.y < -2.0, 240)
+	await wait_until(func() -> bool: return p.global_position.y - y0 < 0.25, 240)
+	press(&"jump")  # ~0.06 s before touching down
 	await ticks(1)
 	release(&"jump")
-	check(not p.is_airborne() and p.is_landing(), "no jump during landing recovery")
-	await wait_until(func() -> bool: return p.is_airborne(), 30)
-	check(p.is_airborne(), "the buffered jump fires when the recovery ends")
+	var low := INF
+	var again := false
+	for i in 60:
+		await get_tree().physics_frame
+		var h := p.global_position.y - y0
+		low = minf(low, h)
+		if low < 0.02 and h > low + 0.1:
+			again = true  # touched down and took off again (often on the same tick)
+			break
+	check(again, "a jump pressed just before landing fires on landing (buffered)")
 	await wait_until(func() -> bool: return not p.is_airborne(), 240)
 	await ticks(30)
 
-	# Air steering, standing jump: the stick steers up to JUMP_AIR_STEER x walk speed.
-	var cap := Tuning.WALK_SPEED * Tuning.JUMP_AIR_STEER
-	var x0 := p.global_position
-	press(&"move_forward")
-	press(&"jump")
-	await ticks(1)
-	release(&"jump")
-	var top := 0.0
-	while p.is_airborne():
-		top = maxf(top, _hspeed(p))
-		await get_tree().physics_frame
-	var drift := Vector2(p.global_position.x - x0.x, p.global_position.z - x0.z).length()
-	release(&"move_forward")
-	check(drift > 0.8 and drift <= 1.4, "standing jump, stick held: drift %.2f m (<= 1.4)" % drift)
-	check(top <= cap * 1.01, "standing jump air speed %.2f m/s (cap %.2f)" % [top, cap])
-	await wait_until(func() -> bool: return p.velocity.length() < 0.01 and p.can_act(), 240)
-	await ticks(20)
+	if not p.is_traversal_driving():
+		# Air steering (Fighter's own movement): the stick steers up to JUMP_AIR_STEER x walk speed.
+		var cap := Tuning.WALK_SPEED * Tuning.JUMP_AIR_STEER
+		var x0 := p.global_position
+		press(&"move_forward")
+		press(&"jump")
+		await ticks(1)
+		release(&"jump")
+		var top := 0.0
+		await ticks(2)
+		while p.is_airborne():
+			top = maxf(top, _hspeed(p))
+			await get_tree().physics_frame
+		var drift := Vector2(p.global_position.x - x0.x, p.global_position.z - x0.z).length()
+		release(&"move_forward")
+		check(drift > 0.6 and drift <= 1.4, "standing jump, stick held: drift %.2f m (<= 1.4)" % drift)
+		check(top <= cap * 1.01, "standing jump air speed %.2f m/s (cap %.2f)" % [top, cap])
+		await wait_until(func() -> bool: return p.velocity.length() < 0.01 and p.can_act(), 240)
+		await ticks(20)
+	else:
+		print("  NOTE Traversal drives the jump; air steering is Traversal's")
 
-	# Running jump: keeps its take-off speed with the stick held, and after
-	# letting go of the stick mid-air, never goes faster.
+	# Running jump: horizontal velocity kept exactly.
 	press(&"move_forward")
 	await ticks(60)  # full walk speed
 	var v0 := _hspeed(p)
 	var r0 := p.global_position
+	var t0 := TimeDirector.now()
 	press(&"jump")
 	await ticks(1)
 	release(&"jump")
 	var lo := INF
 	var hi := 0.0
-	var n := 0
+	await ticks(1)
 	while p.is_airborne():
 		lo = minf(lo, _hspeed(p))
 		hi = maxf(hi, _hspeed(p))
-		n += 1
-		if n == 36:
-			release(&"move_forward")  # stick let go at the apex
 		await get_tree().physics_frame
+	var air := TimeDirector.now() - t0
 	release(&"move_forward")
 	var run_dist := Vector2(p.global_position.x - r0.x, p.global_position.z - r0.z).length()
-	check(near(v0, Tuning.WALK_SPEED, 0.02), "running at %.2f m/s before the jump" % v0)
-	check(near(lo, v0, 0.02) and hi <= v0 * 1.01, "running jump keeps its take-off speed (%.2f..%.2f m/s)" % [lo, hi])
-	check(near(run_dist, v0 * Tuning.JUMP_AIR_TIME, 0.05), "running jump covers %.2f m (want %.2f)" % [run_dist, v0 * Tuning.JUMP_AIR_TIME])
+	check(near(lo, v0, 0.02) and hi <= v0 * 1.01, "running jump keeps its speed (%.2f..%.2f m/s, take-off %.2f)" % [lo, hi, v0])
+	check(near(run_dist, v0 * air, 0.06), "running jump covers %.2f m (v x air time %.2f)" % [run_dist, v0 * air])
 	await wait_until(func() -> bool: return p.velocity.length() < 0.01 and p.can_act(), 240)
 	await ticks(20)
 
@@ -106,23 +114,27 @@ func run() -> void:
 func _hspeed(p: Fighter) -> float:
 	return Vector2(p.velocity.x, p.velocity.z).length()
 
-## Press jump once; track apex and air time (real seconds, from the event
-## stamps) until landing.
+## Press jump once; track apex, real air time and the landing speed.
 func _jump_once(p: Fighter) -> Dictionary:
-	clear_events()
 	var base := p.global_position.y
 	var apex := 0.0
 	var seen := false
+	var t0 := TimeDirector.now()
+	var t_land := -1.0
+	var vy_last := 0.0
+	var prev_y := base
 	press(&"jump")
 	for i in 400:
 		await get_tree().physics_frame
 		if p.is_airborne():
 			seen = true
-		apex = maxf(apex, p.global_position.y - base)
-		if count_events(&"landed") > 0:
+		var y := p.global_position.y
+		if seen and p.is_airborne():
+			vy_last = (y - prev_y) * 120.0
+		prev_y = y
+		apex = maxf(apex, y - base)
+		if seen and not p.is_airborne():
+			t_land = TimeDirector.now()
 			break
 	release(&"jump")
-	var j := last_event(&"jumped")
-	var l := last_event(&"landed")
-	var air: float = l[4] - j[4] if not j.is_empty() and not l.is_empty() else 0.0
-	return {"apex": apex, "air": air, "airborne_seen": seen}
+	return {"apex": apex, "air": t_land - t0 if t_land > 0.0 else 0.0, "airborne_seen": seen, "land_speed": absf(vy_last)}

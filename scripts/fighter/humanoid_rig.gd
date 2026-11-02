@@ -24,6 +24,11 @@ const SHADER := preload("res://shaders/fighter.gdshader")
 const BONE_COUNT := 16
 const JOINT_LIMIT_MARGIN := 12.0   ## degrees the Jolt hard limit is wider than the soft range
 const STUMP_COLOR := Color(0.33, 0.02, 0.03)
+# Round 5 wound caps (procedural; no Blender): a dark dome over the joint, a
+# raw red cut face toward the missing part and a bone stub through it.
+const WOUND_FLESH := Color(0.55, 0.05, 0.05)
+const WOUND_BONE := Color(0.88, 0.84, 0.74)
+const LIMB_FADE_TIME := 0.6        ## s the oldest loose limb takes to dissolve past Tuning.LOOSE_LIMB_MAX
 
 ## Rest offset of each bone from its parent at height 1.0 / width 1.0 (metres).
 ## Character faces -Z, right is +X. Hips 0.95 m, shoulders 1.46, neck 1.52,
@@ -120,10 +125,12 @@ var _severed_bones := {}      # bone -> true
 var _body_offsets := {}       # bone -> Transform3D (bone -> body)
 var _rest_global := {}        # bone -> Transform3D (skeleton space, rest)
 var _joint_inertia := {}      # child bone -> float (kg m^2 of the subtree about the joint)
-var _stumps: Array[MeshInstance3D] = []
+var _stumps: Array[Node3D] = []
+var _wounds := {}             # cut -> hidden wound cap (Node3D) on the parent bone's attachment
 
 static var _idx_cache := {}
 static var _parent_idx_cache := PackedInt32Array()
+static var _loose_limbs: Array = []   # loose limbs alive, oldest first (all fighters)
 
 # --- Static bone tables -------------------------------------------------------
 static func bone_index(bone: StringName) -> int:
@@ -172,9 +179,10 @@ func build(p_appearance: Dictionary, p_mass_kg: float) -> void:
 		_free_joints()
 		skeleton.queue_free()
 		_attachments.clear(); _pbs.clear(); _pb_list.clear(); _parts.clear(); _parts_by_bone.clear()
-		_severed.clear(); _severed_bones.clear(); _stumps.clear()
+		_severed.clear(); _severed_bones.clear(); _stumps.clear(); _wounds.clear()
 	_build_skeleton()
 	_build_meshes()
+	_build_wounds()
 	_build_physics()
 	if is_inside_tree():
 		_create_joints()
@@ -329,6 +337,64 @@ func get_bone_parts(bone: StringName) -> Array[MeshInstance3D]:
 	var a: Array[MeshInstance3D] = []
 	a.assign(_parts_by_bone.get(bone, []))
 	return a
+
+## Round 5: one hidden wound cap per cut (shoulder, hip, elbow, knee, neck),
+## on the parent bone at the joint. sever() shows it.
+func _build_wounds() -> void:
+	_wounds.clear()
+	for cut: StringName in Bones.CUTS:
+		var root: StringName = Bones.CUTS[cut]
+		var parent: StringName = Bones.PARENT[root]
+		var away := 1.0 if root == Bones.HEAD else -1.0   # the missing part points this way (bone-local Y)
+		var w := _make_wound(_limb_radius(root), away)
+		w.name = "Wound_" + String(cut)
+		w.position = scaled(REST[root], height_scale, width_scale)
+		w.visible = false
+		_attachments[parent].add_child(w)
+		_wounds[cut] = w
+
+## Mesh radius of the limb that starts at `bone` (unscaled table value x width).
+func _limb_radius(bone: StringName) -> float:
+	match bone:
+		Bones.L_UPPER_ARM, Bones.R_UPPER_ARM:
+			return 0.058 * width_scale
+		Bones.L_LOWER_ARM, Bones.R_LOWER_ARM:
+			return 0.047 * width_scale
+		Bones.L_UPPER_LEG, Bones.R_UPPER_LEG:
+			return 0.078 * width_scale
+		Bones.L_LOWER_LEG, Bones.R_LOWER_LEG:
+			return 0.062 * width_scale
+	return 0.05 * width_scale   # neck
+
+## A wound cap of radius `r` whose cut face looks along bone-local Y * `away`.
+## Each part carries meta "bone" once it is attached (sever).
+func _make_wound(r: float, away: float) -> Node3D:
+	var root := Node3D.new()
+	var dome := MeshInstance3D.new()
+	dome.name = "Dome"
+	dome.mesh = _sphere(r * 1.12, r * 1.3)
+	dome.material_override = _mat(STUMP_COLOR)
+	dome.layers = Layers.VIS_CHARACTERS
+	root.add_child(dome)
+	var face := MeshInstance3D.new()
+	face.name = "Face"
+	face.mesh = _cyl(r * 1.04, 0.014)
+	face.material_override = _mat(WOUND_FLESH)
+	face.layers = Layers.VIS_CHARACTERS
+	face.position = Vector3(0, r * 0.45 * away, 0)
+	root.add_child(face)
+	var stub := MeshInstance3D.new()
+	stub.name = "Bone"
+	stub.mesh = _cyl(r * 0.3, r * 0.9)
+	stub.material_override = _mat(WOUND_BONE)
+	stub.layers = Layers.VIS_CHARACTERS
+	stub.position = Vector3(0, r * 0.7 * away, 0)
+	root.add_child(stub)
+	return root
+
+## The wound cap for `cut` (hidden until it is severed); null if unknown.
+func get_wound_cap(cut: StringName) -> Node3D:
+	return _wounds.get(cut)
 
 # --- Physics -------------------------------------------------------------------
 func _build_physics() -> void:
@@ -609,10 +675,17 @@ func is_bone_severed(bone: StringName) -> bool:
 	return _severed_bones.has(bone)
 
 # --- Dismemberment -------------------------------------------------------------
-## Dismemberment: detach the subtree of Bones.CUTS[cut]. Hides those mesh parts,
-## shows a stump cap, removes their physical bones from the simulation, and
-## returns a loose RigidBody3D copy (with the same pose and velocity) that has
-## already been registered with DebrisManager. Returns null if already severed.
+## Dismemberment (Round 5: Feel Reference "How a limb comes off"): detach the
+## subtree of Bones.CUTS[cut] (arm_l/arm_r at the shoulder, leg_l/leg_r at the
+## hip; the older forearm/shin/head cuts still work). Hides those mesh parts,
+## shows the wound cap at the stump, takes their physical bones out of the
+## ragdoll (they stop pulling), and returns the loose limb: a ThrowableProp of
+## kind &"limb" built from the limb's parts and collision shapes at the bone's
+## pose, moving with that bone's velocity (G can pick it up). During a hitstop
+## hold the limb waits frozen at the stump and flies off when the hold ends;
+## cut in the same frame just before a launch() it also gets the launch.
+## At most Tuning.LOOSE_LIMB_MAX loose limbs exist; past that the oldest
+## dissolves. Returns null if already severed.
 func sever(cut: StringName) -> RigidBody3D:
 	if not Bones.CUTS.has(cut) or _severed.has(cut) or not skeleton or not is_inside_tree():
 		return null
@@ -621,7 +694,7 @@ func sever(cut: StringName) -> RigidBody3D:
 		return null
 	var sub := subtree(root_bone)
 	_severed[cut] = true
-	var root_xf := get_bone_global_transform(root_bone)
+	var root_xf := get_bone_global_transform(root_bone).orthonormalized()
 	var root_inv := root_xf.affine_inverse()
 	var lin := Vector3.ZERO
 	var ang := Vector3.ZERO
@@ -629,11 +702,17 @@ func sever(cut: StringName) -> RigidBody3D:
 		var vel: Array = controller.get_bone_velocity(root_bone)
 		lin = vel[0]
 		ang = vel[1]
-	var piece := RigidBody3D.new()
-	piece.name = "Severed_" + String(cut)
+	var piece := ThrowableProp.new()
+	piece.kind = &"limb"
+	piece.name = "Limb_" + String(cut)
+	piece.set_meta(&"cut", cut)
+	piece.set_meta(&"bone", root_bone)
 	var total_mass := 0.0
-	var limb_radius := 0.05
+	var cut_now: Array[StringName] = []
 	for bone in sub:
+		if bone != root_bone and _severed_bones.has(bone):
+			continue   # already gone with an earlier, shorter cut
+		cut_now.append(bone)
 		var bone_xf := get_bone_global_transform(bone)
 		for part in _parts_by_bone.get(bone, []):
 			var mi: MeshInstance3D = part
@@ -641,7 +720,8 @@ func sever(cut: StringName) -> RigidBody3D:
 			copy.mesh = mi.mesh
 			copy.material_override = mi.material_override.duplicate() if mi.material_override else null
 			copy.layers = mi.layers
-			copy.transform = root_inv * bone_xf * mi.transform
+			copy.transform = root_inv * bone_xf * _local_to_attachment(mi, bone)
+			copy.visible = true
 			piece.add_child(copy)
 			mi.visible = false
 		_severed_bones[bone] = true
@@ -654,54 +734,99 @@ func sever(cut: StringName) -> RigidBody3D:
 				shape_copy.shape = cs.shape
 				shape_copy.transform = root_inv * bone_xf * _body_offsets[bone] * cs.transform
 				piece.add_child(shape_copy)
-				if bone == root_bone:
-					var s := cs.shape
-					if s is CapsuleShape3D:
-						limb_radius = (s as CapsuleShape3D).radius
-					elif s is SphereShape3D:
-						limb_radius = 0.06 * width_scale
-	# Stump caps: one on the piece at the cut, one on the body side.
-	var cap_mesh := _cyl(limb_radius * 1.08, 0.025)
-	var piece_cap := MeshInstance3D.new()
-	piece_cap.mesh = cap_mesh
-	piece_cap.material_override = _mat(STUMP_COLOR)
-	piece_cap.layers = Layers.VIS_CHARACTERS
-	piece.add_child(piece_cap)
+	# The loose limb's own wound at the cut end (it points back toward the body).
+	var limb_cap := _make_wound(_limb_radius(root_bone), -1.0 if root_bone == Bones.HEAD else 1.0)
+	limb_cap.name = "Wound"
+	piece.add_child(limb_cap)
+	# The body's wound cap at the stump.
 	var parent_bone: StringName = Bones.PARENT[root_bone]
-	var body_cap := MeshInstance3D.new()
-	body_cap.name = "Stump_" + String(cut)
-	body_cap.mesh = cap_mesh
-	body_cap.material_override = _mat(STUMP_COLOR)
-	body_cap.layers = Layers.VIS_CHARACTERS
-	body_cap.position = scaled(REST[root_bone], height_scale, width_scale)
-	_attachments[parent_bone].add_child(body_cap)
-	_stumps.append(body_cap)
-	_parts.append(body_cap)
-	body_cap.set_meta(&"bone", parent_bone)
-	_parts_by_bone[parent_bone].append(body_cap)
+	var w: Node3D = _wounds.get(cut)
+	if w:
+		w.visible = true
+		_stumps.append(w)
+		for c in w.get_children():
+			var mi := c as MeshInstance3D
+			if mi:
+				mi.set_meta(&"bone", parent_bone)
+				_parts.append(mi)
+				_parts_by_bone[parent_bone].append(mi)
 	# Loose piece physics.
 	piece.mass = maxf(total_mass, 0.5)
 	piece.collision_layer = Layers.DEBRIS
 	piece.collision_mask = Layers.MASK_DEBRIS
 	piece.continuous_cd = true
+	piece.add_to_group(&"loose_limbs")
 	var world_parent: Node = get_tree().current_scene
 	if world_parent == null or not world_parent.is_inside_tree():
 		world_parent = get_parent()
 	world_parent.add_child(piece)
-	piece.global_transform = root_xf.orthonormalized()
-	piece.linear_velocity = lin
-	piece.angular_velocity = ang
+	piece.global_transform = root_xf
 	for pb in _pb_list:
 		piece.add_collision_exception_with(pb)
 	piece.reset_physics_interpolation()
 	if controller:
-		controller.on_bones_severed(sub)
+		controller.on_bones_severed(cut_now)
+		controller.adopt_piece(piece, lin, ang)
 	else:
 		break_joint(root_bone)
-	var dm := get_node_or_null(^"/root/DebrisManager")
-	if dm and dm.has_method(&"register"):
-		dm.register(piece)
+		piece.linear_velocity = lin
+		piece.angular_velocity = ang
+	_register_loose_limb(piece)
 	return piece
+
+## Transform of a part relative to its bone's attachment (wound-cap meshes sit
+## one level down, under their cap node).
+func _local_to_attachment(mi: Node3D, bone: StringName) -> Transform3D:
+	var att: Node = _attachments.get(bone)
+	var xf := mi.transform
+	var n := mi.get_parent()
+	while n != null and n != att and n is Node3D:
+		xf = (n as Node3D).transform * xf
+		n = n.get_parent()
+	return xf
+
+## Loose limbs alive now (all fighters), not counting ones already dissolving.
+static func loose_limb_count() -> int:
+	_prune_loose()
+	return _loose_limbs.size()
+
+static func _prune_loose() -> void:
+	var keep: Array = []
+	for p in _loose_limbs:
+		if is_instance_valid(p) and not (p as Node).is_queued_for_deletion() and not (p as Node).has_meta(&"fading"):
+			keep.append(p)
+	_loose_limbs = keep
+
+## Loose limbs persist like bodies, up to Tuning.LOOSE_LIMB_MAX; past that the
+## oldest one nobody is holding dissolves.
+static func _register_loose_limb(piece: RigidBody3D) -> void:
+	_prune_loose()
+	_loose_limbs.append(piece)
+	var i := 0
+	while _loose_limbs.size() > Tuning.LOOSE_LIMB_MAX and i < _loose_limbs.size():
+		var old: RigidBody3D = _loose_limbs[i]
+		if old != piece and not (old.has_method(&"is_held") and old.call(&"is_held")):
+			_loose_limbs.remove_at(i)
+			_dissolve_limb(old)
+		else:
+			i += 1
+
+static func _dissolve_limb(piece: RigidBody3D) -> void:
+	piece.set_meta(&"fading", true)
+	piece.remove_from_group(&"loose_limbs")
+	if not piece.is_inside_tree():
+		piece.queue_free()
+		return
+	var tw := piece.create_tween().set_parallel(true)
+	var stack: Array[Node] = [piece]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		stack.append_array(n.get_children())
+		var mi := n as MeshInstance3D
+		if mi and mi.material_override is ShaderMaterial:
+			var mat := mi.material_override as ShaderMaterial
+			tw.tween_method(func(x: float) -> void: mat.set_shader_parameter(&"dissolve", x), 0.0, 1.0, LIMB_FADE_TIME)
+	tw.chain().tween_callback(piece.queue_free)
 
 func is_severed(cut: StringName) -> bool:
 	return _severed.has(cut)

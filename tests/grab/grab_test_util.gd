@@ -1,5 +1,6 @@
 class_name GrabTestUtil
-## Shared helpers for tests/grab/* (limb grabs) and the grab lab readout.
+## Shared helpers for tests/grab/*: Upgrade 2 limb grabs (LimbGrab) and the
+## Round 5 Carry tests (presses through CombatController, panels, leg spin).
 ## OWNER: agent G.
 
 static func make_floor(parent: Node, size := 200.0) -> StaticBody3D:
@@ -97,3 +98,73 @@ static func bone_speeds(f: Fighter) -> Array:
 		lin = maxf(lin, lv.length())
 		ang = maxf(ang, av.length())
 	return [lin, ang, nan]
+
+# --- Round 5 (Carry) helpers ---------------------------------------------------------------
+## Await `n` physics frames.
+static func frames(node: Node, n: int) -> void:
+	for i in n:
+		await node.get_tree().physics_frame
+
+## Await physics frames until `seconds` of game time passed.
+static func wait(node: Node, seconds: float) -> void:
+	var t := 0.0
+	while t < seconds:
+		await node.get_tree().physics_frame
+		t += node.get_physics_process_delta_time() * Engine.time_scale
+
+## Await until `cond` is true or `timeout` game seconds passed. Returns cond's last value.
+static func wait_until(node: Node, cond: Callable, timeout: float) -> bool:
+	var t := 0.0
+	while t < timeout:
+		if cond.call():
+			return true
+		await node.get_tree().physics_frame
+		t += node.get_physics_process_delta_time() * Engine.time_scale
+	return bool(cond.call())
+
+## The player's buttons, through CombatController's routing (as PlayerController does).
+static func press(f: Fighter, action: int) -> void:
+	f.combat.press(action)
+
+static func release(f: Fighter, action: int) -> void:
+	f.combat.release(action)
+
+## Tap a button: press, `hold` game seconds, release.
+static func tap(node: Node, f: Fighter, action: int, hold := 0.05) -> void:
+	press(f, action)
+	await wait(node, hold)
+	release(f, action)
+
+## A Destructible panel of `surface` centred at (pos.x, 1.5, pos.z) whose face
+## looks along `face` (the side bodies come from).
+static func make_panel(parent: Node3D, surface: StringName, pos: Vector3, face: Vector3) -> Destructible:
+	var d := Destructible.new()
+	d.surface = surface
+	d.name = "Panel_" + String(surface)
+	d.transform = Transform3D(Basis.looking_at(-face.normalized(), Vector3.UP), Vector3(pos.x, 1.5, pos.z))
+	parent.add_child(d)
+	return d
+
+## Mean angular speed (rad/s) of a fighter's leg bodies (thighs, shins, feet).
+static func leg_spin(f: Fighter) -> float:
+	var sum := 0.0
+	var n := 0
+	for b: StringName in [Bones.L_UPPER_LEG, Bones.L_LOWER_LEG, Bones.L_FOOT, Bones.R_UPPER_LEG, Bones.R_LOWER_LEG, Bones.R_FOOT]:
+		if f.rig.is_bone_severed(b):
+			continue
+		var av: Vector3 = PhysicsServer3D.body_get_state(f.rig.get_physical_bone(b).get_rid(),
+			PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY)
+		sum += av.length()
+		n += 1
+	return sum / maxf(n, 1)
+
+## Reset the global singletons between cases.
+static func reset_world() -> void:
+	ImpactResolver.reset()
+	DebrisManager.reset()
+	TimeDirector.reset()
+
+static func state_name(f: Fighter) -> String:
+	var names := ["ANIMATED", "FLINCH", "STAGGER", "LAUNCHED", "GROUNDED", "GETUP", "DEAD"]
+	var s := f.get_state()
+	return names[s] if s >= 0 and s < names.size() else str(s)

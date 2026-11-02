@@ -1,7 +1,8 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Round 2 cross-module APIs: CombatController.start_counter (AI teleport
-## counter), pick_up_debris, ThrownChunk.launch_body, the player's debris kick
-## and the pursuit Focus refund.
+## Round 2 cross-module APIs, Round 5 rules: CombatController.start_counter
+## (the Duelist's teleport counter: on the player a knockdown, never a launch;
+## the player can parry it through Defence), pick_up_debris,
+## ThrownChunk.launch_body and the player's debris kick.
 
 var _x := 0.0
 const PEAK_LIMIT := 20.0
@@ -71,9 +72,10 @@ func run() -> void:
 	check(ok, "AI back_kick landed on the player")
 	if ok:
 		var info := _landed(&"back_kick", p)
-		check(absf(info.launch_velocity.length() - Tuning.COUNTER_LAUNCH) < 0.3, "fixed %.1f m/s launch" % info.launch_velocity.length())
-		var want := Tuning.DMG_COUNTER * float(du.config["damage_mult"])
-		check(is_equal_approx(hp0 - p.hp, want), "damage %.1f = DMG_COUNTER x damage_mult" % (hp0 - p.hp))
+		check(info.tier == HitInfo.Tier.KNOCKDOWN and info.launch_velocity == Vector3.ZERO,
+			"the counter knocks the player down, no launch (%s)" % HitInfo.tier_name(info.tier))
+		var want := Tuning.DMG_ENEMY[&"e_kick"] * float(du.config["damage_mult"])
+		check(is_equal_approx(hp0 - p.hp, want), "damage %.1f = DMG_ENEMY e_kick x damage_mult" % (hp0 - p.hp))
 
 	print("AI counter: no focus, no counter")
 	x = _lane()
@@ -83,53 +85,32 @@ func run() -> void:
 	du2.spend_focus(du2.focus)
 	check(not du2.combat.start_counter(p2, 0.4), "start_counter refused without focus")
 
-	print("vanish exchange: the player dodges the AI counter and counters back")
+	print("the player parries the AI counter (Defence)")
 	x = _lane()
 	var p3 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var du3 := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
 	await ticks(15)
+	var parried := [false]
+	GameEvents.parried.connect(func(d: Node3D, a: Node3D) -> void:
+		if d == p3 and a == du3:
+			parried[0] = true)
 	clear_events()
 	check(du3.combat.start_counter(p3, 0.5), "AI counter started")
 	await wait_until(func() -> bool: return du3.combat.time_to_active() <= 0.08, 2.0)
 	p3.combat.press(CombatController.Action.BLOCK)
 	p3.combat.release(CombatController.Action.BLOCK)
-	ok = await wait_until(func() -> bool: return count_events(&"perfect_dodge") > 0, 1.0)
-	check(ok and last_event(&"perfect_dodge")[1] == p3, "player perfect-dodged the AI counter")
-	await ticks(2)
-	p3.combat.press(CombatController.Action.LIGHT)
-	p3.combat.release(CombatController.Action.LIGHT)
-	var tc := last_event(&"teleport_counter")
-	check(not tc.is_empty() and tc[1] == p3 and tc[2] == du3, "player counters the duelist back")
-	ok = await wait_until(func() -> bool: return _landed(&"back_kick", du3) != null, 1.5)
-	check(ok, "player's back_kick lands on the duelist")
+	await wait_real(0.4)
+	check(parried[0], "a Block press in the window parries the counter kick")
+	check(_landed(&"back_kick", p3) == null, "the counter kick missed")
 
-	print("AI counter requested during its own vanish waits for the reappear")
+	print("start_counter is refused mid-attack")
 	x = _lane()
 	var p4 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var du4 := spawn(&"duelist", Vector3(x, 0, -1.1), Vector3.BACK)
+	var du4 := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
 	await ticks(15)
-	clear_events()
-	var counter_result := [false, 0.0]
-	GameEvents.perfect_dodge.connect(func(d: Node3D, a: Node3D) -> void:
-		if d == du4:
-			counter_result[0] = du4.combat.start_counter(a as Fighter, 0.4)
-			counter_result[1] = TimeDirector.now(), CONNECT_ONE_SHOT)
-	p4.combat.press(CombatController.Action.LIGHT)
-	await wait_until(func() -> bool: return p4.combat.time_to_active() <= 0.05, 1.0)
-	du4.combat.press(CombatController.Action.BLOCK)
-	du4.combat.release(CombatController.Action.BLOCK)
-	ok = await wait_until(func() -> bool:
-		for ev in events:
-			if ev[0] == &"attack_tell" and ev[1] == du4 and ev[2] == &"counter":
-				return true
-		return false, 1.5)
-	check(counter_result[0], "start_counter during the vanish returns true (queued)")
-	check(ok, "counter tell came")
-	if ok:
-		var t_tell := TimeDirector.now()
-		check(t_tell - counter_result[1] >= Tuning.VANISH_INVULN - 0.02,
-			"tell started after the vanish (%.3f s after the dodge)" % (t_tell - counter_result[1]))
-		check(not du4.combat.is_vanished(), "visible during the tell")
+	check(du4.combat.start_enemy_attack(&"e_hook", 0.5), "the Duelist starts a hook")
+	check(not du4.combat.start_counter(p4, 0.4), "no teleport counter in the middle of its own attack")
+	await wait_real(1.0)
 
 	print("Thrower: pick up a real chunk and throw it")
 	x = _lane()
@@ -223,23 +204,4 @@ func run() -> void:
 	check(pk[0] <= PEAK_LIMIT and pk[1] <= PEAK_LIMIT,
 		"debris-kicked chunk peak %.1f m/s (velocity), %.1f m/s (moved) <= %.0f" % [pk[0], pk[1], PEAK_LIMIT])
 
-	print("pursuit refund")
-	x = _lane()
-	var p8 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var g8 := spawn(&"grunt", Vector3(x, 0, -1.3), Vector3.BACK)
-	await ticks(15)
-	p8.add_focus(2.0)
-	p8.combat.press(CombatController.Action.KICK)
-	await wait_until(func() -> bool: return g8.is_launched(), 1.0)
-	await wait_real(0.1)
-	p8.combat.press(CombatController.Action.DASH)
-	clear_events()
-	p8.combat.press(CombatController.Action.KICK)
-	ok = await wait_until(func() -> bool: return _landed(&"sparta_kick", g8) != null, 1.0)
-	check(ok, "pursuit follow-up landed")
-	var f8 := p8.focus
-	GameEvents.wall_cracked.emit(null, g8.get_center_of_mass() + Vector3(0, 0, -0.5), 3000.0)
-	check(is_equal_approx(p8.focus, f8 + 0.5), "wall crack during the follow-up flight refunds 0.5 focus (%.2f -> %.2f)" % [f8, p8.focus])
-	GameEvents.wall_broken.emit(null, g8.get_center_of_mass(), 3000.0, Vector3.ZERO)
-	check(is_equal_approx(p8.focus, f8 + 0.5), "refund only once per pursuit")
 	done()

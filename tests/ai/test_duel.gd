@@ -2,7 +2,11 @@ extends Node
 ## Duel: the Duelist against a passive player dummy for 60 s (override with
 ## `-- --seconds=N`). It must attack repeatedly (about one attack every
 ## 1.2-2.5 s of open time), mix its moves, and never start an attack while
-## the player is down, held or in hitstun. OWNER: agent C (AI tests).
+## the player is down, held or in hitstun.
+## Phase B (Round 5 defence): the player dummy jabs the Duelist whenever he is
+## in reach (Tuning read chance, no overrides). Every GameEvents.parried with
+## the Duelist as defender is followed by its counter (a hook, or B's
+## start_counter teleport) within COUNTER_LIMIT s. OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 
@@ -27,6 +31,15 @@ var recover_gaps: Array[float] = []
 var waiting_since := -1.0        ## player recovery time not yet answered by an attack
 var waiting_allow := RECOVER_ATTACK_MAX
 var stalls := 0
+## Phase B.
+const JAB_PHASE_MIN := 30.0       ## s at least...
+const JAB_PHASE_MAX := 100.0      ## ...until PARRIES_WANTED parries, at most this
+const PARRIES_WANTED := 4
+const JAB_GAP := 1.6              ## s between the dummy's jabs
+const JAB_REACH := 1.9            ## m: the dummy jabs when the Duelist is this close
+const COUNTER_LIMIT := 1.8        ## s from a parry to the counter (the parried stagger ~0.8 s comes first)
+var parries: Array[float] = []
+var launch_log: Array = []        ## [time, move]
 
 func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
@@ -40,7 +53,7 @@ func check(ok: bool, what: String) -> void:
 		failures += 1
 
 func _player_open() -> bool:
-	return not (player.is_down() or player.is_in_hitstun() or (player.combat and player.combat.held_by != null))
+	return not (player.is_down() or player.is_in_hitstun() or (player.carry and player.carry.is_held()))
 
 func _run() -> void:
 	AttackDirector.reset()
@@ -143,7 +156,82 @@ func _run() -> void:
 	check(stalls == 0, "attacks again within %.0f s after every player get-up (%d get-ups answered, gaps %s, %d stalls)" % [
 		RECOVER_ATTACK_MAX, recover_gaps.size(), str(recover_gaps.map(func(g: float) -> String: return "%.1f" % g)), stalls])
 	check(combat_starts == 0 or combat_starts == n, "combat.attack_started matches brain starts (%d / %d)" % [combat_starts, n])
+	await _phase_jabs()
 	_finish()
+
+## Phase B: the dummy jabs; the Duelist parries some and counters each one.
+func _phase_jabs() -> void:
+	var brain := duelist.brain as AIBrain
+	if not (duelist.defence != null and duelist.defence.is_enabled()):
+		print("[ai] info: Round 5 Defence is off: parry counters not checked")
+		return
+	GameEvents.parried.connect(func(d: Node3D, _a: Node3D) -> void:
+		if d == duelist: parries.append(Util.game_now()))
+	brain.attack_launched.connect(func(m: StringName) -> void: launch_log.append([Util.game_now(), m]))
+	# Back to the duel spawns, in the open (phase A may have knocked the dummy
+	# into the clutter); the dummy stays on its spot when on its feet.
+	var home := player.get_ground_position()
+	var yard := get_tree().get_first_node_in_group(&"arena")
+	if yard != null and yard.has_method(&"get_duel_spawns"):
+		var sp: Array = yard.get_duel_spawns()
+		home = (sp[0] as Transform3D).origin
+		while player.is_down():
+			await get_tree().physics_frame
+		player.global_position = home
+		player.reset_physics_interpolation()
+		if not duelist.is_down():
+			duelist.global_position = (sp[1] as Transform3D).origin
+			duelist.reset_physics_interpolation()
+	var jabs := 0
+	var next_jab := 0.0
+	var t0 := Util.game_now()
+	var counters0 := brain.parry_counters
+	var teleports0 := brain.counters_started
+	while Util.game_now() - t0 < JAB_PHASE_MAX:
+		var now := Util.game_now()
+		if now - t0 > JAB_PHASE_MIN and parries.size() >= PARRIES_WANTED and now - parries[-1] > COUNTER_LIMIT + 0.2:
+			break
+		await get_tree().physics_frame
+		if player.hp < player.max_hp * 0.4 and not player.is_dead():
+			player.heal_fraction(1.0)
+		if duelist.hp < duelist.max_hp * 0.3:
+			duelist.hp = duelist.max_hp
+		if not player.is_down() and Util.flat_dist(player.get_ground_position(), home) > 0.6:
+			player.global_position = home
+			player.reset_physics_interpolation()
+		var d := Util.flat_dist(duelist.get_ground_position(), player.get_ground_position())
+		var after_parry := not parries.is_empty() and now - parries[-1] < COUNTER_LIMIT + 0.2
+		if now >= next_jab and d < JAB_REACH and player.can_act() and not after_parry:
+			var to := duelist.get_ground_position() - player.get_ground_position()
+			to.y = 0.0
+			player.snap_facing(to)
+			player.combat.press(CombatController.Action.LIGHT)
+			await get_tree().physics_frame
+			player.combat.release(CombatController.Action.LIGHT)
+			jabs += 1
+			next_jab = Util.game_now() + JAB_GAP
+	var countered := 0
+	var gaps: Array[String] = []
+	var kinds := {}
+	for t in parries:
+		var hit := false
+		for l: Array in launch_log:
+			if l[0] > t and l[0] - t <= COUNTER_LIMIT and l[1] in [&"e_hook", &"counter"]:
+				countered += 1
+				gaps.append("%.2f" % (l[0] - t))
+				kinds[l[1]] = kinds.get(l[1], 0) + 1
+				hit = true
+				break
+		if not hit:
+			var after := launch_log.filter(func(l: Array) -> bool: return l[0] > t - 0.5 and l[0] - t < 3.0)
+			print("[ai] info: parry at %.2f s not countered; Duelist launches around it %s" % [t - t0,
+				str(after.map(func(l: Array) -> String: return "%s@%+.2f" % [l[1], l[0] - t]))])
+	print("[ai] info: phase B %.0f s: %d jabs, %d parries by the Duelist, %d countered %s (s after the parry: %s); brain: %d parry counters, %d teleport counters" % [
+		Util.game_now() - t0, jabs, parries.size(), countered, str(kinds), ", ".join(gaps),
+		brain.parry_counters - counters0, brain.counters_started - teleports0])
+	check(parries.size() >= 1, "the Duelist parries the player's jabs in Duel mode (%d of %d jabs)" % [parries.size(), jabs])
+	check(parries.size() > 0 and countered == parries.size(),
+		"every parry is followed by a counter within %.1f s (%d / %d)" % [COUNTER_LIMIT, countered, parries.size()])
 
 func _finish() -> void:
 	AttackDirector.reset()

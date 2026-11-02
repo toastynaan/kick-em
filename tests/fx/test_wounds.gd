@@ -66,6 +66,7 @@ func _ready() -> void:
 	f.hp = 250.0
 	var attacker_dir := chest.global_basis.z.normalized()  # attacker on the chest's +Z side
 	var info := U.hit(f, &"sparta_kick", chest.global_position, -attacker_dir, 60.0, 2500.0)
+	info.tier = HitInfo.Tier.KNOCKDOWN  # Round 5: blood (and wounds) from stagger up
 	GameEvents.hit_landed.emit(info)
 	pts = BloodFX.get_wound_points(chest)
 	if pts.size() != 1:

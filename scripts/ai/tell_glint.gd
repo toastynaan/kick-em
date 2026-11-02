@@ -1,34 +1,42 @@
 class_name TellGlint
 extends MeshInstance3D
-## Attack tell (spec: Enemies and AI, rule 5; Upgrade 2 U3 limb-glow tells).
-## The attacking fist or foot glows (BloodFX.limb_glow on the move's strike
-## bone from PoseLibrary.STRIKE_BONES), so where it glows shows the height:
-## fist at head height = HIGH, fist or foot at the waist = MID, foot at the
-## ankles = LOW (MoveData.hit_level). Colours: white strike (answer: Block,
-## crouch a high, jump a low), red grab (Grab, or duck it), blue teleport
-## counter (kind &"counter"). Until BloodFX.limb_glow exists (returns null)
-## the old billboard star above the head is shown instead, so a tell never
-## vanishes. Unshaded, drawn over everything, render layer Layers.VIS_FX.
-## Spawned by AttackDirector on GameEvents.attack_tell. OWNER: agent C (AI).
+## Attack tell (Feel Reference: Enemies have to be readable first; Sifu 1 at
+## 4.75 s). The attacking limb glows from the start of the wind-up until its
+## first active frame, on every enemy attack: ORANGE on strikes (answer:
+## parry, or teleport), BLUE on both hands for grabs (cannot be parried:
+## answer with Grab or a teleport). The Duelist's teleport counter is a strike
+## and glows orange too, brighter. A stick enemy's stick glows with his hand.
+## The glow is BloodFX.limb_glow on the move's strike bone (PoseLibrary.
+## STRIKE_BONES), so where it glows also shows the height: fist at head height
+## = HIGH, waist = MID, ankles = LOW. F keeps the Focus tint from dimming it.
+## Until BloodFX.limb_glow returns a glow the old billboard star above the head
+## is shown instead, so a tell never vanishes. Unshaded, drawn over
+## everything, render layer Layers.VIS_FX. Spawned by AttackDirector on
+## GameEvents.attack_tell. OWNER: agent C (AI).
 ##
-## A closing ring shrinks onto the glow (or star) and meets it exactly when
-## the perfect dodge window opens (active frame - Tuning.PERFECT_DODGE_WINDOW),
-## so the player can time the dodge. Subtle on strikes, strong on counters,
-## none on grabs (grabs are answered with Grab, not a dodge). Everything runs
-## on scaled game time like the attack's startup, so in Focus (world at 0.3x)
-## the tell, glow and ring all last 3.3x longer in real time together.
+## Timing: the glow starts on the physics tick the wind-up starts (resolved
+## with a deferred call, flushed at the end of that tick) and stops on the
+## attacker's CombatController.attack_active signal, its exact first active
+## frame, whatever hitstop or slow motion did to the startup in between.
+## A closing ring shrinks onto the glow and meets it exactly when the parry /
+## teleport window opens (active frame - Tuning.PARRY_WINDOW): subtle on
+## strikes and grabs, strong on counters. Everything runs on scaled game time
+## like the attack's startup, so in Focus (world at 0.3x) the tell, glow and
+## ring all last 3.3x longer in real time together.
 
-const STRIKE_COLOR := Color(1.0, 1.0, 1.0)
-const GRAB_COLOR := Color(1.0, 0.13, 0.08)
-const COUNTER_COLOR := Color(0.25, 0.6, 1.0)
-## Frames to wait for combat to report the move id before the star fallback.
-const LIMB_RESOLVE_TRIES := 3
+## The contract's tell colours (J's off-screen arrows use the same ones).
+const STRIKE_COLOR := Tuning.TELL_COLOR_STRIKE  ## orange: parry it
+const GRAB_COLOR := Tuning.TELL_COLOR_GRAB      ## blue: a grab, cannot be parried
+const COUNTER_COLOR := STRIKE_COLOR            ## the Duelist's counter is a strike
 ## BloodFX.limb_glow intensity per tell kind.
-const GLOW_INTENSITY := {&"strike": 1.0, &"grab": 1.0, &"counter": 1.4}
+const GLOW_INTENSITY := {&"strike": 1.2, &"grab": 1.2, &"counter": 1.6}
+## Glows are asked for this much longer than the tell and stopped on the
+## active frame (a hitstop during the wind-up delays it).
+const GLOW_SAFETY := 1.0
 ## Closing ring: scale at the tell's start and when it meets the star.
 const RING_START_SCALE := 3.4
 const RING_MEET_SCALE := 1.0
-const RING_ALPHA := {&"strike": 0.35, &"counter": 0.8}
+const RING_ALPHA := {&"strike": 0.35, &"grab": 0.3, &"counter": 0.8}
 ## Ring circle radius as a fraction of the quad's half size.
 const RING_RADIUS := 0.82
 ## Quad size in metres at scale 1.
@@ -43,6 +51,8 @@ const FLASH_TIME := 0.12
 ## Pulses per second during the tell.
 const PULSE_HZ := 7.0
 const TEXTURE_SIZE := 128
+## Bones never chosen as "the attacking limb" when the move lists a limb too.
+const TRUNK: Array[StringName] = [&"Hips", &"Spine", &"Chest"]
 
 static var _texture: ImageTexture
 static var _ring_texture: ImageTexture
@@ -50,6 +60,11 @@ static var _ring_texture: ImageTexture
 var attacker: Node3D
 var kind: StringName = &"strike"
 var duration := 0.5
+## AttackDirector.world_now() / physics frame when the limb glow started (-1: not yet).
+var glow_world_time := -1.0
+var glow_frame := -1
+## AttackDirector.world_now() when the glow stopped on the active frame (-1: not yet).
+var active_world_time := -1.0
 
 var _t := 0.0             ## Game seconds since the tell began.
 var _end_at := INF        ## _t at which the closing flash started.
@@ -59,12 +74,15 @@ var _mat: StandardMaterial3D
 var _color := STRIKE_COLOR
 var _ring: MeshInstance3D
 var _ring_mat: StandardMaterial3D
-var _meet_t := 0.0        ## _t at which the ring meets the star (dodge window opens).
+var _meet_t := 0.0        ## _t at which the ring meets the star (parry window opens).
 var _glows: Array[Node3D] = []  ## BloodFX limb glows (empty: star fallback)
 var _move_id: StringName = &""
-var _resolve_tries := 0
+var _resolved := false
+var _weapon_lit := false
+var _spawn_world := 0.0   ## AttackDirector.world_now() when the tell (wind-up) began
+var _spawn_frame := 0
 
-## Spawn a glint above `attacker` (replaces one already there).
+## Spawn a glint on `attacker` (replaces one already there).
 static func spawn(p_attacker: Node3D, p_kind: StringName, p_duration: float) -> TellGlint:
 	if p_attacker == null or not is_instance_valid(p_attacker) or not p_attacker.is_inside_tree():
 		return null
@@ -104,7 +122,7 @@ static func get_star_texture() -> ImageTexture:
 	return _texture
 
 ## A sharp 4-point star with thinner diagonal rays, a hot core and a faint
-## dark rim so a white glint still reads against a bright sky.
+## dark rim so the glint still reads against a bright sky.
 static func _make_star_image(n: int) -> Image:
 	var img := Image.create(n, n, false, Image.FORMAT_RGBA8)
 	var half := (n - 1) * 0.5
@@ -131,6 +149,8 @@ static func _astroid(x: float, y: float, reach: float) -> float:
 	return clampf(1.0 - s, 0.0, 1.0)
 
 func _ready() -> void:
+	_spawn_world = AttackDirector.world_now()
+	_spawn_frame = Engine.get_physics_frames()
 	top_level = true
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	layers = Layers.VIS_FX
@@ -142,8 +162,8 @@ func _ready() -> void:
 	_mat = _make_material(get_star_texture())
 	material_override = _mat
 	scale = Vector3.ONE * 0.2
-	# The ring meets the star when the perfect-dodge window opens. The tell
-	# runs on scaled game time; the window is real time.
+	# The ring meets the glow when the parry window opens. The tell runs on
+	# scaled game time; the window is real time.
 	_update_meet_time()
 	if RING_ALPHA.has(kind):
 		_ring = MeshInstance3D.new()
@@ -152,11 +172,17 @@ func _ready() -> void:
 		_ring.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 		_ring.layers = Layers.VIS_FX
 		_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		_ring.mesh = mesh
+		_ring.mesh = quad
 		_ring_mat = _make_material(get_ring_texture())
 		_ring.material_override = _ring_mat
 		add_child(_ring)
+	var f := attacker as Fighter
+	if f != null and f.combat != null:
+		f.combat.attack_active.connect(_on_attack_active)
 	_follow()
+	# B emits attack_tell just before it begins the move, so the move id is
+	# known by the end of this physics tick: resolve then (same tick).
+	_resolve_limb.call_deferred()
 
 static func color_for(p_kind: StringName) -> Color:
 	match p_kind:
@@ -182,6 +208,12 @@ func _make_material(tex: Texture2D) -> StandardMaterial3D:
 	m.render_priority = Material.RENDER_PRIORITY_MAX
 	return m
 
+func _exit_tree() -> void:
+	_stop_glows()
+	var f := attacker as Fighter
+	if f != null and is_instance_valid(f) and f.combat != null and f.combat.attack_active.is_connected(_on_attack_active):
+		f.combat.attack_active.disconnect(_on_attack_active)
+
 func _process(delta: float) -> void:
 	if attacker == null or not is_instance_valid(attacker):
 		queue_free()
@@ -189,15 +221,14 @@ func _process(delta: float) -> void:
 	_t += delta
 	var now := _t
 	var t := _t
-	if _resolve_tries < LIMB_RESOLVE_TRIES and _glows.is_empty():
-		_resolve_limb()
 	_update_meet_time()
-	if not _cancelled and _attack_aborted():
+	if not _cancelled and not is_finite(_end_at) and _attack_aborted():
 		_cancelled = true
 		_end_at = now
 		_stop_glows()
-	elif not is_finite(_end_at) and t >= duration:
+	elif not is_finite(_end_at) and t >= duration and not _awaiting_active():
 		_end_at = now
+		_stop_glows()
 	_follow()
 	var s: float
 	var alpha := 1.0
@@ -225,15 +256,33 @@ func _process(delta: float) -> void:
 		_ring.scale = Vector3.ONE * get_ring_scale()
 		_ring_mat.albedo_color = Color(_color.r, _color.g, _color.b, ring_alpha)
 
+## Still in the wind-up of a real attack (combat reports it): the glow waits
+## for attack_active instead of the nominal duration.
+func _awaiting_active() -> bool:
+	var f := attacker as Fighter
+	return f != null and f.combat != null and active_world_time < 0.0 \
+		and f.combat.is_attacking() and not f.combat.is_attack_active() and not f.combat.is_in_recovery()
+
+## The attack reached its first active frame: the glow ends here.
+func _on_attack_active(_move: StringName) -> void:
+	if active_world_time >= 0.0 or _cancelled:
+		return
+	active_world_time = AttackDirector.world_now()
+	_stop_glows()
+	if not is_finite(_end_at):
+		_end_at = _t
+
 ## Ring scale now: shrinks linearly from RING_START_SCALE to RING_MEET_SCALE
-## at the meet time, then stays on the star.
+## at the meet time, then stays on the glow.
 func get_ring_scale() -> float:
 	if _meet_t <= 0.0:
 		return RING_MEET_SCALE
 	return lerpf(RING_START_SCALE, RING_MEET_SCALE, clampf(_t / _meet_t, 0.0, 1.0))
 
-## Game seconds after the tell's start at which the ring meets the star.
+## Game seconds after the tell's start at which the ring meets the glow
+## (follows the current time scale).
 func get_meet_time() -> float:
+	_update_meet_time()
 	return _meet_t
 
 func get_ring() -> MeshInstance3D:
@@ -241,11 +290,18 @@ func get_ring() -> MeshInstance3D:
 
 ## True when the tell is a limb glow (BloodFX), false for the star fallback.
 func is_limb_glow() -> bool:
-	return not _glows.is_empty()
+	return not _glows.is_empty() or (glow_world_time >= 0.0 and mesh == null)
+
+## Live BloodFX glow handles (tests).
+func get_glows() -> Array[Node3D]:
+	return _glows
 
 ## Strike bone(s) the glow sits on (empty until resolved).
 func get_glow_bones() -> Array[StringName]:
 	return glow_bones(_move_id, kind)
+
+func get_move_id() -> StringName:
+	return _move_id
 
 ## Where the ring sits: the (first) glowing limb, or the star.
 func get_anchor_position() -> Vector3:
@@ -254,46 +310,66 @@ func get_anchor_position() -> Vector3:
 			return g.global_position
 	return global_position
 
-## The bones that glow for an enemy move: both hands for a grab, the strike
-## bone (fist or foot) otherwise; the chest for a shoulder charge.
+## The bones that glow for an enemy move: both hands for a grab, else the
+## attacking limb (fist or foot; the leading shoulder of a shoulder charge;
+## the stick hand of a stick attack).
 static func glow_bones(move_id: StringName, p_kind := &"strike") -> Array[StringName]:
 	var out: Array[StringName] = []
 	var bones: Array = PoseLibrary.STRIKE_BONES.get(move_id, [])
-	if p_kind == &"grab" or move_id == &"e_grab":
+	var id := String(move_id)
+	if p_kind == &"grab" or move_id in [&"e_grab", &"e_grab_slam"]:
 		for b: StringName in bones:
 			if String(b).ends_with("Hand"):
 				out.append(b)
-		if out.is_empty():
-			out.append_array([&"LeftHand", &"RightHand"])
+		if out.size() < 2:
+			out.assign([&"LeftHand", &"RightHand"])
 		return out
-	if not bones.is_empty():
-		out.append(bones[0])
-	elif String(move_id).contains("kick") or String(move_id).contains("sweep"):
+	for b: StringName in bones:
+		if not b in TRUNK:
+			out.append(b)
+			return out
+	if id.contains("kick") or id.contains("sweep"):
 		out.append(&"RightFoot")
+	elif id.contains("charge"):
+		out.append(&"LeftUpperArm")
+	elif id.contains("jab"):
+		out.append(&"LeftHand")
 	else:
 		out.append(&"RightHand")
 	return out
 
-## Ask BloodFX for a glow on the strike limb(s). The move id is known only
-## once combat has begun the move (attack_tell fires just before), so this
-## retries for a few frames. With no glow the star stays.
+## Ask BloodFX for a glow on the attacking limb(s), on the tick the wind-up
+## began. The move id comes from the brain (set just before it starts the
+## attack) or from combat (B has begun the move by now). With no glow the
+## star stays.
 func _resolve_limb() -> void:
-	_resolve_tries += 1
+	if _resolved or not is_inside_tree():
+		return
+	_resolved = true
 	var f := attacker as Fighter
-	if f == null or f.combat == null:
-		_resolve_tries = LIMB_RESOLVE_TRIES
+	if f == null:
 		return
-	_move_id = f.combat.current_move_id()
-	if _move_id == &"" and _resolve_tries < LIMB_RESOLVE_TRIES:
+	if f.brain != null and f.brain.has_method(&"get_tell_move"):
+		_move_id = f.brain.get_tell_move()
+	if _move_id == &"" and f.combat != null:
+		_move_id = f.combat.current_move_id()
+	if _attack_aborted() or active_world_time >= 0.0:
 		return
-	var remaining := maxf(duration - _t, 0.05)
+	var remaining := maxf(duration - _t, 0.05) + GLOW_SAFETY
 	var intensity: float = GLOW_INTENSITY.get(kind, 1.0)
 	for bone in glow_bones(_move_id, kind):
 		var g: Node3D = BloodFX.limb_glow(f, bone, _color, remaining, intensity)
 		if g != null:
 			_glows.append(g)
-	_resolve_tries = LIMB_RESOLVE_TRIES
-	if not _glows.is_empty():
+	if f.brain != null and f.brain.has_method(&"set_weapon_glow") and String(_move_id).begins_with("e_stick"):
+		f.brain.set_weapon_glow(_color, true)
+		_weapon_lit = true
+	if not _glows.is_empty() or _weapon_lit:
+		# Resolved in the tick the wind-up began (the deferred call flushes
+		# before that frame renders): the glow starts with the wind-up.
+		var same_tick := Engine.get_physics_frames() == _spawn_frame
+		glow_world_time = _spawn_world if same_tick else AttackDirector.world_now()
+		glow_frame = _spawn_frame if same_tick else Engine.get_physics_frames()
 		mesh = null  # the limb glows instead of the star; the ring stays
 
 func _stop_glows() -> void:
@@ -304,12 +380,17 @@ func _stop_glows() -> void:
 			else:
 				g.queue_free()
 	_glows.clear()
+	if _weapon_lit:
+		_weapon_lit = false
+		var f := attacker as Fighter
+		if f != null and is_instance_valid(f) and f.brain != null and f.brain.has_method(&"set_weapon_glow"):
+			f.brain.set_weapon_glow(_color, false)
 
-## The ring meets the glow when the perfect-dodge window opens. The tell runs
-## on scaled game time and the window is real time, so the meet point is
+## The ring meets the glow when the parry window opens. The tell runs on
+## scaled game time and the window is real time, so the meet point is
 ## re-derived each frame (Focus may start or end mid-tell).
 func _update_meet_time() -> void:
-	_meet_t = maxf(duration - Tuning.PERFECT_DODGE_WINDOW * Engine.time_scale, duration * 0.3)
+	_meet_t = maxf(duration - Tuning.PARRY_WINDOW * Engine.time_scale, duration * 0.3)
 
 func get_color() -> Color:
 	return _color
@@ -343,4 +424,4 @@ func _attack_aborted() -> bool:
 	if f.combat.is_attacking():
 		_seen_attacking = true
 		return false
-	return _seen_attacking
+	return _seen_attacking and active_world_time < 0.0

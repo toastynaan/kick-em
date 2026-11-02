@@ -22,8 +22,10 @@ func _ready() -> void:
 	a.set_script(FakePanel)
 	a.add_to_group(&"destructibles")
 	await U.physics_frames(get_tree(), 2)
-	for x in [-2.5, -1.0, 1.0, 2.5]:
-		BloodFX.splat(Vector3(x, 1.5, 0), Vector3(0, 0, -1), 5000.0)
+	# Round 5: a splat leaves 1-4 decals by energy (the round's blood budget is
+	# Tuning.BLOOD_DECAL_MAX), so use strong splats at more points.
+	for x in [-3.0, -1.8, -0.6, 0.6, 1.8, 3.0]:
+		BloodFX.splat(Vector3(x, 1.5, 0), Vector3(0, 0, -1), 9000.0)
 	await U.drain(get_tree())
 	var before := _on(a)
 	print("panel A: %d decals" % before.size())

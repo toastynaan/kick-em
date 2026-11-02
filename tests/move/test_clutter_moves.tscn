@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/move/test_clutter_moves.gd" id="1"]
+
+[node name="TestClutterMoves" type="Node3D"]
+script = ExtResource("1")

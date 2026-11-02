@@ -11,6 +11,9 @@ const HITBOX := 1 << 4         ## Attack query shapes / Area3D.
 const HURTBOX := 1 << 5        ## Fighter hurtbox Area3D on bones.
 const DEBRIS := 1 << 6         ## Large chunks, severed limbs.
 const DEBRIS_SMALL := 1 << 7   ## Small chunks. Never collide with each other.
+## Round 5: dead bodies. Walking capsules ignore them (no jitter over piles);
+## a foot Area3D nudges them instead. Nav treats them as walkable.
+const DEAD_BODY := 1 << 8
 
 # Masks
 ## Capsules walk on the world, are blocked by intact walls and by each other.
@@ -21,6 +24,9 @@ const MASK_CAPSULE := WORLD | DESTRUCTIBLE | CAPSULE
 const MASK_RAGDOLL := WORLD | DESTRUCTIBLE | CAPSULE | RAGDOLL | DEBRIS
 const MASK_DEBRIS := WORLD | DESTRUCTIBLE | CAPSULE | RAGDOLL | DEBRIS | DEBRIS_SMALL
 const MASK_DEBRIS_SMALL := WORLD | DESTRUCTIBLE | CAPSULE | RAGDOLL | DEBRIS
+## Dead bodies rest on the world and on each other, take debris and other bodies,
+## but never capsules.
+const MASK_DEAD_BODY := WORLD | DESTRUCTIBLE | RAGDOLL | DEBRIS | DEAD_BODY
 
 # Render (visual) layers
 const VIS_WORLD := 1 << 0

@@ -101,14 +101,15 @@ func _hit(f: Fighter, bone: StringName) -> bool:
 	info.move_id = move_id
 	info.kind = &"projectile"
 	info.damage = damage
-	info.reaction = HitInfo.Reaction.STAGGER
+	# Round 5: a thrown prop is a stagger (Feel Reference: Props), its tier preset.
+	info.tier = HitInfo.Tier.STAGGER
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
 	var d := Vector3(v.x, 0.0, v.z)
 	info.hit_direction = d.normalized() if d.length() > 0.1 else Vector3.FORWARD
 	info.hit_position = body.global_position
 	info.hit_bone = bone
-	info.hitstop = Tuning.HITSTOP[&"enemy"]
+	info.hitstop = Power.hitstop_for(info.tier)
 	info.energy = 0.5 * body.mass * v.length_squared()
-	info.set_meta(&"shake", 0.15)
 	info.set_meta(&"strength", stagger_strength)
 	var res := f.take_hit(info)
 	if res == HitInfo.Result.DODGED or res == HitInfo.Result.IGNORED:

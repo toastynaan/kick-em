@@ -57,7 +57,7 @@ func _ready() -> void:
 	var g := U.make_fighter(self, Vector3(-2, 0, -1.5))
 	await get_tree().process_frame
 	GameEvents.hit_landed.emit(U.hit(g, &"sparta_kick", g.global_position + Vector3(0, 1.35, 0.12),
-			Vector3(0, 0, -1), 60.0, 4000.0))
+			Vector3(0, 0, -1), 60.0, 4000.0, &"strike", HitInfo.Tier.LAUNCH))
 	GameEvents.limb_severed.emit(g, &"head", null)
 	await U.drain(get_tree())
 	red = 0
@@ -75,8 +75,11 @@ func _ready() -> void:
 
 func _fire_everything(f: Node3D, panel: Node3D) -> void:
 	var chest := f.global_position + Vector3(0, 1.35, 0.12)
-	GameEvents.hit_landed.emit(U.hit(f, &"sparta_kick", chest, Vector3(0, 0, -1), 60.0, 4000.0))
-	GameEvents.hit_landed.emit(U.hit(f, &"back_kick", chest, Vector3(0, 0, -1), 90.0, 9000.0, &"counter"))
+	GameEvents.hit_landed.emit(U.hit(f, &"sparta_kick", chest, Vector3(0, 0, -1), 60.0, 4000.0,
+			&"strike", HitInfo.Tier.KNOCKDOWN))
+	GameEvents.hit_landed.emit(U.hit(f, &"back_kick", chest, Vector3(0, 0, -1), 90.0, 9000.0, &"counter",
+			HitInfo.Tier.HARD_LAUNCH))
+	f.hp = 400.0  # wounded: body impacts bleed (Round 5)
 	f.com_velocity = Vector3(0, -2, -8)
 	GameEvents.body_impact.emit(f, Vector3(0, 1.0, -2.9), Vector3(0, 0, 1), 3500.0, &"concrete")
 	GameEvents.body_impact.emit(f, Vector3(0, 0.0, -1.0), Vector3.UP, 2000.0, &"floor")

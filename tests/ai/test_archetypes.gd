@@ -81,7 +81,7 @@ func _run() -> void:
 	check(brute_ok and not moves[&"brute"].is_empty(), "Brute uses its moves (charge / heavy / grab): %s" % str(moves[&"brute"]))
 	check(moves[&"thrower"].has(&"e_throw_debris") and throw_dists.min() >= 3.0,
 		"Thrower throws debris from range (distances %s)" % str(throw_dists))
-	check(max_holders <= Tuning.TOKENS[Tuning.difficulty], "token cap holds (max %d)" % max_holders)
+	check(max_holders <= mini(Tuning.TOKENS[Tuning.difficulty], Tuning.TOKEN_MAX), "token cap holds (max %d)" % max_holders)
 	_finish()
 
 func _all_done() -> bool:

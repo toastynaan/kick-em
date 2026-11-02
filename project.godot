@@ -22,9 +22,11 @@ GameEvents="*res://scripts/core/game_events.gd"
 TimeDirector="*res://scripts/core/time_director.gd"
 DebrisManager="*res://scripts/world/debris_manager.gd"
 ImpactResolver="*res://scripts/world/impact_resolver.gd"
+WorldDamage="*res://scripts/world/world_damage.gd"
 AttackDirector="*res://scripts/ai/attack_director.gd"
 BloodFX="*res://scripts/fx/blood_fx.gd"
 AudioFX="*res://scripts/fx/audio_fx.gd"
+ScreenFX="*res://scripts/fx/screen_fx.gd"
 
 [display]
 
@@ -56,6 +58,7 @@ joypads/ignore_joypad_on_unfocused_application=true
 3d_physics/layer_6="hurtbox"
 3d_physics/layer_7="debris"
 3d_physics/layer_8="debris_small"
+3d_physics/layer_9="dead_body"
 
 [physics]
 

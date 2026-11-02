@@ -1,8 +1,16 @@
 extends Node
 ## Autoload "BloodFX" (spec: Blood). Sprays (pooled GPUParticles3D with
-## particle colliders), wall/floor splat decals placed by raycasts (shared cap
-## Tuning.DECAL_MAX, oldest fade first), impact smears, growing pools, the
-## per-fighter wound mask (fighter.gdshader blood_points), stump sprays.
+## particle colliders), wall/floor splat decals placed by raycasts, impact
+## smears, growing pools, the per-fighter wound mask (fighter.gdshader
+## blood_points), stump sprays.
+## Round 5 (Feel Reference: Contact frame, Effects that sell power): the
+## contact frame follows the hit TIER (flash size, a shock ring from launch up
+## at most once per Tuning.FX_RING_GAP, blood none / small / more, the victim's
+## mesh jitter during the freeze); the charge glow; parry, sidestep and body
+## effects; world effects for movement live in the WorldFX child
+## (scripts/fx/world_fx.gd). Decals persist for the round within caps: blood
+## decals at most Tuning.BLOOD_DECAL_MAX, marks (floor cracks) MARK_DECAL_MAX,
+## the oldest fading first; get_decal_counts() reports them (end-of-wave check).
 ## Mostly event-driven: listens to GameEvents (hit_landed, body_impact,
 ## fighter_died, limb_severed, wall_broken). Respects Tuning.gore.
 ## OWNER: agent F (blood & audio). CONTRACT STUB: keep the public API.
@@ -25,15 +33,14 @@ const SPRAY_MAX_DROPS := 96       ## Droplets per spray emitter at full energy
 const STUMP_POOL := 4             ## Arterial stump emitters
 const SPARK_POOL := 6             ## Block sparks
 const DUST_POOL := 8              ## Dust puff + chip emitter pairs
-const STUMP_TIME := 2.0           ## s of arterial spray (spec)
+const STUMP_TIME := 1.5           ## s of arterial spray (Feel Reference: Dismemberment step 5)
 const STUMP_PULSE_HZ := 2.2       ## Heartbeat pulses per second
-const STUMP_DRIP_EVERY := 0.3     ## s between stump splat requests
+const STUMP_DRIP_EVERY := 0.5     ## s between stump splat requests (3 drips in 1.5 s: the 30-decal budget)
 const SPLAT_VARIANTS := 6
 const SMEAR_VARIANTS := 3
 const POOL_VARIANTS := 2
 const TEX_SIZE := 128
 const DECAL_DEPTH := 0.3          ## m, projection depth (short for culling)
-const DECAL_SOFT_MARGIN := 24     ## Oldest decals start fading this far below the cap
 const DECAL_FADE_TIME := 0.8      ## s
 const POOL_GROW_TIME := 4.0       ## s (spec)
 const POOL_MAX_SIZE := 1.2        ## m (spec)
@@ -51,9 +58,8 @@ const WOUND_MIN_PART := 0.06      ## m; smaller parts (eyes, nose) are skipped
 const FLASH_TIME := 0.09          ## s white hit flash
 const RAY_BUDGET := 96            ## rays per physics tick
 const QUEUE_MAX := 512            ## pending decal requests
-const PIECE_TRACK_TIME := 8.0     ## s
-const PIECE_TRAIL_MAX := 8        ## decals per severed piece
-const HIT_DAMAGE_TO_ENERGY := 25.0  ## J per damage point for hits that do not launch
+const PIECE_TRACK_TIME := 4.0     ## s: a limb still moving after this pools where it is
+const PIECE_TRAIL_MAX := 3        ## marks per severed piece: where it lands + 2 slide marks (+ a pool at rest)
 const WALL_BODY_RADIUS := 2.5     ## m; a wall break bleeds only with a launched body this close
 const HOLE_FALLBACK_RADIUS := 0.9  ## m; decals this close to a hole go when the panel has no is_point_open
 const STRIKE_FULL_POWER := 400.0  ## wall-strike power that makes the biggest dust and chips
@@ -79,10 +85,16 @@ const DUST_BY_SURFACE := {
 	&"concrete": Color(0.62, 0.62, 0.6),
 	&"wood": Color(0.58, 0.45, 0.3),
 	&"floor": Color(0.6, 0.57, 0.5),
+	# Round 6 surfaces (clutter, plaza tiles, offices, outside).
+	&"glass": Color(0.82, 0.9, 0.95),
+	&"cardboard": Color(0.66, 0.55, 0.38),
+	&"fabric": Color(0.86, 0.84, 0.8),
+	&"tile": Color(0.72, 0.7, 0.66),
+	&"dirt": Color(0.5, 0.42, 0.32),
 }
 const SPARK_COLOR := Color(1.0, 0.85, 0.45)
 
-enum Req { SPLAT, SMEAR, FLOOR_SMEAR, POOL, TRAIL }
+enum Req { SPLAT, SMEAR, FLOOR_SMEAR, POOL, TRAIL, MARK }
 
 ## Random source (tests may seed it).
 var rng := RandomNumberGenerator.new()
@@ -148,6 +160,8 @@ var _piece_time := PackedFloat32Array()
 var _piece_still := PackedFloat32Array()
 var _piece_dist := PackedFloat32Array()
 var _piece_trails := PackedInt32Array()
+## Where tracked severed limbs first touched down (tests, newest last).
+var piece_landings: Array[Vector3] = []
 
 # Arena particle collision
 var _arena_id := 0
@@ -168,6 +182,7 @@ func _ready() -> void:
 	_build_textures()
 	_build_emitters()
 	_build_upgrade2()
+	_build_round5()
 	_connect_events()
 
 
@@ -221,6 +236,9 @@ func reset() -> void:
 		_recycle(d)
 	_live.clear()
 	_fading.clear()
+	_decals_created.clear()
+	_decals_evicted = 0
+	_decals_released = 0
 	_growing.clear()
 	_pool_of.clear()
 	for list in [_sprays, _sparks, _puffs, _chips, _stumps]:
@@ -252,6 +270,7 @@ func reset() -> void:
 	_lying.clear()
 	_pooled.clear()
 	_reset_upgrade2()
+	_reset_round5()
 
 
 # --- Extra API ---------------------------------------------------------------
@@ -368,22 +387,49 @@ func _connect_events() -> void:
 	GameEvents.arm_broken.connect(_on_arm_broken)
 	GameEvents.wall_struck.connect(_on_wall_struck)
 
+## Round 5 contact frame (Feel Reference: Contact frame items 2-4), all on the
+## physics frame of hit_landed: the victim's body flashes and its mesh jitters
+## through the freeze; a white radial flash at the contact point sized by
+## tier, plus a shock ring from launch up (one per Tuning.FX_RING_GAP); blood
+## by tier: none on flinch (or a sweep's stumble), a small spray on stagger,
+## more from knockdown up; a ground strike adds a spray into the floor.
+## Grabs do not bleed; a throw bleeds when the body lands (body_impact).
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null or not is_instance_valid(info.victim):
 		return
-	var e := maxf(info.energy, info.damage * HIT_DAMAGE_TO_ENERGY)
+	_drop_charge_glow(info.victim)  # a hit knocks the victim out of any charge
+	var tier := FXRules.tier_of(info)
 	var at := _hit_point(info)
-	# The player's wounds are drawn larger so damage taken reads without the HP bar.
-	var scale := PLAYER_WOUND_SCALE if info.victim.is_in_group(&"player") else 1.0
-	_wound(info.victim, at, clampf(info.damage / 100.0, 0.15, 1.0), info.hit_direction, scale)
+	var frame := Engine.get_physics_frames()
+	var rec := {"frame": frame, "tier": tier, "flash": false, "ring": false, "blood": false}
 	_flash(info.victim)
 	if info.kind != &"grab":
-		impact_flash(at, impact_power(info), info.charge_level >= 3)
-	# Spray above a jab only. Grabs do not bleed; a throw bleeds when it lands (body_impact).
-	if info.kind == &"grab" or info.kind == &"throw" or String(info.move_id).begins_with("jab"):
-		return
-	spray(at, info.hit_direction, e)
-	splat(at, info.hit_direction, e)
+		var ring := tier >= HitInfo.Tier.LAUNCH and _ring_allowed()
+		impact_flash(at, TIER_FLASH[clampi(tier, 0, TIER_FLASH.size() - 1)], false, ring)
+		rec["flash"] = true
+		rec["ring"] = ring
+		_jitter_start(info.victim, tier)
+	var bleeds := info.kind != &"grab" and info.kind != &"throw"
+	var spray_e: float = TIER_SPRAY[clampi(tier, 0, TIER_SPRAY.size() - 1)]
+	# Knees and headbutts on a held body are flinch-tier but bleed a little
+	# (Feel Reference: Actions while holding; G tags them meta blood = &"small").
+	if spray_e <= 0.0 and info.has_meta(&"blood") and StringName(info.get_meta(&"blood")) == &"small":
+		spray_e = HELD_STRIKE_SPRAY
+	if bleeds and spray_e > 0.0:
+		# The player's wounds are drawn larger so damage taken reads without the HP bar.
+		var scale := PLAYER_WOUND_SCALE if info.victim.is_in_group(&"player") else 1.0
+		_wound(info.victim, at, TIER_WOUND[clampi(tier, 0, TIER_WOUND.size() - 1)], info.hit_direction, scale)
+		spray(at, info.hit_direction, spray_e)
+		splat(at, info.hit_direction, spray_e)
+		rec["blood"] = true
+	if bleeds and info.ground_strike:
+		spray(at, (Vector3.DOWN + info.hit_direction * 0.4).normalized(), GROUND_SPRAY)
+		splat(at, Vector3.DOWN, GROUND_SPRAY)
+		rec["blood"] = true
+	refresh_blood_level(info.victim)
+	contact_log.append(rec)
+	if contact_log.size() > 64:
+		contact_log.pop_front()
 
 func _on_hit_blocked(info: HitInfo) -> void:
 	if info == null:
@@ -405,11 +451,19 @@ func _hit_point(info: HitInfo) -> Vector3:
 		return rig.call(&"get_bone_global_position", info.hit_bone)
 	return info.victim.global_position + Vector3.UP * 1.3
 
+## Round 5 (Feel Reference: On the world > Body hits the floor hard): a dust
+## puff in the surface's colour (chips off hard walls on big hits), and blood
+## only if the body is wounded: a smear on the surface and a small spray. On
+## water: ripple rings and a splash instead of dust and blood.
 func _on_body_impact(fighter: Node3D, position: Vector3, normal: Vector3, energy: float,
 		surface: StringName) -> void:
 	if energy <= Tuning.IMPACT_MIN_ENERGY:
 		return
 	var n := _safe_dir(normal, Vector3.UP)
+	if surface == &"water":
+		if _world != null:
+			_world.call(&"water_impact", position, energy)
+		return
 	var vel := Vector3.ZERO
 	if is_instance_valid(fighter) and fighter.has_method(&"get_com_velocity"):
 		vel = fighter.call(&"get_com_velocity")
@@ -417,17 +471,18 @@ func _on_body_impact(fighter: Node3D, position: Vector3, normal: Vector3, energy
 	var out := n
 	if tangent.length_squared() > 0.01:
 		out = (n * 0.6 + tangent.normalized() * 0.8).normalized()
-	spray(position, out, energy * 0.6)
-	if surface != &"body" and surface != &"debris":
-		smear(position, n, vel, energy)
-	# U7: a dust burst where a body hits the floor or a wall; hard surfaces
-	# (pillars, outer walls, brick) also throw chips on big hits.
-	if surface != &"body" and surface != &"debris" and energy >= IMPACT_DUST_ENERGY:
+	var solid := surface != &"body" and surface != &"debris"
+	if solid:
 		var chips := energy >= CONCRETE_DUST_ENERGY and (surface == &"concrete" or surface == &"brick")
-		dust(position + n * 0.05, DUST_BY_SURFACE.get(surface, DUST_BY_SURFACE[&"floor"]), energy * 0.5, n, chips)
-	splat(position + n * 0.2, out, energy * 0.5)
-	if is_instance_valid(fighter):
+		dust(position + n * 0.05, DUST_BY_SURFACE.get(surface, DUST_BY_SURFACE[&"floor"]),
+				maxf(energy * 0.5, IMPACT_DUST_ENERGY * 0.5), n, chips)
+	var wounded := is_instance_valid(fighter) and _blood_level(fighter) >= WOUNDED_LEVEL
+	if wounded:
+		spray(position, out, energy * 0.3)
+		if solid:
+			smear(position, n, vel, energy)
 		_wound(fighter, position, clampf(energy / 6000.0, 0.2, 1.0), n)
+	if is_instance_valid(fighter):
 		refresh_blood_level(fighter)
 
 func _on_wall_broken(wall: Node3D, position: Vector3, energy: float, velocity: Vector3) -> void:
@@ -546,6 +601,8 @@ func _process(delta: float) -> void:
 	_update_flashes(delta)
 	_update_stumps(delta)
 	var real := delta / maxf(Engine.time_scale, 0.001)
+	_update_jitter(real)
+	_update_charge_glows(real)
 	_update_impact_flashes(real)
 	_update_swirls(delta)
 	_update_highlight(real)
@@ -585,7 +642,9 @@ func _update_fades(delta: float) -> void:
 		_fading.erase(id)
 		var d := instance_from_id(id) as Decal
 		if d != null:
-			_live.erase(d)
+			if _live.has(d):
+				_live.erase(d)
+				_decals_evicted += 1
 			_recycle(d)
 
 func _update_growth(delta: float) -> void:
@@ -729,14 +788,19 @@ func _update_pieces(delta: float) -> void:
 		var pos := body.global_position
 		_piece_time[i] += delta
 		var speed := v.length()
-		# A bounce: sharp velocity change while it was moving.
+		# A bounce: sharp velocity change while it was moving. The first one is
+		# where the limb lands (Feel Reference: Dismemberment step 5): a bigger mark.
 		if pv.length() > 1.5 and (v - pv).length() > 2.0 and _piece_trails[i] < PIECE_TRAIL_MAX:
-			_enqueue(Req.TRAIL, pos, pv.normalized(), Vector3.ZERO, 0.35, 0)
+			_enqueue(Req.TRAIL, pos, pv.normalized(), Vector3.ZERO, 0.45 if _piece_trails[i] == 0 else 0.3, 0)
+			if _piece_trails[i] == 0:
+				piece_landings.append(pos)
+				if piece_landings.size() > 16:
+					piece_landings.pop_front()
 			_piece_trails[i] += 1
 			_piece_dist[i] = 0.0
-		# Rolling / sliding: a smaller mark every 0.6 m (only lands if near a surface).
+		# Rolling / sliding after it has landed: a smaller mark every 0.6 m.
 		_piece_dist[i] += speed * delta
-		if _piece_dist[i] > 0.6 and _piece_trails[i] < PIECE_TRAIL_MAX:
+		if _piece_trails[i] >= 1 and _piece_dist[i] > 0.6 and _piece_trails[i] < PIECE_TRAIL_MAX:
 			_enqueue(Req.TRAIL, pos, Vector3.DOWN, Vector3.ZERO, 0.22, 0)
 			_piece_trails[i] += 1
 			_piece_dist[i] = 0.0
@@ -805,6 +869,8 @@ func _resolve_requests() -> void:
 				rays += _do_pool(space, _rq_pos[i], _rq_val[i], _rq_owner[i])
 			Req.TRAIL:
 				rays += _do_trail(space, _rq_pos[i], _rq_dir[i], _rq_val[i])
+			Req.MARK:
+				rays += _do_mark(space, _rq_pos[i], _rq_val[i])
 	if _rq_head >= _rq_type.size():
 		_clear_queue()
 
@@ -814,7 +880,9 @@ func _cast(space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> Dict
 	return space.intersect_ray(_ray)
 
 func _do_splat(space: PhysicsDirectSpaceState3D, pos: Vector3, dir: Vector3, energy: float) -> int:
-	var n := clampi(3 + int(energy / 2500.0), 3, 6)
+	# Round 5: blood decals cap at Tuning.BLOOD_DECAL_MAX for the whole round, so
+	# a hit leaves 1 (stagger) to 4 (severing launch) marks, not a carpet.
+	var n := clampi(1 + int(energy / 3000.0), 1, 4)
 	var reach := clampf(1.2 + energy / 2500.0, 1.2, 5.0)
 	var size := clampf(0.22 + energy / 9000.0, 0.22, 0.9)
 	var spread := deg_to_rad(lerpf(18.0, 32.0, clampf(energy / 9000.0, 0.0, 1.0)))
@@ -939,8 +1007,10 @@ func _decal_color(blood: Color) -> Color:
 	return blood
 
 func _place_decal(pos: Vector3, normal: Vector3, size: Vector2, tex: Texture2D, color: Color,
-		tangent_hint: Vector3, collider: Object) -> Decal:
+		tangent_hint: Vector3, collider: Object, kind := &"blood") -> Decal:
 	var d := _alloc_decal()
+	d.set_meta(&"fx_kind", kind)
+	_decals_created[kind] = int(_decals_created.get(kind, 0)) + 1
 	var n := _safe_dir(normal, Vector3.UP)
 	var x := Vector3.ZERO
 	if tangent_hint.length_squared() > 0.0001:
@@ -1000,25 +1070,81 @@ func _start_fade(d: Decal) -> void:
 	_growing.erase(id)
 	_fading[id] = Vector2(DECAL_FADE_TIME, d.modulate.a)
 
-## Shared cap: never more than Tuning.DECAL_MAX; past the soft cap the oldest fade out.
+## Round 5 caps per kind: at most Tuning.BLOOD_DECAL_MAX blood decals (marks:
+## MARK_DECAL_MAX) that are not fading; past it the oldest of that kind fades
+## out over DECAL_FADE_TIME. A burst that leaves more than FADE_SLACK of one
+## kind still fading recycles the oldest at once.
 func _enforce_cap() -> void:
+	_prune_live()
 	var i := 0
-	while i < _live.size():  # drop entries freed with their wall
+	for kind: StringName in [&"blood", &"mark"]:
+		var cap: int = Tuning.BLOOD_DECAL_MAX if kind == &"blood" else MARK_DECAL_MAX
+		var active := 0
+		var total := 0
+		for d in _live:
+			if _kind_of(d) == kind:
+				total += 1
+				if not _fading.has((d as Decal).get_instance_id()):
+					active += 1
+		i = 0
+		while (active > cap or total > cap + FADE_SLACK) and i < _live.size():
+			var d := _live[i] as Decal
+			if _kind_of(d) != kind:
+				i += 1
+				continue
+			if total > cap + FADE_SLACK:
+				if not _fading.has(d.get_instance_id()):
+					active -= 1
+				_live.remove_at(i)
+				_recycle(d)
+				_decals_evicted += 1
+				total -= 1
+				continue
+			if not _fading.has(d.get_instance_id()):
+				_start_fade(d)
+				active -= 1
+			i += 1
+
+## Drop entries freed with their wall (they count as released).
+func _prune_live() -> void:
+	var i := 0
+	while i < _live.size():
 		if is_instance_valid(_live[i]):
 			i += 1
 		else:
 			_live.remove_at(i)
-	while _live.size() > Tuning.DECAL_MAX:
-		_recycle(_live.pop_front())
-	var soft := Tuning.DECAL_MAX - DECAL_SOFT_MARGIN
-	var active := _live.size() - _fading.size()
-	i = 0
-	while active > soft and i < _live.size():
-		var d := _live[i] as Decal
-		if not _fading.has(d.get_instance_id()):
-			_start_fade(d)
-			active -= 1
-		i += 1
+			_decals_released += 1
+
+static func _kind_of(d: Object) -> StringName:
+	return StringName((d as Node).get_meta(&"fx_kind", &"blood"))
+
+## Decal bookkeeping since the last reset() (Feel Reference F11: the end-of-wave
+## counts match what was created). created == live + fading + evicted + released.
+## live: on screen and not fading; blood / marks: live by kind; evicted: faded
+## out by the caps; released: taken away with a broken wall.
+func get_decal_counts() -> Dictionary:
+	_prune_live()
+	var live := 0
+	var fading := 0
+	var blood := 0
+	var marks := 0
+	for d in _live:
+		if not is_instance_valid(d):
+			continue
+		if _fading.has((d as Decal).get_instance_id()):
+			fading += 1
+			continue
+		live += 1
+		if _kind_of(d) == &"mark":
+			marks += 1
+		else:
+			blood += 1
+	var created := 0
+	for k: StringName in _decals_created:
+		created += int(_decals_created[k])
+	return {"created": created, "live": live, "fading": fading, "evicted": _decals_evicted,
+		"released": _decals_released, "blood": blood, "marks": marks,
+		"blood_created": int(_decals_created.get(&"blood", 0)), "marks_created": int(_decals_created.get(&"mark", 0))}
 
 ## A broken panel takes its decals with it.
 ## A hole in a panel takes only the decals over the open cells (local
@@ -1045,6 +1171,7 @@ func _release_decals_over_holes(wall: Node, hole: Vector3) -> void:
 		if drop:
 			_live.remove_at(i)
 			_recycle(d)
+			_decals_released += 1
 		else:
 			i += 1
 
@@ -1743,7 +1870,8 @@ var _hl_parts: Array[MeshInstance3D] = []
 var _hl_level := 0.0
 var _hl_age := 0.0
 var _hl_halo: MeshInstance3D
-var _fade_of: Dictionary = {}             ## fighter id -> last view_fade
+var _fade_of: Dictionary = {}             ## fighter id -> last view_fade (absent = 0)
+var _fade_mats: Dictionary = {}           ## fighter id -> its parts' ShaderMaterials while faded
 var _struck_frame: Dictionary = {}        ## wall id -> process frame of its last wall_struck
 
 
@@ -1788,20 +1916,43 @@ func active_glows() -> int:
 func _on_glow_exit(handle: Node) -> void:
 	_glows.erase(handle)
 
-## Fade a fighter that blocks the camera's view (0 = opaque, 1 = gone). A
-## screen-door dither in fighter.gdshader (view_fade); a faint silhouette stays.
+## Fade a fighter that blocks the camera's view, or the player when walls push
+## the camera close (0 = opaque, 1 = gone). A screen-door dither in
+## fighter.gdshader (view_fade), the same look as the world blocker fade; it
+## covers every mesh part with its blood and wounds, and glows and the dazed
+## swirl on that fighter fade with it. Shadows stay solid. Nothing is swapped:
+## materials, shadow casting and render priority never change, and 0 writes
+## an exact 0. Repeated calls with the same amount return at once; while a
+## fighter is faded its materials are cached, so per-call cost is one uniform
+## write per part and no allocation.
 func set_fighter_fade(fighter: Node3D, amount: float) -> void:
 	if not is_instance_valid(fighter):
 		return
 	var a := clampf(amount, 0.0, 1.0)
 	var id := fighter.get_instance_id()
-	if absf(float(_fade_of.get(id, 0.0)) - a) < 0.005:
+	var old: float = _fade_of.get(id, 0.0)
+	if absf(old - a) < 0.004 and (a > 0.0 or old == 0.0):
 		return
-	_fade_of[id] = a
-	for part in _mesh_parts(fighter):
-		var mat := _part_material(part)
-		if mat != null:
-			mat.set_shader_parameter(&"view_fade", a)
+	var mats: Array = _fade_mats.get(id, [])
+	var rig := _rig_of(fighter)
+	var count := (rig.call(&"get_mesh_parts") as Array).size() if rig != null else 0
+	if mats.size() != count:  # first fade, or parts added (a stump cap after a sever)
+		mats = []
+		for part in _mesh_parts(fighter):
+			var mat := _part_material(part)
+			if mat != null:
+				mats.append(mat)
+		while mats.size() < count:  # parts without the fighter shader keep the count stable
+			mats.append(null)
+		_fade_mats[id] = mats
+	for m in mats:
+		if m != null:
+			(m as ShaderMaterial).set_shader_parameter(&"view_fade", a)
+	if a > 0.0:
+		_fade_of[id] = a
+	else:
+		_fade_of.erase(id)
+		_fade_mats.erase(id)
 
 ## Current view fade of a fighter (tests, debug).
 func get_fighter_fade(fighter: Node3D) -> float:
@@ -1901,15 +2052,9 @@ func _focus_active() -> bool:
 
 # --- Impact flash (U7) -----------------------------------------------------------
 
-## 0..1 hit power for the flash: launch energy, damage and charge level.
-static func impact_power(info: HitInfo) -> float:
-	var p := sqrt(clampf(info.energy / IMPACT_FULL_ENERGY, 0.0, 1.0))
-	p = maxf(p, clampf(info.damage / 150.0, 0.0, 1.0))
-	p = maxf(p, clampf(info.charge_level / 3.0, 0.0, 1.0))
-	return clampf(p, 0.05, 1.0)
-
-## A 2-3 frame radial flash plus an expanding streak ring at a contact point.
-func impact_flash(position: Vector3, power: float, charged := false) -> void:
+## A 2-3 frame radial flash at a contact point, plus an expanding shock ring
+## when `ring` (Round 5: launch tier and up, budgeted by the caller).
+func impact_flash(position: Vector3, power: float, charged := false, ring := true) -> void:
 	var i := _impact_next
 	_impact_next = (_impact_next + 1) % IMPACT_POOL
 	_impact_age[i] = 0.0
@@ -1922,7 +2067,8 @@ func impact_flash(position: Vector3, power: float, charged := false) -> void:
 	f.set_instance_shader_parameter(&"spin", rng.randf() * TAU)
 	r.set_instance_shader_parameter(&"spin", rng.randf() * TAU)
 	f.visible = true
-	r.visible = true
+	r.visible = ring
+	_impact_ring_on[i] = ring
 	_update_impact_flash(i, 0.0)
 
 ## Flashes currently showing (tests, debug).
@@ -1958,6 +2104,7 @@ func _update_impact_flash(i: int, age: float) -> void:
 	var ru := clampf(age / IMPACT_RING_TIME, 0.0, 1.0)
 	var rs := lerpf(IMPACT_RING_SIZE.x, IMPACT_RING_SIZE.y, p) * (0.35 + 0.65 * (1.0 - pow(1.0 - ru, 2.5)))
 	r.scale = Vector3(rs, rs, rs)
+	r.visible = _impact_ring_on[i]
 	r.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, IMPACT_BRIGHTNESS * 0.8 * pow(1.0 - ru, 1.5)))
 
 # --- Dazed swirl, stumble and trip dust, broken arm ---------------------------------
@@ -2013,7 +2160,8 @@ func _place_swirl(i: int) -> void:
 	var node := _swirls[i]
 	node.global_position = head + Vector3.UP * SWIRL_HEIGHT
 	var age := _swirl_age[i]
-	var fade := clampf(_swirl_time[i] / 0.25, 0.0, 1.0) * clampf(age / 0.1, 0.0, 1.0)
+	var fade := clampf(_swirl_time[i] / 0.25, 0.0, 1.0) * clampf(age / 0.1, 0.0, 1.0) \
+			* (1.0 - get_fighter_fade(f))
 	for k in SWIRL_STARS:
 		var star := node.get_child(k) as MeshInstance3D
 		var ang := age * SWIRL_SPEED + k * TAU / SWIRL_STARS
@@ -2065,6 +2213,7 @@ func _build_upgrade2() -> void:
 	_impact_age.resize(IMPACT_POOL)
 	_impact_age.fill(-1.0)
 	_impact_power.resize(IMPACT_POOL)
+	_impact_ring_on.resize(IMPACT_POOL)
 	for i in IMPACT_POOL:
 		_impact_nodes.append(_fx_quad(_impact_mat, "ImpactFlash%d" % i, _holder))
 		_impact_rings.append(_fx_quad(_impact_ring_mat, "ImpactRing%d" % i, _holder))
@@ -2096,6 +2245,7 @@ func _reset_upgrade2() -> void:
 		_swirl_fighter[i] = null
 		_swirls[i].visible = false
 	_fade_of.clear()
+	_fade_mats.clear()
 
 func _billboard_mat(shader: Shader, tex: Texture2D) -> ShaderMaterial:
 	var m := ShaderMaterial.new()
@@ -2199,4 +2349,446 @@ func _make_star_tex() -> ImageTexture:
 			var i := y * S + x
 			alpha[i] = clampf(star * 2.2 + core * 0.8, 0.0, 1.0)
 			value[i] = 1.0
+	return _image_from(alpha, value, S, S)
+
+
+# =============================================================================
+# Round 5: Feel Reference (contact frame by tier, charge glow, parry,
+# sidestep, splashes, floor cracks; movement effects in WorldFX)
+# =============================================================================
+
+const WorldFXScript := preload("res://scripts/fx/world_fx.gd")
+const DestructionFXScript := preload("res://scripts/fx/destruction_fx.gd")
+
+## Contact frame by tier. Index = HitInfo.Tier: NONE, FLINCH, STUMBLE, STAGGER,
+## KNOCKDOWN, LAUNCH, HARD_LAUNCH, SEVER. Flash size 0..1 (IMPACT_FLASH_SIZE),
+## blood spray energy for the emitters (0 = no blood), wound size.
+const TIER_FLASH: Array[float] = [0.12, 0.18, 0.22, 0.35, 0.5, 0.72, 0.88, 1.0]
+const TIER_SPRAY: Array[float] = [0.0, 0.0, 0.0, 900.0, 2600.0, 4800.0, 7000.0, 9000.0]
+const TIER_WOUND: Array[float] = [0.0, 0.0, 0.0, 0.35, 0.55, 0.75, 0.9, 1.0]
+const GROUND_SPRAY := 1600.0      ## a ground strike's extra spray into the floor
+const HELD_STRIKE_SPRAY := 600.0  ## a knee or headbutt on a held body: small blood (1 decal)
+const WOUNDED_LEVEL := 0.05       ## lost-HP share from which a body bleeds on impacts
+## Floor marks (cracks, craters, rubble) persisting at once (Round 6: Tuning.FLOOR_DECAL_MAX).
+const MARK_DECAL_MAX := Tuning.FLOOR_DECAL_MAX
+## Round 6 floor marks by level (1 crack, 2 crater, 3 rubble): colour; the
+## size is the event's radius (Tuning.FLOOR_LEVEL_RADIUS) across.
+const FLOOR_MARK_COLOR: Array[Color] = [Color(0.1, 0.095, 0.09, 0.92), Color(0.07, 0.065, 0.06, 0.96),
+	Color(0.09, 0.085, 0.08, 0.98)]
+## A new mark this close to an older one (share of the larger radius) grows it in place.
+const FLOOR_MARK_MERGE := 0.75
+const FADE_SLACK := 10            ## decals of one kind allowed to be fading at once
+const CRACK_SIZE := Vector2(1.7, 2.3)  ## m: a heavy landing's floor crack
+const CRACK_COLOR := Color(0.1, 0.095, 0.09, 0.92)
+## Charge glow intensity at charge level 0..3 (brand colour Tuning.TRAIL_COLOR).
+const CHARGE_GLOW_LEVELS: Array[float] = [0.35, 0.8, 1.3, 2.0]
+const CHARGE_LEVEL_FLASH := 0.14  ## a small white flash at the limb on each level-up
+## Safety net: a charge glow never outlives its charge. Dropped on charge_released
+## (B and G send level 0 on a cancel), on a hit landing on the charging fighter,
+## when it dies, goes down / flies, or is grabbed; and after this long anyway
+## (Tuning.CHARGE_AUTO_RELEASE plus a margin: a held button never locks).
+const CHARGE_GLOW_MAX := Tuning.CHARGE_AUTO_RELEASE + 0.5
+const CHARGE_GLOW_POLL := 0.05    ## s between checks of the charging fighters' state
+const PARRY_FLASH := 0.85         ## parry: a big white flash between the fighters (no ring)
+const WATER_DROP := Color(0.78, 0.86, 0.95)
+
+## Every contact frame: {frame (physics), tier, flash, ring, blood} (F4 check, newest last).
+var contact_log: Array[Dictionary] = []
+var _decals_created: Dictionary = {}   ## kind -> decals placed since reset
+var _decals_evicted := 0
+var _decals_released := 0
+var _impact_ring_on: Array[bool] = []
+var _last_ring := -INF                 ## real s of the last shock ring
+var _jitter: Dictionary = {}           ## fighter id -> [parts, s left, amplitude m, offset]
+var _charge_glow: Dictionary = {}      ## fighter id -> LimbGlow handle
+var _charge_poll := 0.0
+var _crack_tex: ImageTexture
+var _crater_tex: ImageTexture
+var _rubble_tex: ImageTexture
+var _world: Node
+var _destruction: Node
+
+func _build_round5() -> void:
+	var trng := RandomNumberGenerator.new()
+	trng.seed = 5150
+	_crack_tex = _make_crack_tex(trng)
+	_crater_tex = _make_crater_tex(trng)
+	_rubble_tex = _make_rubble_tex(trng)
+	_world = WorldFXScript.new()
+	_world.name = "WorldFX"
+	add_child(_world)
+	_world.call(&"setup", self, _holder)
+	_destruction = DestructionFXScript.new()
+	_destruction.name = "DestructionFX"
+	add_child(_destruction)
+	_destruction.call(&"setup", self, _world, _holder)
+	GameEvents.charge_started.connect(_on_charge_started)
+	GameEvents.charge_level_changed.connect(_on_charge_level_changed)
+	GameEvents.charge_released.connect(_on_charge_released)
+	GameEvents.fighter_died.connect(func(f: Node3D, _i: HitInfo) -> void: _drop_charge_glow(f))
+	GameEvents.fighter_launched.connect(func(f: Node3D, _v: Vector3) -> void: _drop_charge_glow(f))
+	GameEvents.grab_started.connect(func(_g: Node3D, v: Node3D) -> void: _drop_charge_glow(v))
+	GameEvents.limb_grab_started.connect(func(_g: Node3D, v: Node3D, _b: StringName) -> void: _drop_charge_glow(v))
+	GameEvents.carry_changed.connect(func(_h: Node3D, held: Node3D) -> void: _drop_charge_glow(held))
+	GameEvents.thrown.connect(func(_g: Node3D, v: Node3D, _vel: Vector3) -> void: _drop_charge_glow(v))
+	GameEvents.parried.connect(_on_parried)
+	GameEvents.sidestepped.connect(_on_sidestepped)
+
+func _reset_round5() -> void:
+	for id: int in _jitter:
+		_set_jitter(_jitter[id][0], Vector3.ZERO)
+	_jitter.clear()
+	for id: int in _charge_glow:
+		var h = _charge_glow[id]
+		if is_instance_valid(h):
+			(h as Node).queue_free()
+	_charge_glow.clear()
+	contact_log.clear()
+	_last_ring = -INF
+	if _world != null:
+		_world.call(&"reset")
+	if _destruction != null:
+		_destruction.call(&"reset")
+
+## The movement / world effects node (WorldFX).
+func get_world_fx() -> Node:
+	return _world
+
+## The Round 6 destruction effects node (DestructionFX).
+func get_destruction_fx() -> Node:
+	return _destruction
+
+static func _real_now() -> float:
+	return Engine.get_physics_frames() / float(Engine.physics_ticks_per_second)
+
+## Budget: at most one shock ring per Tuning.FX_RING_GAP real seconds.
+func _ring_allowed() -> bool:
+	var now := _real_now()
+	if now - _last_ring < Tuning.FX_RING_GAP - 1e-4:
+		return false
+	_last_ring = now
+	return true
+
+# --- Mesh jitter during the freeze (Contact frame item 2) ---------------------------
+
+## The victim's mesh shakes HITSTOP_JITTER_RANGE (2-4 cm, more for bigger
+## tiers) for its freeze: Power.hitstop_for(tier), the player's capped at
+## Tuning.PLAYER_HITSTOP_MAX. Real time, like the hitstop.
+func _jitter_start(victim: Node3D, tier: int) -> void:
+	var t := Power.hitstop_for(tier)
+	if victim.is_in_group(&"player"):
+		t = minf(t, Tuning.PLAYER_HITSTOP_MAX)
+	if t <= 0.0:
+		return
+	var parts := _mesh_parts(victim)
+	if parts.is_empty():
+		return
+	var amp := lerpf(Tuning.HITSTOP_JITTER_RANGE.x, Tuning.HITSTOP_JITTER_RANGE.y, FXRules.tier_t(tier))
+	_jitter[victim.get_instance_id()] = [parts, t, amp, Vector3.ZERO]
+
+## Current jitter offset of a fighter's mesh (tests): ZERO when still.
+func get_jitter(fighter: Node3D) -> Vector3:
+	var rec: Array = _jitter.get(fighter.get_instance_id(), []) if is_instance_valid(fighter) else []
+	return rec[3] if not rec.is_empty() else Vector3.ZERO
+
+## Seconds of jitter left (tests).
+func jitter_left(fighter: Node3D) -> float:
+	var rec: Array = _jitter.get(fighter.get_instance_id(), []) if is_instance_valid(fighter) else []
+	return float(rec[1]) if not rec.is_empty() else 0.0
+
+func _update_jitter(real: float) -> void:
+	if _jitter.is_empty():
+		return
+	for id: int in _jitter.keys():
+		var rec: Array = _jitter[id]
+		rec[1] = float(rec[1]) - real
+		if rec[1] <= 0.0 or instance_from_id(id) == null:
+			_set_jitter(rec[0], Vector3.ZERO)
+			_jitter.erase(id)
+			continue
+		# A fresh direction every frame, mostly sideways (reads as a shudder).
+		var d := Vector3(rng.randf_range(-1, 1), rng.randf_range(-0.5, 0.5), rng.randf_range(-1, 1))
+		var off := _safe_dir(d, Vector3.RIGHT) * float(rec[2]) * rng.randf_range(0.7, 1.0)
+		rec[3] = off
+		_set_jitter(rec[0], off)
+
+func _set_jitter(parts: Array, off: Vector3) -> void:
+	for p in parts:
+		if is_instance_valid(p):
+			var mat := _part_material(p)
+			if mat != null:
+				mat.set_shader_parameter(&"jitter", off)
+
+# --- Charge glow (Feel Reference: On the character > Charge glow) --------------------
+
+## While an attack is held, the striking limb glows; brighter at each charge
+## level with a short pulse (the sound is AudioFX's charge_level).
+func _on_charge_started(fighter: Node3D, move_id: StringName) -> void:
+	if not is_instance_valid(fighter):
+		return
+	_drop_charge_glow(fighter)
+	var h := limb_glow(fighter, FXRules.strike_limb(move_id), Tuning.TRAIL_COLOR, 0.0, CHARGE_GLOW_LEVELS[0])
+	if h != null:
+		_charge_glow[fighter.get_instance_id()] = h
+
+func _on_charge_level_changed(fighter: Node3D, level: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var h = _charge_glow.get(fighter.get_instance_id())
+	if not is_instance_valid(h):
+		return
+	h.call(&"set_intensity", CHARGE_GLOW_LEVELS[clampi(level, 0, CHARGE_GLOW_LEVELS.size() - 1)])
+	if level > 0:
+		h.call(&"pulse")
+		impact_flash((h as Node3D).global_position, CHARGE_LEVEL_FLASH, false, false)
+
+func _on_charge_released(fighter: Node3D, _move_id: StringName, _level: int) -> void:
+	_drop_charge_glow(fighter)
+
+## Poll the charging fighters: down, flying, dead or held drops the glow, and
+## no glow outlives CHARGE_GLOW_MAX.
+func _update_charge_glows(real: float) -> void:
+	if _charge_glow.is_empty():
+		return
+	_charge_poll -= real
+	if _charge_poll > 0.0:
+		return
+	_charge_poll = CHARGE_GLOW_POLL
+	for id: int in _charge_glow.keys():
+		var h = _charge_glow[id]
+		var f := instance_from_id(id) as Node3D
+		if not is_instance_valid(h) or f == null:
+			if is_instance_valid(h):
+				h.call(&"stop")
+			_charge_glow.erase(id)
+			continue
+		if float(h.get(&"age")) > CHARGE_GLOW_MAX or FXRules.cannot_charge(f):
+			_drop_charge_glow(f)
+
+func _drop_charge_glow(fighter: Node3D) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var id := fighter.get_instance_id()
+	var h = _charge_glow.get(id)
+	if is_instance_valid(h):
+		h.call(&"stop")
+	_charge_glow.erase(id)
+
+## The charge glow handle on a fighter (tests), or null.
+func get_charge_glow(fighter: Node3D) -> Node3D:
+	var h = _charge_glow.get(fighter.get_instance_id()) if is_instance_valid(fighter) else null
+	return h if is_instance_valid(h) else null
+
+# --- Parry, sidestep ------------------------------------------------------------------
+
+## Parry: a big white flash and sparks where the blow met the guard.
+func _on_parried(defender: Node3D, attacker: Node3D) -> void:
+	if not is_instance_valid(defender):
+		return
+	var at := _aim_of(defender)
+	var dir := Vector3.FORWARD
+	if is_instance_valid(attacker):
+		var a := _aim_of(attacker)
+		dir = _safe_dir(a - at, Vector3.FORWARD)
+		at = at.lerp(a, 0.45)
+	impact_flash(at, PARRY_FLASH, false, false)
+	spark(at, dir, 1.0)
+	spark(at, -dir, 0.7)
+
+## Sidestep: a small dust kick at the feet, away from the step.
+func _on_sidestepped(fighter: Node3D, direction: Vector3) -> void:
+	if is_instance_valid(fighter):
+		dust(_ground_of(fighter) + Vector3.UP * 0.05, DUST_BY_SURFACE[&"floor"], 700.0,
+				_safe_dir(-direction + Vector3.UP * 0.6, Vector3.UP), false)
+
+func _aim_of(f: Node3D) -> Vector3:
+	return f.call(&"get_aim_point") if f.has_method(&"get_aim_point") else f.global_position + Vector3.UP * 1.3
+
+# --- Water, floor cracks ------------------------------------------------------------------
+
+## Water droplets (feet and bodies in the water patch). Not blood: gore never hides it.
+func splash(position: Vector3, direction: Vector3, energy: float) -> void:
+	var dir := _safe_dir(direction, Vector3.UP)
+	var e := _sprays[_spray_next]
+	_spray_next = (_spray_next + 1) % _sprays.size()
+	var t := clampf(energy / 6000.0, 0.0, 1.0)
+	var pm := e.process_material as ParticleProcessMaterial
+	pm.color = WATER_DROP
+	pm.spread = lerpf(30.0, 50.0, t)
+	pm.initial_velocity_min = lerpf(1.2, 3.0, t)
+	pm.initial_velocity_max = lerpf(2.8, 7.0, t)
+	e.amount_ratio = clampf(lerpf(0.15, 0.9, t), 0.1, 1.0)
+	e.global_transform = Transform3D(_basis_toward(dir), position)
+	e.visible = true
+	e.restart()
+
+## Round 6 (Feel Reference rule "things stay"; ARCHITECTURE Round 6): a floor
+## mark for WorldDamage's floor_damaged, placed at once (same physics frame)
+## at `position` on the floor, `radius` m. Level 1 crack, 2 crater (darker,
+## wider, a rim), 3 rubble. A mark already at that spot GROWS in place (new
+## texture, size and colour) instead of stacking a second decal. Marks cap at
+## Tuning.FLOOR_DECAL_MAX, the oldest fading. Returns the decal.
+func floor_mark(position: Vector3, radius: float, level: int, _surface := &"concrete") -> Decal:
+	var lvl := clampi(level, 1, 3)
+	var size := maxf(radius, 0.1) * 2.0 * rng.randf_range(0.95, 1.1)
+	var tex: Texture2D = [_crack_tex, _crater_tex, _rubble_tex][lvl - 1]
+	for d in _live:
+		if not is_instance_valid(d) or _kind_of(d) != &"mark" or not (d as Node).has_meta(&"floor_level"):
+			continue
+		var dd := d as Decal
+		if _fading.has(dd.get_instance_id()):
+			continue
+		var flat := Vector2(dd.global_position.x - position.x, dd.global_position.z - position.z).length()
+		if flat < maxf(size, dd.size.x) * 0.5 * FLOOR_MARK_MERGE and absf(dd.global_position.y - position.y) < 0.3:
+			if lvl >= int(dd.get_meta(&"floor_level")):
+				dd.texture_albedo = tex
+				var s := maxf(size, dd.size.x)
+				dd.size = Vector3(s, DECAL_DEPTH, s)
+				dd.modulate = FLOOR_MARK_COLOR[lvl - 1]
+				dd.set_meta(&"floor_level", lvl)
+			_live.erase(dd)  # the newest touch: last to fade
+			_live.append(dd)
+			return dd
+	var nd := _place_decal(position, Vector3.UP, Vector2(size, size), tex, FLOOR_MARK_COLOR[lvl - 1], Vector3.ZERO,
+			null, &"mark")
+	nd.set_meta(&"floor_level", lvl)
+	return nd
+
+## Live floor marks by level (tests): [cracks, craters, rubble].
+func floor_mark_levels() -> Array[int]:
+	var out: Array[int] = [0, 0, 0]
+	for d in _live:
+		if is_instance_valid(d) and (d as Node).has_meta(&"floor_level") and not _fading.has((d as Decal).get_instance_id()):
+			out[int((d as Node).get_meta(&"floor_level")) - 1] += 1
+	return out
+
+## A floor crack decal under `position`, `size` m across (scripted cracks; Round
+## 6 floor damage goes through floor_mark()).
+func crack(position: Vector3, size := -1.0) -> void:
+	var s := size if size > 0.0 else rng.randf_range(CRACK_SIZE.x, CRACK_SIZE.y)
+	_enqueue(Req.MARK, position, Vector3.DOWN, Vector3.ZERO, s, 0)
+
+func _do_mark(space: PhysicsDirectSpaceState3D, pos: Vector3, size: float) -> int:
+	var hit := _cast(space, pos + Vector3.UP * 0.5, pos + Vector3.DOWN * 2.0)
+	if hit.is_empty() or (hit.normal as Vector3).y < 0.6:
+		return 1
+	_place_decal(hit.position, hit.normal, Vector2(size, size), _crack_tex, CRACK_COLOR, Vector3.ZERO,
+			hit.collider, &"mark")
+	return 1
+
+## Radial floor cracks: a crushed centre and 8-11 jagged cracks with branches,
+## stamped as tapering lines (cheap to build at startup).
+func _make_crack_tex(r: RandomNumberGenerator) -> ImageTexture:
+	var S := 128
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	value.fill(0.85)
+	var stamp := func(u: float, v: float, rad: float, a: float) -> void:
+		var cx := (u * 0.5 + 0.5) * S
+		var cy := (v * 0.5 + 0.5) * S
+		var rp := maxf(rad * S * 0.5, 0.6)
+		for y in range(maxi(int(cy - rp - 1), 0), mini(int(cy + rp + 2), S)):
+			for x in range(maxi(int(cx - rp - 1), 0), mini(int(cx + rp + 2), S)):
+				var d := Vector2(x + 0.5 - cx, y + 0.5 - cy).length()
+				var k := clampf(rp + 0.5 - d, 0.0, 1.0) * a
+				var i := y * S + x
+				alpha[i] = maxf(alpha[i], k)
+	# Crushed centre.
+	for n in 14:
+		var ang := r.randf() * TAU
+		var dist := r.randf_range(0.0, 0.12)
+		stamp.call(cos(ang) * dist, sin(ang) * dist, r.randf_range(0.04, 0.09), r.randf_range(0.6, 0.95))
+	var cracks := r.randi_range(8, 11)
+	for c in cracks:
+		var ang := TAU * (float(c) + r.randf_range(-0.3, 0.3)) / cracks
+		var reach := r.randf_range(0.55, 0.95)
+		var p := Vector2(cos(ang), sin(ang)) * 0.08
+		var dir := Vector2(cos(ang), sin(ang))
+		var steps := int(reach * 60.0)
+		for k in steps:
+			var u := float(k) / steps
+			dir = dir.rotated(r.randf_range(-0.35, 0.35)).normalized()
+			dir = (dir + Vector2(cos(ang), sin(ang)) * 0.4).normalized()
+			p += dir * (reach / steps)
+			stamp.call(p.x, p.y, lerpf(0.022, 0.006, u), lerpf(1.0, 0.6, u))
+			if r.randf() < 0.05 and u < 0.8:  # a branch
+				var q := p
+				var bd := dir.rotated(r.randf_range(0.5, 1.0) * (1.0 if r.randf() < 0.5 else -1.0))
+				for j in int(steps * 0.3):
+					bd = bd.rotated(r.randf_range(-0.3, 0.3))
+					q += bd * (reach / steps)
+					stamp.call(q.x, q.y, 0.006, 0.7)
+	return _image_from(alpha, value, S, S)
+
+
+## Crater: a dark crushed bowl with a lighter broken rim, short radial cracks
+## running out of it (Round 6 floor level 2).
+func _make_crater_tex(r: RandomNumberGenerator) -> ImageTexture:
+	var S := 128
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	var noise := _Noise.new(r, 10)
+	var cracks := r.randi_range(9, 13)
+	var ang: Array[float] = []
+	var reach: Array[float] = []
+	for c in cracks:
+		ang.append(TAU * (float(c) + r.randf_range(-0.3, 0.3)) / cracks)
+		reach.append(r.randf_range(0.7, 0.98))
+	for y in S:
+		for x in S:
+			var u := (x + 0.5) / S * 2.0 - 1.0
+			var v := (y + 0.5) / S * 2.0 - 1.0
+			var d := sqrt(u * u + v * v)
+			var th := atan2(v, u)
+			var n := noise.at(u * 0.5 + 0.5, v * 0.5 + 0.5)
+			var edge := 0.5 + 0.08 * (n - 0.5) * 2.0
+			var bowl := clampf((edge - d) / 0.04, 0.0, 1.0)
+			var rim := exp(-pow((d - edge) / 0.06, 2.0))
+			var crack := 0.0
+			for c in cracks:
+				# A slight jag along each crack; width in texture units (continuous lines).
+				var dth := absf(wrapf(th - ang[c] + 0.04 * sin(d * 13.0 + c * 1.7), -PI, PI))
+				if d > edge * 0.85 and d < reach[c]:
+					var w := lerpf(0.022, 0.008, (d - edge) / maxf(reach[c] - edge, 0.01))
+					crack = maxf(crack, clampf(1.0 - dth * d / w, 0.0, 1.0) * (1.0 - 0.6 * d / reach[c]))
+			var i := y * S + x
+			alpha[i] = clampf(maxf(maxf(bowl * (0.75 + 0.25 * n), rim * 0.55), crack), 0.0, 1.0)
+			# Dark bowl, lighter rim (the decal tints this value).
+			value[i] = lerpf(0.55 + 0.25 * n, 1.0, rim) if bowl < 0.99 else 0.45 + 0.2 * n
+	return _image_from(alpha, value, S, S)
+
+## Rubble: the crater broken up into scattered chunks and grit around it
+## (Round 6 floor level 3).
+func _make_rubble_tex(r: RandomNumberGenerator) -> ImageTexture:
+	var S := 128
+	var base := _make_crater_tex(r).get_image()
+	var alpha := PackedFloat32Array()
+	var value := PackedFloat32Array()
+	alpha.resize(S * S)
+	value.resize(S * S)
+	for y in S:
+		for x in S:
+			var c := base.get_pixel(x, y)
+			alpha[y * S + x] = c.a
+			value[y * S + x] = c.r
+	for k in r.randi_range(26, 40):
+		var a := r.randf() * TAU
+		var dist := r.randf_range(0.15, 0.9)
+		var rad := r.randf_range(0.015, 0.06) * (1.1 - dist * 0.6)
+		var cx := (cos(a) * dist * 0.5 + 0.5) * S
+		var cy := (sin(a) * dist * 0.5 + 0.5) * S
+		var rp := rad * S * 0.5
+		var shade := r.randf_range(0.5, 1.0)
+		for y in range(maxi(int(cy - rp - 1), 0), mini(int(cy + rp + 2), S)):
+			for x in range(maxi(int(cx - rp - 1), 0), mini(int(cx + rp + 2), S)):
+				var dd := absf(x + 0.5 - cx) + absf(y + 0.5 - cy) * 0.8  # angular chips
+				var k2 := clampf(rp + 0.5 - dd, 0.0, 1.0)
+				var i := y * S + x
+				if k2 > 0.0:
+					alpha[i] = maxf(alpha[i], k2)
+					value[i] = lerpf(value[i], shade, k2)
 	return _image_from(alpha, value, S, S)

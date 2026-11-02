@@ -30,12 +30,29 @@ extends Resource
 @export var neutral_kd := 2.0        ## Small damping on the neutral spring (1/s).
 @export var soft_limit_spring := 300.0  ## Spring back inside the soft-limit zone (1/s^2 per rad).
 @export var body_angular_damp := 0.8 ## PhysicalBone3D angular damp (replace mode).
-@export var launch_tone := 0.25      ## Muscle tone while LAUNCHED (falling loop target).
-@export var flinch_tone := 3.0       ## Upper-body tone multiplier during a flinch (snap back).
+@export var launch_tone := 0.25      ## Muscle tone while LAUNCHED (falling loop target): "very low".
+@export var flinch_tone := 3.0       ## Legacy name of chain_tone (kept for old callers).
+## Round 5: tone of a bone at full muscle strength in a partial ragdoll (a
+## chain bone at strength s gets s * chain_tone). With muscle_kp 150 and
+## muscle_kd 14 this is critically damped (snaps back without wobble).
+@export var chain_tone := 3.0
+@export var knockdown_tone := 0.12   ## Round 5: upper-body tone in a knockdown ("low"; the legs go to 0 and buckle).
+@export var held_torso_tone := 0.45  ## Round 5: spine/chest/head tone of a live body held by a grabber.
+@export var held_limb_tone := 0.12   ## Round 5: legs and free arm of a live held body (they dangle and swing).
+## Round 5: extra joint damping (1/s) on a held body, so the legs swing with
+## every start, stop and hop of the holder but settle in about 0.4 s instead of
+## pendulum-swinging over the top (a carried body, not a flag).
+@export var held_joint_damp := 6.0
 @export var stagger_arm_tone := 0.12
 @export var stagger_spine_tone := 0.35
 @export var stagger_leg_tone := 0.8  ## Leg tone when the legs start to give (ramps to launch_tone).
-@export var flinch_dv := 4.0         ## m/s velocity change on the hit bone for strength 1.
+@export var flinch_dv := 4.0         ## m/s nudge on a downed body's hit bone for strength 1 (x0.5).
+## Round 5 flinch: the hit bone gets flinch_impulse / its mass (N s / kg = m/s),
+## clamped, x strength. 22 N s: a 6 kg head snaps back about 30 degrees, a
+## 16 kg chest bends about 10, a heavy's head moves less.
+@export var flinch_impulse := 22.0
+@export var flinch_dv_min := 1.2
+@export var flinch_dv_max := 5.0
 @export var stagger_dv := 2.4        ## m/s on the upper body for strength 1.
 @export var hit_bone_extra := 0.3    ## Extra launch velocity fraction on the hit bone.
 @export var pelvis_extra := 0.15     ## Extra launch velocity fraction on the pelvis.

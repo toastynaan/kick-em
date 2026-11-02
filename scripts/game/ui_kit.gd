@@ -1,7 +1,7 @@
 class_name UIKit
 ## Shared look for the HUD and menus: one theme, big readable type, outlined
 ## labels that read over the 3D scene, and the controls help built from
-## Controls.ACTIONS. OWNER: agent E (feel & flow).
+## Controls.ACTIONS. OWNER: agent J (HUD, flow & menus).
 
 const ACCENT := Color(1.0, 0.42, 0.18)
 const ACCENT_DIM := Color(0.55, 0.2, 0.08)
@@ -14,6 +14,12 @@ const FOCUS_COLOR := Color(0.3, 0.85, 1.0)
 const PERFECT_COLOR := Color(0.55, 0.9, 1.0)
 const GRAB_COLOR := Color(1.0, 0.18, 0.15)
 const STRIKE_COLOR := Color(1.0, 1.0, 1.0)
+## Round 5 enemy wind-ups (Feel Reference: Enemies have to be readable first):
+## strikes glow orange, grabs blue. Off-screen arrows use the same colours.
+const TELL_STRIKE := Color(1.0, 0.5, 0.1)
+const TELL_GRAB := Color(0.25, 0.6, 1.0)
+const COUNTER_COLOR := Color(1.0, 0.82, 0.3)  ## live counter bonus (parry / teleport)
+const RESULT_GOOD := Color(1.0, 0.85, 0.35)
 
 static var _theme: Theme
 static var _heavy_font: Font
@@ -90,6 +96,19 @@ static func button(text: String, min_width := 460.0) -> Button:
 	b.focus_mode = Control.FOCUS_ALL
 	return b
 
+## A canvas layer at least `min_layer` and above every layer of the ScreenFX
+## autoload (Focus tint, blur, flashes), so HUD and menus keep full colour.
+static func layer_above_screen_fx(tree: SceneTree, min_layer: int) -> int:
+	var top := min_layer - 1
+	var fx := tree.root.get_node_or_null(^"ScreenFX") if tree != null else null
+	if fx != null:
+		var layers: Array = fx.find_children("*", "CanvasLayer", true, false)
+		if fx is CanvasLayer:
+			layers.append(fx)
+		for l: CanvasLayer in layers:
+			top = maxi(top, l.layer)
+	return maxi(min_layer, top + 1)
+
 ## Full-rect control that ignores the mouse (root for overlay layers).
 static func full_rect(name: String) -> Control:
 	var c := Control.new()
@@ -100,30 +119,38 @@ static func full_rect(name: String) -> Control:
 	return c
 
 # --- Controls help (F1) --------------------------------------------------------
-## What each action does, in the words the player needs (spec: Combat system).
+## What each action does, in the words the player needs (Feel Reference:
+## Controls and targeting; Round 5 key map in Controls).
 const ACTION_HELP := {
-	&"move": "Move (camera-relative)",
-	&"camera": "Orbit the camera",
-	&"punch": "Tap: next punch in the string. Hold: charge it. In dodge slow-mo: teleport counter",
-	&"kick": "Tap: next kick in the string. Hold: charge it. Crouch + kick: sweep",
-	&"grab": "Grab; release throws. Red glint: press to break their grab",
-	&"jump": "Jump: clears low attacks",
+	&"move": "Move (camera-relative). Locked on: strafe around your target",
+	&"camera": "Turn the camera (it never turns on its own)",
+	&"punch": "Light (jab). Tap: next strike in the string. Hold: charge it",
+	&"heavy": "Heavy (cross). Tap or hold to charge. Holding a body: throw it",
+	&"kick": "Kick. Tap or hold to charge",
+	&"sweep": "Sweep: pull back (toward the camera) + Kick",
+	&"grab": "Grab a body or a prop; press again to let go. Blue glow: press to break their grab",
+	&"jump": "Jump. Sprinting along a wall: wall run. Attack in the air: dropping strike",
 	&"crouch": "Crouch (hold): ducks high attacks and standing grabs",
-	&"block": "Block (-80% damage). Tap just before a hit: perfect dodge",
-	&"dash": "Dash: speed feeds your next hit. After a launch: pursuit",
-	&"focus": "Focus (hold): the world slows, you don't. Drains the Focus meter",
-	&"pause": "Pause menu",
-	&"restart": "Restart the round (pause and round-over screens)",
+	&"block": "Tap just before a hit lands: parry. Hold: guard (-80% damage)",
+	&"dash": "Tap: dash. In the parry window: teleport behind them (1 Focus). Hold: sprint",
+	&"focus": "Focus mode (1 bar): the world slows to 0.3x for 2 s, you don't",
+	&"lock_on": "Lock on to the enemy nearest the centre. Press again to unlock. No enemy: recentre",
+	&"lock_switch": "While locked on: switch to the next or previous enemy",
+	&"pause": "Pause menu (debug settings are in there)",
+	&"restart": "Restart the round (pause and results screens)",
 	&"help": "Show or hide this panel",
-	&"debug": "Debug overlay",
+	&"debug": "Debug overlay: P and its parts, tier, speed, Focus, health",
 	&"fullscreen": "Switch between fullscreen and a window",
 }
 const ACTION_TITLES := {
-	&"move": "Move", &"camera": "Camera", &"punch": "Punch", &"kick": "Kick",
-	&"grab": "Grab", &"jump": "Jump", &"crouch": "Crouch", &"block": "Block",
-	&"dash": "Dash", &"focus": "Focus", &"pause": "Pause", &"restart": "Restart",
+	&"move": "Move", &"camera": "Camera", &"punch": "Light", &"heavy": "Heavy", &"kick": "Kick",
+	&"sweep": "Sweep", &"grab": "Grab", &"jump": "Jump", &"crouch": "Crouch", &"block": "Block",
+	&"dash": "Dash / sprint", &"focus": "Focus", &"lock_on": "Lock on", &"lock_switch": "Switch target",
+	&"pause": "Pause", &"restart": "Restart",
 	&"help": "Help", &"debug": "Debug", &"fullscreen": "Fullscreen",
 }
+## Combinations that are not actions of their own: [group, after group, keyboard, gamepad].
+const COMBO_ROWS := [[&"sweep", &"kick", "S + E", "Back + B"]]
 
 ## Rows of [title, keyboard+mouse, gamepad, description], one per action, built
 ## from Controls.ACTIONS (move_* and cam_* are merged into one row each).
@@ -136,6 +163,8 @@ static func control_rows() -> Array:
 			gid = &"move"
 		elif String(action).begins_with("cam_"):
 			gid = &"camera"
+		elif action == &"lock_next" or action == &"lock_prev":
+			gid = &"lock_switch"
 		if not groups.has(gid):
 			groups[gid] = {"kb": PackedStringArray(), "pad": PackedStringArray()}
 			order.append(gid)
@@ -160,6 +189,10 @@ static func control_rows() -> Array:
 			kb_text if not kb_list.is_empty() else "-",
 			" / ".join(pad_list) if not pad_list.is_empty() else "-",
 			ACTION_HELP.get(gid, "")])
+		for combo: Array in COMBO_ROWS:
+			if combo[1] == gid:
+				rows.append([ACTION_TITLES.get(combo[0], String(combo[0]).capitalize()), combo[2], combo[3],
+					ACTION_HELP.get(combo[0], "")])
 	return rows
 
 static func _binding_name(spec: Array) -> String:
@@ -170,6 +203,7 @@ static func _binding_name(spec: Array) -> String:
 				KEY_SEMICOLON: return ";"
 				KEY_SPACE: return "Space"
 				KEY_SHIFT: return "Shift"
+				KEY_TAB: return "Tab"
 			var mods: int = spec[2] if spec.size() > 2 else 0  # e.g. "Option+Enter" on macOS
 			return OS.get_keycode_string(int(spec[1]) | mods)
 		&"mouse":
@@ -177,6 +211,8 @@ static func _binding_name(spec: Array) -> String:
 				MOUSE_BUTTON_LEFT: return "LMB"
 				MOUSE_BUTTON_RIGHT: return "RMB"
 				MOUSE_BUTTON_MIDDLE: return "MMB"
+				MOUSE_BUTTON_WHEEL_UP: return "Wheel up"
+				MOUSE_BUTTON_WHEEL_DOWN: return "Wheel down"
 			return "Mouse %d" % int(spec[1])
 		&"joy":
 			match int(spec[1]):
@@ -188,6 +224,10 @@ static func _binding_name(spec: Array) -> String:
 				JOY_BUTTON_RIGHT_SHOULDER: return "RB"
 				JOY_BUTTON_BACK: return "Back"
 				JOY_BUTTON_START: return "Start"
+				JOY_BUTTON_LEFT_STICK: return "L3"
+				JOY_BUTTON_RIGHT_STICK: return "R3"
+				JOY_BUTTON_DPAD_LEFT: return "D-pad left"
+				JOY_BUTTON_DPAD_RIGHT: return "D-pad right"
 			return "Button %d" % int(spec[1])
 		_:
 			match int(spec[1]):
@@ -224,7 +264,10 @@ static func controls_panel() -> PanelContainer:
 		d.custom_minimum_size.x = 560
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		grid.add_child(d)
-	box.add_child(label("Focus (3 bars): hold to slow the world while you keep full speed (needs half a bar). Fills from perfect dodges, launches and kills.", 18, FOCUS_COLOR))
+	var focus_note := label("Focus (3 bars, each wave starts with 1): Focus mode, a teleport and a pursuit each cost a full bar. Fills from parries and strong hits, never over time.", 18, FOCUS_COLOR)
+	focus_note.custom_minimum_size.x = 900
+	focus_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(focus_note)
 	box.add_child(label("F1 closes this panel", 16, TEXT_DIM))
 	panel.visible = false
 	return panel

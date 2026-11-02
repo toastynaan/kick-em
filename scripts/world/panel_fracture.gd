@@ -23,12 +23,13 @@ extends RefCounted
 const SEEDS_MIN := 20
 const SEEDS_MAX := 26
 const VARIANTS := 3
-## Chunks with a face area under this are "small" (Layers.DEBRIS_SMALL, fade).
+## Chunks with a face area under this are "small" (Layers.DEBRIS_SMALL: they
+## skip each other).
 const SMALL_AREA := 0.22
-## Chunks with at least this face area persist for the round; the rest of the
-## large-layer chunks are timed (DebrisManager.MEDIUM_LIFE).
+## Round 2 tiers (`persist`). Round 5: every chunk stays for the round and
+## DebrisManager caps the total, so these only mark the big pieces.
 const PERSIST_AREA := 0.45
-## Prop pieces with at least this volume (m^3) persist.
+## Prop pieces with at least this volume (m^3) count as big pieces.
 const PERSIST_VOLUME := 0.018
 ## Seed placement: exponent > 1 pulls seeds toward the centre.
 const CENTER_BIAS := 1.25
@@ -88,7 +89,7 @@ static var _cache: Dictionary = {}
 ## style &"rolldoor" gives horizontal slats.
 static func get_set(surface: StringName, size: Vector3, variant: int, style: StringName = &"") -> FractureSet:
 	var v := posmod(variant, VARIANTS)
-	var kind := &"slats" if style == &"rolldoor" else &"voronoi"
+	var kind := &"slats" if style == &"rolldoor" or style == &"boards" else &"voronoi"
 	var key := "%s|%s|%.3f|%.3f|%.3f|%d" % [kind, surface, size.x, size.y, size.z, v]
 	if _cache.has(key):
 		return _cache[key]
@@ -405,6 +406,15 @@ static func build_prop(kind: StringName, size: Vector3) -> FractureSet:
 				for sz in [-1.0, 1.0]:
 					boxes.append([Vector3(sx * (h.x - 0.06), -top * 0.5, sz * (h.z - 0.06)), Vector3(leg, size.y - top, leg)])
 			boxes.append([Vector3(0, 0.05, -h.z + 0.08), Vector3(size.x - 0.2, size.y * 0.45, 0.025)])
+		&"jamb":
+			# A door-frame post: four boards stacked up its height.
+			for k in 4:
+				var ph := size.y / 4.0
+				boxes.append([Vector3(0, -h.y + ph * (k + 0.5), 0), Vector3(size.x, ph - 0.01, size.z)])
+		&"lintel":
+			# The beam over a door: two halves.
+			for sx in [-1.0, 1.0]:
+				boxes.append([Vector3(sx * size.x * 0.25, 0, 0), Vector3(size.x * 0.5 - 0.01, size.y, size.z)])
 		&"lamp":
 			# One piece: everything above the 0.35 m stump falls as a whole.
 			var stump := 0.35

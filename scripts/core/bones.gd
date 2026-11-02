@@ -59,13 +59,33 @@ const UPPER_BODY: Array[StringName] = [
 ]
 
 ## Dismemberment cut ids -> the bone whose subtree comes off.
+## Round 5 severing launches take a whole limb (arm_l/arm_r at the shoulder,
+## leg_l/leg_r at the hip); no heads for now. The partial cuts stay for older paths.
 const CUTS := {
 	&"head": &"Head",
 	&"forearm_l": &"LeftLowerArm",
 	&"forearm_r": &"RightLowerArm",
 	&"shin_l": &"LeftLowerLeg",
 	&"shin_r": &"RightLowerLeg",
+	&"arm_l": &"LeftUpperArm",
+	&"arm_r": &"RightUpperArm",
+	&"leg_l": &"LeftUpperLeg",
+	&"leg_r": &"RightUpperLeg",
 }
+
+## Round 5: which whole-limb cut a hit bone takes. Head and torso hits return
+## &"" (the caller picks the arm nearest the hit point).
+static func limb_cut_for(bone: StringName) -> StringName:
+	match bone:
+		L_UPPER_ARM, L_LOWER_ARM, L_HAND:
+			return &"arm_l"
+		R_UPPER_ARM, R_LOWER_ARM, R_HAND:
+			return &"arm_r"
+		L_UPPER_LEG, L_LOWER_LEG, L_FOOT:
+			return &"leg_l"
+		R_UPPER_LEG, R_LOWER_LEG, R_FOOT:
+			return &"leg_r"
+	return &""
 
 ## Dempster mass fractions of a 70.1 kg body (spec, Ragdoll system), per physical bone.
 ## Hand mass (0.4) is folded into each forearm. Multiply by (mass_kg / 70.1).

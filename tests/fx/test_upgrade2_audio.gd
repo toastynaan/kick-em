@@ -1,6 +1,6 @@
 extends Node3D
-## Upgrade 2 AudioFX: strike variants by move id, charged hits layer a heavy
-## hit, the charge hum (seamless loop, pitch rising with the level, stopped
+## Upgrade 2 AudioFX (Round 5 rules): the impact follows the tier, not the
+## move; the charge hum (seamless loop, pitch rising with the level, stopped
 ## by the release, which whooshes and suppresses the move's own whoosh;
 ## auto-stop without a release), jump / land / crouch, arm break, wall slam,
 ## stumble and trip, Focus stings, and Focus pitch: the player's own sounds
@@ -23,27 +23,24 @@ func _ready() -> void:
 	var enemy := U.make_fighter(self, Vector3(0, 0, -1))
 	enemy.add_to_group(&"fighters")
 
-	# Strike variants by move id.
-	var expect := {&"cross": &"hit_cross", &"hook": &"hit_hook", &"uppercut": &"hit_uppercut",
-		&"roundhouse": &"hit_roundhouse", &"flying_kick": &"hit_flying_kick", &"stomp": &"hit_stomp",
-		&"hammer_fist": &"hit_stomp", &"spinning_backfist": &"hit_hook", &"e_hook": &"hit_hook",
-		&"jab1": &"punch", &"sparta_kick": &"kick", &"back_kick": &"heavy_hit"}
-	for move: StringName in expect:
-		await U.physics_frames(get_tree(), 6)
-		played.clear()
-		var h := U.hit(enemy, move, Vector3(0, 1.3, -0.8), Vector3(0, 0, -1), 60.0, 2000.0,
-				&"counter" if move == &"back_kick" else &"strike")
-		h.attacker = player
-		GameEvents.hit_landed.emit(h)
-		if played.is_empty() or played[0] != expect[move]:
-			fails.append("%s played %s, want %s" % [move, played, expect[move]])
+	# Round 5: the impact follows the hit tier, whatever the move (the Upgrade 2
+	# per-move variants gave way to "impact sounds layered by tier").
+	for tier in [HitInfo.Tier.FLINCH, HitInfo.Tier.STAGGER, HitInfo.Tier.LAUNCH, HitInfo.Tier.SEVER]:
+		for move: StringName in [&"jab1", &"cross", &"sparta_kick"]:
+			await U.physics_frames(get_tree(), 6)
+			played.clear()
+			var h := U.hit(enemy, move, Vector3(0, 1.3, -0.8), Vector3(0, 0, -1), 60.0, 2000.0, &"strike", tier)
+			h.attacker = player
+			GameEvents.hit_landed.emit(h)
+			if played.is_empty() or played[0] != AudioFX.TIER_SOUND[tier]:
+				fails.append("%s at %s played %s, want %s" % [move, HitInfo.tier_name(tier), played,
+					AudioFX.TIER_SOUND[tier]])
 	await U.physics_frames(get_tree(), 6)
 	played.clear()
-	var charged := U.hit(enemy, &"sparta_kick", Vector3(0, 1.0, -0.8), Vector3(0, 0, -1), 120.0, 6000.0)
-	charged.charge_level = 3
-	GameEvents.hit_landed.emit(charged)
-	if not (played.has(&"kick") and played.has(&"heavy_hit")):
-		fails.append("charged hit did not layer heavy_hit: %s" % [played])
+	GameEvents.hit_landed.emit(U.hit(enemy, &"grab", Vector3(0, 1.3, -0.8), Vector3(0, 0, -1), 0.0, 0.0, &"grab",
+			HitInfo.Tier.FLINCH))
+	if not played.is_empty():
+		fails.append("a grab hit played %s (grab_started covers it)" % [played])
 
 	# Charge hum: loop, level pitch, release.
 	var hum_stream: AudioStreamWAV = AudioFX.generate(&"charge_hum", 0)
@@ -67,6 +64,7 @@ func _ready() -> void:
 	played.clear()
 	GameEvents.charge_released.emit(player, &"power_punch", 3)
 	GameEvents.attack_active.emit(player, &"power_punch")
+	await get_tree().process_frame  # the release pop waits a frame for a strike_started whoosh
 	if AudioFX.active_hums() != 0:
 		fails.append("release did not stop the hum")
 	if not played.has(&"charge_release"):
@@ -96,6 +94,7 @@ func _ready() -> void:
 		await U.physics_frames(get_tree(), 6)
 		played.clear()
 		(spec[1] as Callable).call()
+		await get_tree().process_frame  # `landed` waits a frame for Traversal's `landing` (Round 5)
 		if not played.has(spec[0]):
 			fails.append("%s did not play (got %s)" % [spec[0], played])
 

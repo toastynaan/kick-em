@@ -1,7 +1,9 @@
 class_name CombatFX
-## Small visual effects owned by combat: the perfect-dodge afterimage and the
-## teleport puff. Blood and sound belong to agent F (event-driven).
-## OWNER: agent B (fighter & combat).
+## Small visual effects that agent F's event-driven effects do not cover: the
+## puff and after-image of the Duelist's AI vanish and teleport counter (the
+## player's teleport after-image, hit flashes, blood and sound are F's, from
+## GameEvents). Combat never spawns contact effects for hits.
+## OWNER: agent B (combat).
 
 const AFTERIMAGE_COLOR := Color(0.65, 0.85, 1.0, 0.45)
 const AFTERIMAGE_TIME := 0.3   ## game s (lingers in slow motion)
@@ -68,7 +70,3 @@ static func puff(pos: Vector3, color := AFTERIMAGE_COLOR, duration := PUFF_TIME)
 	tw.tween_property(mi, "scale", Vector3.ONE * 2.2, duration)
 	tw.tween_property(mat, "albedo_color:a", 0.0, duration)
 	tw.chain().tween_callback(mi.queue_free)
-
-## Clash spark between two hands (grab break).
-static func spark(pos: Vector3) -> void:
-	puff(pos, Color(1.0, 0.85, 0.35, 0.8), 0.12)

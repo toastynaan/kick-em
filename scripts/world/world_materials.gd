@@ -365,6 +365,34 @@ static func chip_material(surface: StringName) -> StandardMaterial3D:
 			return _std("chip_wood", Color(0.62, 0.46, 0.28), 0.85)
 	return _std("chip_drywall", Color(0.92, 0.9, 0.85), 0.95)
 
+## Round 5 shallow water patch: dark and glassy so it reads as wet (the sky
+## reflects in it); ripples and spray are F's (footstep / landing on &"water").
+static func water() -> StandardMaterial3D:
+	if _cache.has("water"):
+		return _cache["water"]
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.07, 0.1, 0.12)
+	m.roughness = 0.04
+	m.metallic = 0.1
+	m.metallic_specular = 0.9
+	_cache["water"] = m
+	return m
+
+## Round 6 hanging sign under a pillar's beam: faded yellow enamel.
+static func sign_board() -> StandardMaterial3D:
+	return _std("sign_board", Color(0.86, 0.66, 0.16), 0.55, 0.2)
+
+## Round 6 tiled plaza: pale stone tiles and the dark mortar bed under them.
+static func plaza_tile() -> StandardMaterial3D:
+	return _std("plaza_tile", Color(0.66, 0.62, 0.56), 0.8)
+
+static func mortar() -> StandardMaterial3D:
+	return _std("mortar", Color(0.16, 0.15, 0.14), 1.0)
+
+## Round 5 steel floor plate (sparks on &"metal").
+static func metal_plate() -> StandardMaterial3D:
+	return _std("metal_plate", Color(0.4, 0.41, 0.43), 0.38, 0.85)
+
 static func office_chair() -> StandardMaterial3D:
 	return _std("chair", Color(0.16, 0.2, 0.32), 0.7)
 

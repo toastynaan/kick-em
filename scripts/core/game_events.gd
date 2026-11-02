@@ -77,9 +77,78 @@ signal wall_slam(grabber: Node3D, victim: Node3D, wall: Node3D)
 ## receive_strike). result: &"chip" | &"crack" | &"hole" | &"break" | &"hold"
 ## (unbreakable: outer concrete). surface: &"drywall", &"brick", &"wood", &"concrete".
 signal wall_struck(attacker: Node3D, wall: Node3D, position: Vector3, normal: Vector3, power: float, result: StringName, surface: StringName)
+## Round 4: the player's lock-on target changed (E emits; target null = unlocked).
+signal lock_on_changed(fighter: Node3D, target: Node3D)
 ## Focus: the world slows, the player does not (H emits).
 signal focus_started(fighter: Node3D)
 signal focus_ended(fighter: Node3D)
+
+# Round 5: Feel Reference. hit_landed is the contact frame: flash, sound, blood,
+# shake and slow time all key off it (HitInfo.power / HitInfo.tier). Effects,
+# camera and TimeDirector LISTEN to these; combat code does not call them.
+## B: any strike's startup began (sprint = thrown at sprint speed; target may be null).
+## The AI reads it to sidestep sprint attacks and guard tapped strikes.
+signal strike_started(attacker: Node3D, target: Node3D, move_id: StringName, sprint: bool, charge_level: int)
+## H (Defence): a timed Block press parried `attacker` (it is staggered). TimeDirector slows time.
+signal parried(defender: Node3D, attacker: Node3D)
+## H (Defence): a Block tap with no attack in its window; parry is locked out.
+signal parry_whiffed(defender: Node3D)
+## H (Defence): vanish at `from`, appear at `to`. kind: &"counter" (behind an attacker) | &"pursuit".
+## TimeDirector slows time for &"counter"; FX leaves the after-image at `from`.
+signal teleported(fighter: Node3D, from: Vector3, to: Vector3, kind: StringName)
+## H (Defence): Dash in the window without a full Focus bar (or no room to teleport).
+signal sidestepped(fighter: Node3D, direction: Vector3)
+## H (Defence): the counter bonus on the next hit changed (0 = expired or used).
+signal counter_bonus_changed(fighter: Node3D, bonus: float)
+## M (Traversal): sprint state; sprint_charge itself is polled (Traversal.sprint_charge).
+signal sprint_started(fighter: Node3D)
+signal sprint_ended(fighter: Node3D)
+## M: a footstep of a moving player. surface from WorldTags.surface_of (&"concrete", &"water", &"metal", ...).
+signal footstep(fighter: Node3D, position: Vector3, surface: StringName, sprint_charge: float)
+## M: automatic parkour. kind: &"step" | &"vault" | &"mantle" | &"kickoff" | &"air_mantle". height: obstacle m.
+signal parkour(fighter: Node3D, kind: StringName, position: Vector3, height: float)
+## M: wall run. side: -1 wall on the left, +1 on the right.
+signal wall_run_started(fighter: Node3D, wall: Node3D, side: int)
+signal wall_run_step(fighter: Node3D, position: Vector3, normal: Vector3)
+## reason: &"time" | &"end" | &"stick" | &"jump" | &"strike" | &"hit"
+signal wall_run_ended(fighter: Node3D, reason: StringName)
+## M: every player landing. level: &"soft" | &"hard" | &"heavy" (heavy also emits shockwave).
+signal landing(fighter: Node3D, level: StringName, position: Vector3, vertical_speed: float)
+## M: heavy-landing / slam shockwave (enemies inside stumble / knockdown radius react).
+signal shockwave(fighter: Node3D, position: Vector3, stumble_radius: float, knockdown_radius: float)
+## M: Battering Ram collision. result: what happened to the victim (&"flinch" | &"stumble" | &"knockdown");
+## self_result: to the runner (&"none" | &"stumble" | &"knockdown").
+signal rammed(runner: Node3D, victim: Node3D, result: StringName, self_result: StringName)
+## G (Carry): holder started or stopped holding `held` (a Fighter, alive or dead, or a ThrowableProp; null = let go).
+signal carry_changed(holder: Node3D, held: Node3D)
+## G: air attack while holding a body: holder lands on it.
+signal body_slammed(holder: Node3D, victim: Node3D, position: Vector3)
+## G: props in hand.
+signal prop_picked_up(holder: Node3D, prop: Node3D)
+signal prop_thrown(holder: Node3D, prop: Node3D, velocity: Vector3)
+## D: a thrown prop broke (burst FX). kind: ThrowableProp.kind.
+signal prop_broken(prop: Node3D, position: Vector3, kind: StringName)
+## D: a flying body (launched or thrown) broke a wall. Focus +0.5 goes to whoever
+## launched or threw it (ImpactResolver.get_launcher(flyer)).
+signal wall_broken_by(flyer: Node3D, wall: Node3D, energy: float)
+## C: an enemy who lost a limb started (or stopped) fleeing: limping or crawling away.
+signal fleeing_changed(fighter: Node3D, fleeing: bool)
+## J (GameMode): the last enemy of a wave died. Camera close-up + TimeDirector &"last_kill".
+signal last_kill(fighter: Node3D)
+## J: the player died in Waves; the run is over (results screen data).
+signal run_ended(stats: Dictionary)
+
+# Round 6: more destruction. Effects, camera, AI nav and counts LISTEN to these.
+## K: a clutter object broke. by = the flying body or the attacker that broke it (null: a blast or a fall).
+signal furniture_broken(node: Node3D, position: Vector3, kind: StringName, energy: float, by: Node3D)
+## D: part of the structure collapsed: unsupported panel cells fell, or a snapped
+## pillar dropped what it held up. kind: &"panel" | &"overhead" | &"platform" | ...
+signal structure_collapsed(node: Node3D, position: Vector3, kind: StringName)
+## D (WorldDamage): the floor took damage. level 1 crack, 2 crater, 3 rubble (the new level reached).
+signal floor_damaged(position: Vector3, radius: float, level: int, surface: StringName)
+## D (WorldDamage): a blast was applied to the breakables around `center`.
+## source: &"slam" | &"heavy_landing" | &"wall_break" | &"structure"
+signal world_blast(center: Vector3, radius: float, power: float, source: StringName)
 
 # Flow
 signal round_started(mode: StringName)

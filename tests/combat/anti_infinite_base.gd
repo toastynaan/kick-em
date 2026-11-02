@@ -224,7 +224,7 @@ func _sample(now: float, dt: float) -> void:
 		_combo_start_hp = enemy.hp + (c.last_received.damage if c.last_received else 0.0)
 	_prev_taken = taken
 	m_max_hits = maxi(m_max_hits, taken)
-	var noctl := enemy.is_in_hitstun() or enemy.is_down() or c.held_by != null
+	var noctl := enemy.is_in_hitstun() or enemy.is_down() or enemy.carry.is_held()
 	if noctl and _noctl == 0.0:
 		_noctl_start = now - dt
 		_stretch_down = false

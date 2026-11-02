@@ -17,6 +17,22 @@ var walk_speed := Tuning.WALK_SPEED
 ## &"stand" or &"crouch" (lab key C); &"air" is set while jumping.
 var stance: StringName = &"stand"
 var _airborne := false
+var _freeze_until := 0.0  ## TimeDirector.now() time the hitstop ends (as Fighter)
+
+## Hitstop as the Fighter does it (TimeDirector.hitstop() calls this): the
+## animation stops; the RagdollController sees is_frozen() and holds its bodies.
+func freeze_hitstop(duration_real: float) -> void:
+	if duration_real <= 0.0:
+		return
+	_freeze_until = maxf(_freeze_until, TimeDirector.now() + duration_real)
+	if animator:
+		animator.time_scale = 0.0
+
+func is_frozen() -> bool:
+	return TimeDirector.now() < _freeze_until
+
+func get_actor_time() -> float:
+	return 0.0 if is_frozen() else 1.0
 
 ## Lab jump (Tuning.JUMP_APEX with Tuning.GRAVITY).
 func jump() -> void:
@@ -60,7 +76,11 @@ func _ready() -> void:
 	ragdoll.setup(self, rig, animator, active_muscles)
 
 func _physics_process(delta: float) -> void:
-	if ragdoll == null or ragdoll.is_simulating():
+	if _freeze_until > 0.0 and not is_frozen():
+		_freeze_until = 0.0
+		if animator:
+			animator.time_scale = 1.0
+	if ragdoll == null or ragdoll.is_simulating() or is_frozen():
 		return
 	if ragdoll.state == RagdollController.State.GETUP:
 		velocity = Vector3.ZERO

@@ -6,6 +6,8 @@ extends Node
 ## Arm drag: swing the victim around you with the camera/mouse, release flings.
 ## Legs on a tumbling or downed victim: giant swing, then release.
 ## OWNER: agent G. CONTRACT STUB: B's grab flow calls these.
+## Round 5: the game's grabs are Carry (carry.gd); nothing in play starts a
+## limb grab any more. LimbGrab stays for the Grab Lab (key 8) and its tests.
 ##
 ## How it works (agent G):
 ## - The "hand" is an invisible kinematic body (no shape, no collision) per

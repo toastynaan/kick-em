@@ -1,16 +1,21 @@
 extends Node
-## Crowd attack rate (Upgrade 2 risk: target one tell every 1-1.5 s of open
-## play) and Focus clocks. Four Grunts already fighting round an open,
-## invulnerable player:
-## A. 30 s at 1x: mean gap between tells within [RATE_MIN, RATE_MAX] s, and
-##    no two different attackers' active frames closer than SWING_SPACING.
-## B. 15 s (real) of Focus (world at 0.3x): attacks keep coming, no token is
-##    lost to a timeout, tells last ~3.3x longer in real time, spacing holds.
-## OWNER: agent C (AI tests).
+## Crowd attack rate (Upgrade 2 risk: target one attack turn every 1-1.5 s
+## of open play; a grunt's jab-cross string is one turn) and Focus clocks.
+## Four Grunts already fighting round an open, invulnerable player:
+## A. 30 s at 1x: mean gap between turns within [RATE_MIN, RATE_MAX] s, and
+##    no two different attackers' first active frames closer than
+##    Tuning.TOKEN_ACTIVE_GAP.
+## B. 15 s (real) of Focus (TimeDirector.begin_focus: world at 0.3x): attacks
+##    keep coming, no token is lost to a timeout, enemy wind-ups last ~3.3x
+##    longer in real time (enemy frame data runs in their scaled time), spacing
+##    holds. OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 const RATE_MIN := 0.9
 const RATE_MAX := 1.6
+## s (world): a tell this soon after the same attacker's previous one is its
+## string's next hit, not a new turn.
+const STRING_GAP := 1.0
 
 var failures := 0
 var player: Fighter
@@ -45,7 +50,7 @@ func _run() -> void:
 		enemies.append(e)
 		e.combat.attack_started.connect(func(_m: StringName) -> void: grants.erase(e))
 	GameEvents.attack_tell.connect(func(a: Node3D, _k: StringName, d: float) -> void:
-		if a in enemies: tells.append([Util.game_now(), a, d]))
+		if a in enemies: tells.append([Util.game_now(), a, d, AttackDirector.world_now()]))
 	GameEvents.attack_active.connect(func(a: Node3D, _m: StringName) -> void:
 		if a in enemies: actives.append([Util.game_now(), AttackDirector.world_now(), a]))
 	AttackDirector.token_granted.connect(func(e: Fighter) -> void: grants[e] = true)
@@ -62,32 +67,46 @@ func _run() -> void:
 	actives.clear()
 	var _t0 := Util.game_now()
 	await _run_for(30.0)
-	var n := tells.size()
+	var n := _turns()
 	var gap := 30.0 / maxf(n, 1)
-	print("[ai] info: %d tells in 30 s of open play -> one every %.2f s" % [n, gap])
-	check(gap >= RATE_MIN and gap <= RATE_MAX, "crowd rate: one tell every %.2f s (target %.1f-%.1f)" % [gap, RATE_MIN, RATE_MAX])
-	check(_min_gap(1) >= Tuning.SWING_SPACING - 0.02, "1x: active frames of different attackers >= %.2f s apart (closest %.3f)" % [Tuning.SWING_SPACING, _min_gap(1)])
+	print("[ai] info: %d tells (%d attack turns) in 30 s of open play -> one turn every %.2f s" % [tells.size(), n, gap])
+	check(gap >= RATE_MIN and gap <= RATE_MAX, "crowd rate: one attack turn every %.2f s (target %.1f-%.1f)" % [gap, RATE_MIN, RATE_MAX])
+	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "1x: first active frames of different attackers >= %.0f frames apart (closest %.1f)" % [
+		Tuning.TOKEN_ACTIVE_GAP * 60.0, _min_gap(1) * 60.0])
 
 	# --- B: Focus, world at 0.3x for 15 s of real time.
 	tells.clear()
 	actives.clear()
 	wasted = 0
-	Engine.time_scale = Tuning.FOCUS_SCALE
+	TimeDirector.begin_focus(Tuning.FOCUS_SCALE)
 	await _run_for(15.0)
-	Engine.time_scale = 1.0
+	print("[ai] info: time scale during Focus %.2f" % Engine.time_scale)
+	TimeDirector.end_focus()
 	var tells_b := tells.duplicate()
 	var real_tell := _real_tell_time()
 	print("[ai] info: Focus: %d tells in 15 s real (4.5 s world); tell to active %.2f s real; tokens wasted %d" % [tells_b.size(), real_tell, wasted])
 	check(tells_b.size() >= 2, "Focus: attacks keep coming (%d tells)" % tells_b.size())
 	check(wasted <= 1, "Focus: no token lost to a timeout (%d released unused)" % wasted)
-	check(real_tell < 0.0 or real_tell > 0.35 / Tuning.FOCUS_SCALE * 0.8,
-		"Focus: a tell lasts ~1/%.1f longer in real time (%.2f s)" % [Tuning.FOCUS_SCALE, real_tell])
-	check(_min_gap(0) >= Tuning.SWING_SPACING - 0.02, "Focus: active frames >= %.2f s apart in real time (closest %.3f)" % [Tuning.SWING_SPACING, _min_gap(0)])
+	var min_startup := Tuning.frames(Tuning.ENEMY_STARTUP_EARLY_MIN)
+	check(real_tell < 0.0 or real_tell > min_startup / Tuning.FOCUS_SCALE * 0.8,
+		"Focus: a wind-up lasts ~1/%.1f longer in real time (%.2f s, >= %.2f)" % [Tuning.FOCUS_SCALE, real_tell, min_startup / Tuning.FOCUS_SCALE * 0.8])
+	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "Focus: first active frames >= %.0f frames apart in world time (closest %.1f)" % [
+		Tuning.TOKEN_ACTIVE_GAP * 60.0, _min_gap(1) * 60.0])
 	# And straight after Focus.
 	actives.clear()
 	await _run_for(8.0)
-	check(_min_gap(0) >= Tuning.SWING_SPACING - 0.02, "after Focus: spacing holds (closest %.3f)" % _min_gap(0))
+	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "after Focus: spacing holds (closest %.1f frames)" % (_min_gap(1) * 60.0))
 	_finish()
+
+## Tells that start an attack turn (not a string's later hit).
+func _turns() -> int:
+	var last := {}
+	var n := 0
+	for t: Array in tells:
+		if float(t[3]) - float(last.get(t[1], -INF)) > STRING_GAP:
+			n += 1
+		last[t[1]] = float(t[3])
+	return n
 
 ## Closest gap between active frames of different attackers (index 0: real
 ## time, 1: world time).
@@ -121,6 +140,7 @@ func _run_for(seconds: float) -> void:
 		await get_tree().physics_frame
 
 func _finish() -> void:
+	TimeDirector.end_focus()
 	Engine.time_scale = 1.0
 	AttackDirector.reset()
 	print("[ai] test_crowd_rate: %s (%d failures)" % ["PASS" if failures == 0 else "FAIL", failures])

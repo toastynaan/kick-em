@@ -1,22 +1,49 @@
 class_name AIBrain
 extends Node
-## Enemy controller: one per enemy Fighter, behaviour chosen by archetype
-## (duelist, grunt, brawler, shield, brute, thrower). Writes fighter.move_input /
-## face_dir, asks AttackDirector for tokens, starts attacks through
-## fighter.combat.start_enemy_attack(). Added as a child of the enemy Fighter
-## by FighterFactory. OWNER: agent C (AI).
+## Enemy controller: one per enemy Fighter, behaviour chosen by archetype.
+## OWNER: agent C (AI). Added as a child of the enemy Fighter by FighterFactory.
+##
+## Round 5 roster (Feel Reference: Enemy types; Waves uses these three):
+## - grunt (75 kg): jab-cross string (e_jab then e_hook), front kick (e_kick),
+##   grab (e_grab, blue glow). Circles and takes tokens. Sidesteps a sprint
+##   attack seen from more than Tuning.SIDESTEP_SPRINT_MIN_DIST
+##   Tuning.SIDESTEP_SPRINT_CHANCE of the time; guards Tuning.GUARD_TAP_CHANCE
+##   of tapped strikes aimed at him (GameEvents.strike_started).
+## - stick (75 kg): swing (e_stick_swing), thrust (e_stick_thrust), reach
+##   2.2 m, keeps about 3 m away. Holds a stick (this brain's mesh on the right
+##   hand); a stagger or more drops it as a ThrowableProp &"stick" and he
+##   fights on unarmed with the grunt's moves.
+## - heavy (110 kg): overhead smash (e_heavy), shoulder charge (e_charge, from
+##   range), grab and slam (e_grab_slam, blue glow). Never sidesteps (B makes
+##   him ignore flinches and launch at 80%).
+## Duel mode: the Duelist (perfect dodge / parry, teleport counter through B's
+## start_counter, whiff punish, feints, vanish step). Legacy archetypes
+## (brawler, shield, brute, thrower) keep working for their tests.
+##
+## Readability (Feel Reference: Enemies have to be readable first): every
+## move starts with AttackDirector.enemy_startup_s(move) of startup (never
+## under 18 frames early in a run); the director spaces the two token
+## holders' first active frames; TellGlint makes the attacking limb glow from
+## wind-up to first active frame. While the player is knocked down a holder
+## takes Tuning.DOWNED_FREE_SWINGS free swing; the rest wait in the ring.
+##
+## Limb loss (F10, GameEvents.limb_severed): lost an arm, it fights on
+## one-handed at Tuning.ARM_LOST_DAMAGE_MULT damage (get_damage_mult) above
+## Tuning.LIMB_LOST_FLEE_HP and limps away at or below it; lost a leg, it
+## crawls away at Tuning.CRAWL_SPEED and never attacks. Fleeing enemies take
+## no tokens, emit GameEvents.fleeing_changed, use P's limp / crawl
+## locomotion, and a ground strike finishes them.
 ##
 ## Flow: ENTRY walks entry_path into the courtyard, then FIGHT. In FIGHT the
-## enemy holds a ring position around the player (NEAR or FAR, from the
-## AttackDirector), strafes, keeps ~1.6 m from other enemies and slides along
-## walls (routing round them via the arena's spawn-path points when the way
-## stays blocked). Every attack interval a NEAR enemy (or one the player has
-## walked up to) asks for a token; with one it closes to the move's range,
-## asks the director for a spaced tell (request_swing) and starts the attack,
-## or gives the token back after GIVE_UP_TIME. It never acts while down, in
-## hitstun or held, and pauses briefly after a get-up. Enemies follow a player
-## knocked out of the courtyard, and walk back in along a spawn path when they
-## are knocked out themselves.
+## enemy circles the player in its ring (Tuning.CIRCLE_RING; NEAR when next
+## in line), strafes, keeps ~1.6 m from other enemies and slides along walls
+## (the nav grid routes round walls, low walls, crates and the platform;
+## bodies on the floor are walkable). A NEAR enemy (or one the player walked
+## up to) asks for a token; with one it closes to the move's range, asks the
+## director for a spaced swing (request_swing) and starts the attack, or
+## gives the token back after GIVE_UP_TIME. It never acts while down, in
+## hitstun or held, pauses briefly after a get-up, and walks back into the
+## ring after being launched away.
 
 signal attack_launched(move_id: StringName)
 ## Duelist vanish step done (round 2.5): reappeared at `spot`.
@@ -41,46 +68,68 @@ const ROUTE_BLOCKED_TIME := 0.75    ## s the straight line must stay blocked bef
 const ROUTE_REPLAN := 0.5           ## s between waypoint searches while routing
 const GETUP_PAUSE := 0.6            ## s after a get-up before attacking again
 const REQUEST_RETRY := 0.25         ## s between refused token requests
-const LONE_INTERVAL := Vector2(0.35, 1.0)  ## s between attacks for a lone enemy (duel)
+## s between attacks for a lone enemy (duel), start to start. Round 5: every
+## Duelist hit now flinches or staggers the player instead of launching him,
+## so he is open again sooner; a slightly longer gap keeps a readable rhythm
+## (about one attack per 1.2-2.5 s of open play).
+const LONE_INTERVAL := Vector2(0.8, 1.7)
 const REQUEST_MAX_DIST := 6.0       ## m: closer than this before asking for a melee token (it must arrive within GIVE_UP_TIME)
 const FACE_TOLERANCE := 0.8         ## dot(forward, to player) needed to swing
 const FACE_WAIT_MAX := 0.35         ## s: swing anyway if turning takes longer
 const START_FAIL_MAX := 30          ## refused start_enemy_attack calls before giving up the token
-## Centre-to-centre distance at which each move starts.
-const MOVE_RANGE := {&"e_hook": 1.4, &"e_kick": 1.6, &"e_heavy": 1.6, &"e_grab": 1.05,
+## Centre-to-centre distance at which each move starts. Stick moves reach
+## 2.2 m (archetype "reach"); they start a little inside it.
+const MOVE_RANGE := {&"e_jab": 1.3, &"e_hook": 1.4, &"e_kick": 1.6, &"e_heavy": 1.6, &"e_grab": 1.05,
+	&"e_grab_slam": 1.1, &"e_stick_swing": 2.0, &"e_stick_thrust": 2.1,
 	&"e_charge": 5.5, &"e_throw_debris": 11.0, &"e_sweep": 1.45}
 ## Minimum distance for ranged / charging moves.
 const MOVE_MIN_RANGE := {&"e_charge": 2.6, &"e_throw_debris": 3.5}
-## Tell length per move (game s, inside [TELL_MIN, TELL_MAX]); heavier = longer.
-const MOVE_TELL := {&"e_hook": 0.38, &"e_kick": 0.46, &"e_grab": 0.42, &"e_heavy": 0.54,
-	&"e_charge": 0.6, &"e_throw_debris": 0.5, &"e_sweep": 0.44}
-## Upgrade 2 height mix: move weights per archetype (HIGH e_hook / e_grab,
-## MID e_kick / e_heavy, LOW e_sweep). Moves an archetype lacks (e_sweep
-## before MoveLibrary has it) drop out. Shield and Brute keep their identity:
-## no sweeps; the Brute charges from range (_pick_move).
+## Move weights per archetype. Round 5 roster: the grunt's e_jab is the
+## jab-cross string (STRINGS), the heavy also charges from range (_pick_move).
+## Legacy archetypes keep their Upgrade 2 height mix (HIGH e_hook / e_grab,
+## MID e_kick / e_heavy, LOW e_sweep once MoveLibrary has it).
 const MOVE_MIX := {
-	&"grunt": {&"e_hook": 0.45, &"e_kick": 0.35, &"e_sweep": 0.2},
+	&"grunt": {&"e_jab": 0.5, &"e_kick": 0.3, &"e_grab": 0.2},
+	&"stick": {&"e_stick_swing": 0.55, &"e_stick_thrust": 0.45},
+	&"heavy": {&"e_heavy": 0.6, &"e_grab_slam": 0.4},
 	&"brawler": {&"e_hook": 0.4, &"e_heavy": 0.35, &"e_sweep": 0.25},
 	&"shield": {&"e_hook": 0.55, &"e_heavy": 0.45},
 	&"brute": {&"e_heavy": 0.7, &"e_grab": 0.3},
 	&"duelist": {&"e_hook": 0.25, &"e_kick": 0.2, &"e_heavy": 0.15, &"e_grab": 0.15, &"e_sweep": 0.25},
 	&"thrower": {&"e_hook": 0.6, &"e_kick": 0.4},
 }
+## Strings: the moves that follow a move while its holder keeps the token
+## (the grunt's jab-cross: e_jab, then e_hook as the cross).
+const STRINGS := {&"e_jab": [&"e_hook"]}
+## A Round 5 move B's MoveLibrary does not have yet is swapped for its nearest
+## older move, so the roster fights before every move lands.
+const MOVE_FALLBACK := {&"e_jab": &"e_hook", &"e_stick_swing": &"e_hook",
+	&"e_stick_thrust": &"e_kick", &"e_grab_slam": &"e_grab"}
+## Grabs: blue glow, need both hands.
+const GRAB_MOVES: Array[StringName] = [&"e_grab", &"e_grab_slam"]
 ## Hit heights when MoveLibrary has no entry (MoveData.hit_level is the source).
-const MOVE_LEVEL_FALLBACK := {&"e_hook": HitInfo.Level.HIGH, &"e_grab": HitInfo.Level.HIGH,
+const MOVE_LEVEL_FALLBACK := {&"e_jab": HitInfo.Level.HIGH, &"e_hook": HitInfo.Level.HIGH,
+	&"e_grab": HitInfo.Level.HIGH, &"e_grab_slam": HitInfo.Level.HIGH,
+	&"e_stick_swing": HitInfo.Level.HIGH, &"e_stick_thrust": HitInfo.Level.MID,
 	&"e_kick": HitInfo.Level.MID, &"e_heavy": HitInfo.Level.MID, &"e_charge": HitInfo.Level.MID,
 	&"e_throw_debris": HitInfo.Level.MID, &"e_sweep": HitInfo.Level.LOW}
 const MAX_SAME_LEVEL := 2           ## no third attack in a row at one height
 ## Moves a fighter with a broken arm still uses (kicks, the shoulder charge).
 const ARM_FREE_MOVES: Array[StringName] = [&"e_kick", &"e_sweep", &"e_charge"]
-const TELL_JITTER := 0.03
+## Easy difficulty: s added to every enemy startup.
 const EASY_TELL_BONUS := 0.05
-const SPEED_MULT := {&"shield": 0.65, &"brute": 0.75}
+const SPEED_MULT := {&"shield": 0.65, &"brute": 0.75, &"heavy": 0.85}
 const BRAWLER_GUARD_DIST := 3.0
 const SHIELD_GUARD_DIST := 4.5      ## m: the Shield raises its guard inside this
 const SHIELD_CLOSE_GUARD := 2.4     ## m: with a token, guard only this close (or if the player swings)
 const SHIELD_REQUEST_DIST := 3.6    ## m: the slow Shield asks for a token only this close
-## Ring radius as a fraction across the ring band, per archetype.
+## Rings. Waiting enemies circle in Tuning.CIRCLE_RING (Sifu 3, 5-30 s): the
+## next in line on its inner part, the rest further out, as a fraction across
+## the band. The Duelist (alone) and the legacy Thrower keep their old rings.
+const CIRCLE_NEAR_BIAS := Vector2(0.0, 0.3)
+const CIRCLE_FAR_BIAS := Vector2(0.4, 1.0)
+const OLD_RING_ARCHETYPES: Array[StringName] = [&"duelist", &"thrower"]
+## Ring radius as a fraction across the ring band, per archetype (old rings).
 const RING_BIAS := {&"duelist": Vector2(0.05, 0.3), &"thrower": Vector2(0.4, 0.8)}
 const STRAFE_SPEED := {&"duelist": 0.55}
 const STRAFE_NEAR := 0.3
@@ -91,17 +140,71 @@ const SPREAD_ANGLE_NEAR := deg_to_rad(55.0)
 const SPREAD_ANGLE_FAR := deg_to_rad(40.0)
 const TAUNT_INTERVAL := Vector2(4.0, 9.0)
 const TAUNT_HOLD := 1.2
+## m: a player this close to a waiting (FAR) enemy that is on screen engages it.
+const ENGAGE_DIST := 3.0
+# Round 5: reactions to the player's strikes (GameEvents.strike_started).
+const SPRINT_SIDESTEP_TIME := 0.3   ## s of the sidestep away from a sprint attack
+const SPRINT_SIDESTEP_DIST := 1.6   ## m: clear of the lunge (it stops 0.9 m short of where he stood)
+const TAP_GUARD_AFTER := 0.25       ## s a tap guard is held past the strike's first active frame
+const TAP_GUARD_MAX := 0.9          ## s a tap guard is held at most
+# Round 5: strings, the downed player, heavies.
+const STRING_WAIT_MAX := 0.35       ## s a string's follow-up may wait for a spaced slot before it is dropped
+const STRING_RANGE_SLACK := 0.7     ## m beyond the follow-up's range it still swings (the jab's lunge closed in)
+## The free swing at a knocked-down player: moves that reach a body on the floor, best first.
+const DOWNED_MOVES: Array[StringName] = [&"e_kick", &"e_stick_swing", &"e_heavy", &"e_stick_thrust"]
+const HEAVY_CHARGE_FROM := 3.2      ## m: a heavy this far away may shoulder-charge...
+const HEAVY_CHARGE_CHANCE := 0.45   ## ...this often (it knocks the player down: keep it a threat, not a habit)
+# Round 5: breaking the player's grab (Carry asks wants_grab_break in the
+# Tuning.GRAB_BREAK_FRAMES window of a neutral grab). The doc gives no rate;
+# G's fallback is 0.3. Heavies are strong, a stick enemy's hands are busy.
+const GRAB_BREAK_CHANCE := {&"grunt": 0.25, &"stick": 0.2, &"heavy": 0.5, &"duelist": 0.6,
+	&"brawler": 0.35, &"brute": 0.5, &"shield": 0.25, &"thrower": 0.15}
+const GRAB_BREAK_GUARD_BONUS := 0.15    ## guard up when caught: alert
+const GRAB_BREAK_REPEAT_WINDOW := 4.0   ## s: grabs on him inside this...
+const GRAB_BREAK_REPEAT_BONUS := 0.1    ## ...each make the next break likelier (anti-spam)...
+const GRAB_BREAK_CAP := 0.75            ## ...up to this
+# Round 5: limb loss.
+## m/s limping away (lost an arm at <= Tuning.LIMB_LOST_FLEE_HP). The doc gives no
+## number: a hurt walk well under the player's 4.5 m/s, so he can be caught.
+const LIMP_SPEED := 1.4
+const FLEE_STEP := 3.0              ## m ahead of a fleeing enemy its steering target sits
+const FLEE_REST_DIST := 8.0         ## m from the player a fleeing enemy stops and cowers
+# Round 5: the stick enemy's stick (own mesh on the right hand attachment).
+const STICK_LENGTH := 0.95          ## m
+const STICK_RADIUS := 0.026         ## m at the butt (the tip is 85%)
+const STICK_GRIP := 0.2             ## m from the butt end to the fist
+const STICK_TILT := 25.0            ## degrees the stick points down from the fist's forward axis
+const STICK_COLOR := Color(0.42, 0.27, 0.13)
+const STICK_GLOW_ENERGY := 3.0      ## emission while it winds up (the tell glow)
+## F's Focus tint keeps the colour of GeometryInstance3Ds in this group: the
+## stick's wind-up glow is never dimmed (Feel Reference).
+const FOCUS_KEEP_GROUP := &"focus_keep_color"
+## Added to the hand's velocity when he drops it (m/s along the hit, m/s up):
+## the stick visibly flies out of his hand instead of sliding off.
+const STICK_DROP_TOSS := Vector2(1.5, 1.8)
+const STICK_MASS := 0.7             ## kg, only when ThrowableProp builds nothing itself
+const HAND_SPEED_MAX := 12.0        ## m/s cap on the tracked hand velocity
 # Duelist
-const DODGE_LEAD := 0.07            ## s before the active frame to press block
+const DODGE_LEAD := 0.07            ## s before the active frame to press block (inside Tuning.PARRY_WINDOW)
 const DODGE_HOLD := 0.12            ## s the dodge press is held
 const DODGE_RANGE := 3.0            ## m: only dodge attacks aimed at us
 const DODGE_FACING := 0.5           ## dot(player forward, to us)
 const DUELIST_BLOCK_CHANCE := [0.1, 0.2]  ## [easy, normal] plain block when the dodge roll fails
+## With the Round 5 Defence on: share of the Duelist's counters after a parry
+## that are the teleport counter (start_counter, 1 Focus) instead of a hook.
+const DUELIST_TELEPORT_SHARE := 0.4
 const BLOCK_AFTER_ACTIVE := 0.3     ## s a plain block is held past the active frame
 const SIDESTEP_TIME := 0.28         ## s of the visible sidestep after a dodge (no Focus to teleport)
 const SIDESTEP_SPEED := 4.6         ## m/s: SIDESTEP_TIME x this = 1.3 m
-const COUNTER_TELL := 0.3           ## s blue tell of the Duelist's teleport counter (start_counter)
-const COUNTER_WINDOW := 1.2         ## s after a dodge in which the counter may still fire
+const COUNTER_TELL := 0.3           ## s orange tell of the Duelist's teleport counter (start_counter)
+## s after a dodge / parry in which the counter may still fire. A parried
+## player is staggered ~0.8 s (+ the freeze) and is never swung at in
+## hitstun, so the punish starts the moment he can act again: this must
+## outlast the stagger.
+const COUNTER_WINDOW := 1.6
+## While a counter waits for its turn (the parried player reels), the Duelist
+## closes to this share of its hook's range.
+const COUNTER_CLOSE_IN := 0.8
 const MASH_WINDOW := 2.0            ## s: repeats of the same player move inside this raise the dodge chance
 const MASH_BONUS := 0.15            ## dodge chance added per repeat
 const MASH_CAP := 0.85
@@ -111,16 +214,24 @@ const FEINT_INTERVAL := Vector2(3.0, 5.5)
 const FEINT_TIME := 0.45
 const FEINT_RADIUS := 1.9
 const STUCK_CHECK := 1.0            ## s between stuck checks
+## Stuck metric (Round 6 acceptance: no enemy stuck for more than 3 s): over
+## each STALL_WINDOW in which the enemy was free to move and asked for at
+## least STALL_MIN_SPEED, covering under STALL_SHARE of the asked distance
+## counts as stalled; stuck_time is the run of stalled windows.
+const STALL_WINDOW := 0.5
+const STALL_MIN_SPEED := 0.6        ## m/s asked
+const STALL_SHARE := 0.25
+## Stalled this long: re-test the grid round it, drop its path and detour
+## the other way (a corner of clutter the grid had wrong).
+const STALL_ESCALATE := 1.5
+const STALL_BACKOFF := 0.45         ## s of the escalation's straight back-out (then it re-plans)
+const STALL_PENALTY_RADIUS := 0.7   ## m of grid made costly round the wedge (AINavGrid.penalize)
 const STUCK_MOVE := 0.25            ## m moved per check below which we are stuck
 const DETOUR_TIME := 0.8
 const NEAR_JOIN_INTERVAL := Vector2(0.3, 0.8)  ## s: max wait after moving up to the NEAR ring
 ## Crowd enemies use Tuning.ATTACK_INTERVAL x this, start to start (the
 ## director's pacing keeps the crowd at one grant per 1-1.5 s on Normal).
 const CROWD_INTERVAL_MULT := 0.5
-## Where in the NEAR ring band an enemy waits (0 = inner edge). Close to the
-## inner edge so a granted token turns into a swing quickly (crowd rate).
-const NEAR_RING_BIAS := {&"default": Vector2(0.0, 0.35), &"duelist": Vector2(0.05, 0.3),
-	&"thrower": Vector2(0.4, 0.8)}
 const ENTRY_FIGHT_DIST := 4.0       ## m: an entering enemy inside the courtyard turns to fight this close
 const PLAYER_OUTSIDE_GROW := 2.5    ## m: play area margin around a player outside the courtyard
 const OUTSIDE_RETURN_TIME := 2.5    ## s outside the courtyard before walking a spawn path back in
@@ -140,6 +251,9 @@ const CLEAR_RADIUS := 0.24          ## m: radius of the capsule swept by _clear_
 const CLEAR_HEIGHT := 1.5           ## m: its height (bottom ~0.2 m above the floor)
 const CLEAR_CENTER := 0.95          ## m: its centre above the floor
 const HEAD_PROBE_RISE := 0.8        ## m above WALL_PROBE_HEIGHT for the second forward ray
+## m below WALL_PROBE_HEIGHT for a third forward ray: Round 6 clutter as low as
+## 0.45 m (benches, coffee tables, boxes) sits under the waist ray.
+const LOW_PROBE_DROP := 0.35
 const SPOT_RADIUS := 0.45           ## m: free radius a steering target needs
 const BODY_CLEARANCE := 0.32        ## m: wall hits closer than this to the movement line block it (~body radius)
 const RANGE_SLACK := 0.4            ## m added to a move's range once the approach stalls
@@ -147,8 +261,13 @@ const RANGE_SLACK := 0.4            ## m added to a move's range once the approa
 const NAV_REPLAN := 0.6             ## s between path re-plans
 const NAV_GOAL_MOVE := 1.0          ## m the goal may move before an early re-plan
 const NAV_LOOKAHEAD := 8            ## path points checked for a clear shortcut
-const NAV_LOOK_EVERY := 0.12        ## s between shortcut checks
+const NAV_LOOK_EVERY := 0.06        ## s between shortcut checks (and only on this brain's slot tick)
 const NAV_STUCK := 1.2              ## s without progress along a path before a local grid refresh
+const WIDE_DETOUR_MAX := 2.0        ## m a wide-layer way may be longer than the normal one and still be taken
+## Periodic path work (re-plans, shortcut checks) runs only on ticks where
+## (physics frame + slot) % SLOT_STRIDE == 0, so up to 8 enemies never
+## re-plan on the same tick (perf: ~1 ms spikes when they lined up).
+const SLOT_STRIDE := 8
 const UNREACHABLE_WAIT := 1.5       ## s before asking again after the player proved unreachable
 # Duelist vanish step (free, BT3 flavour) when it cannot reach an open player
 const VSTEP_NO_PROGRESS := 2.5      ## s without getting VSTEP_PROGRESS closer
@@ -160,6 +279,9 @@ const VSTEP_HIDE := 0.12            ## s hidden before the teleport
 const VSTEP_SHOW := 0.05            ## s after reappearing before it acts
 const VSTEP_COOLDOWN := 6.0
 
+## Tests: >= 0 seeds every brain's RNG (seed + its slot) for reproducible soaks.
+static var test_seed := -1
+
 var fighter: Fighter
 ## Path into the arena: the enemy walks these points in order after spawning,
 ## then fights. Set by the spawner (GameMode) before or right after add_child.
@@ -168,8 +290,21 @@ var entry_path: PackedVector3Array = PackedVector3Array()
 var mode := Mode.ENTRY
 ## Attacks this brain has started (tests, debugging).
 var attacks_started := 0
-## Tests: force the Duelist's perfect-dodge chance (negative = use Tuning).
+## Tests: force the Duelist's read chance (negative = use Tuning).
 var dodge_chance_override := -1.0
+## Tests: force the share of the Duelist's counters after a parry that are the
+## teleport counter (negative = DUELIST_TELEPORT_SHARE).
+var teleport_share_override := -1.0
+## Tests: force the grab-break chance (negative = GRAB_BREAK_CHANCE rules).
+var grab_break_override := -1.0
+var _grabbed_at: Array[float] = []  ## game times the player caught us (anti-spam)
+## Sprint-attack sidesteps and tap guards taken (tests, debugging).
+var sidesteps := 0
+var tap_guards := 0
+## Free swings started at a knocked-down player (tests).
+var downed_swings := 0
+## The ThrowableProp this stick enemy dropped (tests; null until then).
+var dropped_stick: Node3D = null
 
 var _rng := RandomNumberGenerator.new()
 var _time := 0.0
@@ -238,6 +373,9 @@ var _fetch_started := 0.0
 var _fetch_cooldown_until := 0.0
 ## Attacks the Duelist started with start_counter (tests, debugging).
 var counters_started := 0
+## Parries the Duelist made and counters it started after one (tests, debugging).
+var parries_seen := 0
+var parry_counters := 0
 ## Duelist vanish steps taken (tests, debugging).
 var vanish_steps := 0
 var _arm_broken := false
@@ -261,6 +399,32 @@ var _vstep_spot := Vector3.ZERO
 var _vstep_ready_at := 0.0
 var _vstep_best := INF
 var _vstep_progress_at := 0.0
+# Round 5
+var _slot := 0                      ## AttackDirector.claim_slot(): spreads periodic work over ticks
+var _string_rest: Array[StringName] = []  ## the current string's moves still to come
+var _following := false             ## the current move is a string's follow-up
+var _turn_downed := false           ## the current turn's move was picked for a downed player
+var _tell_move: StringName = &""    ## move being started this tick (TellGlint reads it)
+var _flee: StringName = &""         ## &"" | &"limp" | &"crawl"
+var _lost_arm := {}                 ## &"left" / &"right" -> true
+var _lost_leg := false
+var _tap_guard_until := -INF        ## game time a tap guard is held until
+var _stick: MeshInstance3D = null
+var _stick_mat: StandardMaterial3D = null
+var _hand_prev := Vector3.INF
+var _hand_vel := Vector3.ZERO
+var _counter_after_parry := false   ## the pending counter answers a parry
+## Stuck metric: current and longest run of stalled time (s), where the longest happened.
+var stuck_time := 0.0
+var max_stuck_time := 0.0
+var max_stuck_at := Vector3.ZERO
+var _sw_t := 0.0                    ## s into the current stall window
+var _sw_free := 0.0                 ## s of it free to move
+var _sw_asked := 0.0                ## m asked over it
+var _sw_start := Vector3.INF
+var _next_escalate := STALL_ESCALATE  ## stuck_time at which the next escalation fires
+var _backoff_until := 0.0
+var _wide := false                  ## body wider than AINavGrid.BODY_RADIUS: always takes a wide way when one exists
 
 func _ready() -> void:
 	# Body-sized checks: a hole knocked into a wall at waist height must not
@@ -277,11 +441,26 @@ func _ready() -> void:
 	_spot_params.collision_mask = Layers.WORLD | Layers.DESTRUCTIBLE
 	fighter = get_parent() as Fighter
 	fighter.brain = self
-	_rng.randomize()
-	var bias: Vector2 = RING_BIAS.get(fighter.archetype, Vector2(0.2, 0.7))
-	_ring_bias = _rng.randf_range(bias.x, bias.y)
-	var near_bias: Vector2 = NEAR_RING_BIAS.get(fighter.archetype, NEAR_RING_BIAS[&"default"])
-	_near_bias = _rng.randf_range(near_bias.x, near_bias.y)
+	# Round 6: sweeps sized to this body (a heavy is wider than the grid's
+	# test body and wedges in gaps a grunt slips through; paths prefer the
+	# grid's wide layer, _nav_route).
+	var body_r := CLEAR_RADIUS + 0.04
+	if fighter.capsule != null and fighter.capsule.shape is CapsuleShape3D:
+		body_r = (fighter.capsule.shape as CapsuleShape3D).radius
+	sweep.radius = maxf(CLEAR_RADIUS, body_r - 0.04)
+	_wide = body_r > AINavGrid.BODY_RADIUS + 0.04
+	_slot = AttackDirector.claim_slot()
+	if test_seed >= 0:
+		_rng.seed = hash(test_seed * 7919 + _slot)
+	else:
+		_rng.randomize()
+	if fighter.archetype in OLD_RING_ARCHETYPES:
+		var bias: Vector2 = RING_BIAS.get(fighter.archetype, Vector2(0.2, 0.7))
+		_ring_bias = _rng.randf_range(bias.x, bias.y)
+		_near_bias = _rng.randf_range(bias.x, bias.y)
+	else:
+		_ring_bias = _rng.randf_range(CIRCLE_FAR_BIAS.x, CIRCLE_FAR_BIAS.y)
+		_near_bias = _rng.randf_range(CIRCLE_NEAR_BIAS.x, CIRCLE_NEAR_BIAS.y)
 	_strafe_sign = 1.0 if _rng.randf() < 0.5 else -1.0
 	_strafe_timer = _rng.randf_range(STRAFE_SWITCH.x, STRAFE_SWITCH.y)
 	_taunt_timer = _rng.randf_range(TAUNT_INTERVAL.x, TAUNT_INTERVAL.y)
@@ -289,10 +468,18 @@ func _ready() -> void:
 	_interval_left = _rng.randf_range(0.4, 1.2)
 	if fighter.combat:
 		fighter.combat.attack_ended.connect(_on_attack_ended)
-	GameEvents.perfect_dodge.connect(_on_perfect_dodge)
+	GameEvents.parried.connect(_on_parried)
+	GameEvents.parry_whiffed.connect(_on_parry_whiffed)
+	GameEvents.perfect_dodge.connect(_on_perfect_dodge)  # Upgrade 2 path: only while H's Defence is off (debug)
 	GameEvents.arm_broken.connect(_on_arm_broken)
 	GameEvents.attack_whiff.connect(_on_attack_whiff)
+	GameEvents.strike_started.connect(_on_strike_started)
+	GameEvents.limb_severed.connect(_on_limb_severed)
+	GameEvents.hit_landed.connect(_on_hit_landed)
+	GameEvents.fighter_died.connect(_on_fighter_died)
 	AttackDirector.register_enemy(fighter)
+	if _armed_archetype():
+		_build_stick()
 
 func _exit_tree() -> void:
 	if fighter and is_instance_valid(fighter):
@@ -312,12 +499,91 @@ func get_line_reach() -> float:
 		return MOVE_RANGE[&"e_throw_debris"] + 1.0
 	return AttackDirector.LINE_FAR
 
+# --- Round 5 contract -----------------------------------------------------------
+
+## Lost a limb and limping or crawling away: no attack tokens, never attacks;
+## a ground strike finishes him.
+func is_fleeing() -> bool:
+	return _flee != &""
+
+## Lost a leg: crawling (on the floor; ground-strike target).
+func is_crawling() -> bool:
+	return _flee == &"crawl"
+
+## &"" | &"limp" | &"crawl"
+func get_flee_style() -> StringName:
+	return _flee
+
+## Multiplier on this enemy's move damage: Tuning.ARM_LOST_DAMAGE_MULT once it
+## fights one-handed. B applies it.
+func get_damage_mult() -> float:
+	return Tuning.ARM_LOST_DAMAGE_MULT if not _lost_arm.is_empty() else 1.0
+
+## Lost an arm (&"left" / &"right") or a leg.
+func has_lost_arm(side := &"") -> bool:
+	return _lost_arm.has(side) if side != &"" else not _lost_arm.is_empty()
+
+func has_lost_leg() -> bool:
+	return _lost_leg
+
+## G's Carry: the player caught us in a neutral grab; true = press Grab in
+## the break window (both pushed apart). Never while stunned, dazed,
+## stumbling, down or fleeing; per archetype GRAB_BREAK_CHANCE, more with the
+## guard up, more for each recent grab on us (spamming grabs gets broken).
+func wants_grab_break(_grabber: Fighter) -> bool:
+	return _rng.randf() < grab_break_chance(true)
+
+## The chance wants_grab_break() rolls now. `record` notes this grab for the
+## anti-spam bonus.
+func grab_break_chance(record := false) -> float:
+	var repeats := 0
+	var kept: Array[float] = []
+	for t in _grabbed_at:
+		if _time - t <= GRAB_BREAK_REPEAT_WINDOW:
+			kept.append(t)
+			repeats += 1
+	if record:
+		kept.append(_time)
+	_grabbed_at = kept
+	if fighter.is_dead() or fighter.is_down() or is_fleeing():
+		return 0.0
+	var c := fighter.combat
+	if c != null and (c.is_hit_stunned() or (c.has_method(&"is_dazed") and c.is_dazed()) \
+			or (c.has_method(&"is_stumbling") and c.is_stumbling())):
+		return 0.0
+	if grab_break_override >= 0.0:
+		return grab_break_override
+	var p: float = GRAB_BREAK_CHANCE.get(fighter.archetype, 0.25)
+	if _block_down:
+		p += GRAB_BREAK_GUARD_BONUS
+	return minf(p + GRAB_BREAK_REPEAT_BONUS * repeats, GRAB_BREAK_CAP)
+
+## The move this brain is starting on this tick (TellGlint reads it; &"" otherwise).
+func get_tell_move() -> StringName:
+	return _tell_move
+
+## A stick enemy still holding his stick.
+func has_stick() -> bool:
+	return _stick != null and is_instance_valid(_stick)
+
+## The stick mesh in his hand (null once dropped).
+func get_weapon_mesh() -> MeshInstance3D:
+	return _stick if has_stick() else null
+
+## TellGlint: the stick glows with the hand while a stick attack winds up.
+func set_weapon_glow(color: Color, on: bool) -> void:
+	if _stick_mat == null:
+		return
+	_stick_mat.emission_enabled = on
+	_stick_mat.emission = color
+	_stick_mat.emission_energy_multiplier = STICK_GLOW_ENERGY
+
 ## One-line state for debug overlays and test logs.
 func get_debug_text() -> String:
-	return "mode=%d move=%s token=%s ring=%d approach=%.2f in_range=%.2f interval=%.2f resume_in=%.2f fails=%d guard=%s can_act=%s attacking=%s steer=%s->%s route=%s side=%+.0f%s" % [
+	return "mode=%d move=%s token=%s ring=%d approach=%.2f in_range=%.2f interval=%.2f resume_in=%.2f fails=%d guard=%s can_act=%s attacking=%s flee=%s steer=%s->%s route=%s side=%+.0f%s" % [
 		mode, get_move_id(), AttackDirector.has_token(fighter), AttackDirector.get_ring(fighter),
 		_approach_time, _in_range_time, _interval_left, maxf(_resume_at - _time, 0.0), _start_failures,
-		_block_down, fighter.can_act(), _is_attacking(), _steer_in.snapped(Vector3.ONE * 0.01),
+		_block_down, fighter.can_act(), _is_attacking(), _flee, _steer_in.snapped(Vector3.ONE * 0.01),
 		_steer_out.snapped(Vector3.ONE * 0.01), "-" if _route_point == Vector3.INF else str(_route_point.snapped(Vector3.ONE * 0.01)),
 		_side_sign, " locked" if _side_locked else ""] + " blocked=%.2f pos=%s" % [_blocked_time, _pos().snapped(Vector3.ONE * 0.1)]
 
@@ -327,6 +593,9 @@ func _physics_process(delta: float) -> void:
 	if fighter == null or not is_instance_valid(fighter) or not fighter.is_inside_tree():
 		return
 	_time += delta
+	_tell_move = &""
+	_track_hand(delta)
+	_track_stall(delta)
 	if fighter.is_dead():
 		_on_dead()
 		return
@@ -334,14 +603,19 @@ func _physics_process(delta: float) -> void:
 		AttackDirector.register_enemy(fighter)  # e.g. after AttackDirector.reset()
 	var player := _get_player()
 	_watch_player(player)
+	_update_flee()
 	if _is_disabled():
 		_while_disabled()
 		return
 	if _was_down:
 		_was_down = false
 		_resume_at = _time + GETUP_PAUSE
-	if mode == Mode.ENTRY:
+	if mode == Mode.ENTRY and not is_fleeing():
 		_do_entry(delta)
+		_apply_guard()
+		return
+	if is_fleeing():
+		_do_flee(player)
 		_apply_guard()
 		return
 	if player == null or player.is_dead():
@@ -363,39 +637,52 @@ func _physics_process(delta: float) -> void:
 	if _is_attacking():
 		_want_guard = false
 		fighter.move_input = Vector3.ZERO
-		if fighter.combat.holding == null:
+		if not _carrying():
 			_face(player.get_ground_position())
 	elif AttackDirector.has_token(fighter):
 		_do_token_turn(delta, player)
 	else:
 		_has_move = false
+		_following = false
+		_string_rest.clear()
 		_do_ring(delta, player)
 		_tick_request(delta, player)
 	_apply_guard()
 
 func _is_disabled() -> bool:
-	var disabled := fighter.is_down() or fighter.is_in_hitstun() \
-		or AttackDirector.is_enemy_impaired(fighter)
+	var disabled := _is_impaired()
 	if fighter.is_down():
 		_was_down = true
 	if disabled and mode == Mode.ENTRY:
 		_entry_interrupted = true
 	return disabled
 
+## Down, in hitstun or held (no side effects).
+func _is_impaired() -> bool:
+	return fighter.is_down() or fighter.is_in_hitstun() or AttackDirector.is_enemy_impaired(fighter)
+
 func _is_attacking() -> bool:
 	if fighter.combat == null:
 		return false
-	return fighter.combat.is_attacking() or fighter.combat.holding != null
+	return fighter.combat.is_attacking() or _carrying()
+
+## Holding the player through G's Carry (an enemy grab connected).
+func _carrying() -> bool:
+	return fighter.carry != null and fighter.carry.is_holding()
 
 func _while_disabled() -> void:
 	fighter.move_input = Vector3.ZERO
 	# Keep a raised guard through blockstun; drop it when down or held.
-	if fighter.is_down() or (fighter.combat and fighter.combat.held_by != null) or not _block_down:
+	if fighter.is_down() or (fighter.carry and fighter.carry.is_held()) or not _block_down:
 		_want_guard = false
 		_dodge_hold_until = -INF
+		_tap_guard_until = -INF
 		_apply_guard()
 	_has_move = false
+	_following = false
+	_string_rest.clear()
 	_counter_pending = false
+	_counter_after_parry = false
 	_fetch_target = null
 	if AttackDirector.has_token(fighter) and not _is_attacking():
 		AttackDirector.release_token(fighter)
@@ -405,6 +692,8 @@ func _on_dead() -> void:
 	_want_guard = false
 	_dodge_hold_until = -INF
 	_apply_guard()
+	if has_stick():
+		_drop_stick(Vector3.ZERO)
 	AttackDirector.unregister_enemy(fighter)
 	set_physics_process(false)
 
@@ -432,12 +721,50 @@ func _do_entry(delta: float) -> void:
 		_entry_point_time = 0.0
 		return
 	var last := _path_index == entry_path.size() - 1
-	var v := to.normalized() * (clampf(to.length() / ARRIVE_RADIUS, 0.3, 1.0) if last else 1.0)
+	var goal := target
+	if not _clear_line(_pos(), target):
+		if _waiting_for_breach(target):
+			# Behind a wall that is being breached (YardBuilder.breach): wait
+			# for it to burst instead of pushing into it.
+			_entry_point_time = 0.0
+			fighter.move_input = Vector3.ZERO
+			fighter.face_dir = to.normalized()
+			return
+		# Round 6: a hole's edge, clutter or a shoved prop in the way: the
+		# grid routes round it (entries were straight lines before).
+		goal = _route(target, target)
+	var gto := _flat(goal - _pos())
+	var dir := gto.normalized() if gto.length() > 0.05 else to.normalized()
+	var v := dir * (clampf(to.length() / ARRIVE_RADIUS, 0.3, 1.0) if last else 1.0)
 	v += _separation() * 0.5
+	if _time < _backoff_until:
+		v = _detour_dir
+	elif _time < _detour_until:
+		v = v * 0.3 + _detour_dir
 	v = _avoid_walls(v, 0.7)
+	_check_stuck(v)
 	_set_move(v)
 	if v.length() > 0.05:
 		fighter.face_dir = _flat(v).normalized()
+
+## The straight line to `target` hits a wall that is being breached
+## (meta &"staged_breach", not broken yet) and has no hole on this line.
+func _waiting_for_breach(target: Vector3) -> bool:
+	var space := fighter.get_world_3d().direct_space_state
+	var from := _pos() + Vector3.UP * CLEAR_CENTER
+	var to := Vector3(target.x, from.y, target.z)
+	var q := PhysicsRayQueryParameters3D.create(from, to, Layers.WORLD | Layers.DESTRUCTIBLE, [fighter.get_rid()])
+	var hit := space.intersect_ray(q)
+	if hit.is_empty():
+		return false
+	var n := hit["collider"] as Node
+	for i in 3:
+		if n == null:
+			return false
+		if n.has_meta(&"staged_breach"):
+			return not bool(n.get(&"is_broken"))
+		n = n.get_parent()
+	return false
 
 func _enter_fight() -> void:
 	mode = Mode.FIGHT
@@ -522,6 +849,21 @@ func _clear_line(a: Vector3, b: Vector3) -> bool:
 
 # --- Ring behaviour ----------------------------------------------------------
 
+## The ring band (m from the player) this enemy waits in: Tuning.CIRCLE_RING
+## for the crowd (the Duelist and the Thrower keep the old NEAR / FAR rings).
+func ring_band(far: bool) -> Vector2:
+	if fighter.archetype in OLD_RING_ARCHETYPES:
+		return Tuning.FAR_RING if far else Tuning.NEAR_RING
+	return Tuning.CIRCLE_RING
+
+## Radius this enemy aims for in its ring now.
+func ring_radius(far: bool) -> float:
+	var band := ring_band(far)
+	var r := lerpf(band.x, band.y, _ring_bias if far else _near_bias)
+	if has_stick():
+		r = maxf(r, float(fighter.config.get("keep_distance", 3.0)))  # the stick keeps his distance
+	return r
+
 func _do_ring(delta: float, player: Fighter) -> void:
 	var center := player.get_ground_position()
 	var me := _pos()
@@ -532,8 +874,7 @@ func _do_ring(delta: float, player: Fighter) -> void:
 		dir = Vector3.BACK
 	var ring := AttackDirector.get_ring(fighter)
 	var far := ring != AttackDirector.Ring.NEAR or fighter.archetype == &"thrower"
-	var band: Vector2 = Tuning.FAR_RING if far else Tuning.NEAR_RING
-	var radius := lerpf(band.x, band.y, _ring_bias if far else _near_bias)
+	var radius := ring_radius(far)
 	_want_guard = _guard_wanted(d, false)
 	if _fetch_rubble(delta, center):
 		return
@@ -547,7 +888,7 @@ func _do_ring(delta: float, player: Fighter) -> void:
 		_taunt_timer -= delta
 		if _taunt_timer <= 0.0:
 			_taunt_timer = _rng.randf_range(TAUNT_INTERVAL.x, TAUNT_INTERVAL.y)
-			if d > Tuning.FAR_RING.x - 1.0 and _try_taunt():
+			if d > ring_band(true).x - 0.5 and _try_taunt():
 				fighter.move_input = Vector3.ZERO
 				_face(center)
 				return
@@ -576,7 +917,8 @@ func _do_ring(delta: float, player: Fighter) -> void:
 	var strafe: float = STRAFE_SPEED.get(fighter.archetype, STRAFE_FAR if far else STRAFE_NEAR)
 	var spread := _angular_spread(center, dir, far)
 
-	var goal := _clamp_to_bounds(center + dir * radius)
+	# Round 6: not on broken glass, not under a cracked pillar's beam.
+	var goal := AttackDirector.avoid_hazards(_clamp_to_bounds(center + dir * radius), center)
 	if not _clear_line(center, goal):
 		goal = _visible_ring_point(center, dir, radius)
 	goal = _route(goal, center)
@@ -639,7 +981,7 @@ func _angular_spread(center: Vector3, dir: Vector3, far: bool) -> float:
 	var limit := SPREAD_ANGLE_FAR if far else SPREAD_ANGLE_NEAR
 	var push := 0.0
 	for e in AttackDirector.get_enemies():
-		if e == fighter or not is_instance_valid(e) or e.is_dead() or e.is_down():
+		if e == fighter or not is_instance_valid(e) or e.is_dead() or e.is_down() or e.is_fleeing():
 			continue
 		var other_far := AttackDirector.get_ring(e) != AttackDirector.Ring.NEAR or e.archetype == &"thrower"
 		if other_far != far:
@@ -665,7 +1007,7 @@ func _tick_request(delta: float, player: Fighter) -> void:
 	var dist := _dist_to(player)
 	# A FAR enemy the player has walked up to (close and on screen) may also
 	# ask; the director's pacing keeps the crowd's rate in check.
-	var engaged := dist <= Tuning.NEAR_RING.y and AttackDirector.is_on_screen(fighter)
+	var engaged := dist <= ENGAGE_DIST and AttackDirector.is_on_screen(fighter)
 	if near and not _was_near:
 		# Just moved up (next in line): the walk in covers most of the wait.
 		_interval_left = minf(_interval_left, _rng.randf_range(NEAR_JOIN_INTERVAL.x, NEAR_JOIN_INTERVAL.y))
@@ -680,36 +1022,45 @@ func _tick_request(delta: float, player: Fighter) -> void:
 	if _time < _unreachable_until:
 		return  # the player is walled off from here
 	var max_dist := SHIELD_REQUEST_DIST if fighter.archetype == &"shield" else REQUEST_MAX_DIST
-	if not fighter.archetype in [&"thrower", &"brute"] and dist > max_dist:
+	if not fighter.archetype in [&"thrower", &"brute", &"heavy"] and dist > max_dist:
 		return
 	# Only the Duelist's counter / whiff punish skip the crowd pacing; a
 	# Brawler punishing a blocker skips its interval and the turn order.
 	if AttackDirector.request_token(fighter, _counter_pending or _time < _punish_until, _brawler_wants_grab()):
-		_move_id = _pick_move(dist, player)
-		_has_move = true
-		_approach_time = 0.0
-		_in_range_time = 0.0
-		_start_failures = 0
+		_begin_turn(dist, player)
 	else:
 		_interval_left = maxf(_interval_left, REQUEST_RETRY)
 
+func _begin_turn(dist: float, player: Fighter) -> void:
+	_turn_downed = AttackDirector.is_player_knocked_down()
+	_move_id = _pick_move(dist, player, _turn_downed)
+	_has_move = true
+	_following = false
+	_approach_time = 0.0
+	_in_range_time = 0.0
+	_start_failures = 0
+
 func _do_token_turn(delta: float, player: Fighter) -> void:
 	var dist := _dist_to(player)
+	var downed := AttackDirector.is_player_knocked_down()
 	if not _has_move:
-		_move_id = _pick_move(dist, player)
-		_has_move = true
-		_approach_time = 0.0
-		_in_range_time = 0.0
-		_start_failures = 0
+		_begin_turn(dist, player)
+	elif downed and not _following and not _turn_downed:
+		# The player went down while we closed in: take the free swing with a
+		# move that reaches the floor (picked once).
+		_begin_turn(dist, player)
 	if _approach_time == 0.0:
 		_best_dist = INF
 	_approach_time += delta
+	if _following:
+		_do_followup(dist, player, downed)
+		return
 	if _approach_time > GIVE_UP_TIME:
 		_give_up_token()
 		return
 	# Fall back to a close move when the target is inside a ranged move's minimum.
 	if _move_id == &"e_charge" and dist < MOVE_MIN_RANGE[&"e_charge"]:
-		_move_id = &"e_heavy"
+		_move_id = _resolve_move(&"e_heavy")
 	elif _move_id == &"e_throw_debris" and dist < 2.2:
 		_move_id = &"e_hook"
 	var max_r: float = MOVE_RANGE.get(_move_id, 1.5)
@@ -742,44 +1093,112 @@ func _do_token_turn(delta: float, player: Fighter) -> void:
 		return
 	fighter.move_input = Vector3.ZERO
 	_in_range_time += delta
-	if _time < _resume_at or not fighter.can_act():
+	if _time < _resume_at or not fighter.can_act() or _time < _tap_guard_until:
 		return
 	if fighter.get_forward().dot(dir) < FACE_TOLERANCE and _in_range_time < FACE_WAIT_MAX:
 		return
-	var tell := AttackDirector.request_swing(fighter, _tell_for(_move_id))
-	if tell < 0.0:
+	_try_start(downed)
+
+## A string's next hit: it swings from where it stands (the first hit's lunge
+## closed in), waiting at most STRING_WAIT_MAX for a spaced slot.
+func _do_followup(dist: float, player: Fighter, downed: bool) -> void:
+	fighter.move_input = Vector3.ZERO
+	_face(player.get_ground_position())
+	var max_r: float = MOVE_RANGE.get(_move_id, 1.5) + STRING_RANGE_SLACK
+	if downed or dist > max_r or _approach_time > STRING_WAIT_MAX:
+		_give_up_token()
+		return
+	if not fighter.can_act():
+		return
+	_try_start(false)
+
+## Ask the director for a spaced swing and start the move.
+func _try_start(downed: bool) -> void:
+	var startup := _startup_for(_move_id)
+	var followups: Array = []
+	if not _following and not downed:
+		followups = _followup_offsets(_move_id)
+	if AttackDirector.request_swing(fighter, startup, followups) < 0.0:
 		return
 	_want_guard = false
+	_tap_guard_until = -INF
 	_apply_guard()
-	var started := fighter.combat != null and fighter.combat.start_enemy_attack(_move_id, tell)
+	_tell_move = _move_id
+	var started := fighter.combat != null and fighter.combat.start_enemy_attack(_move_id, startup)
 	if started:
 		var tta := fighter.combat.time_to_active()
-		AttackDirector.notify_attack_started(fighter, tta if is_finite(tta) else tell)
+		AttackDirector.notify_attack_started(fighter, tta if is_finite(tta) else startup)
 		attacks_started += 1
+		if downed:
+			downed_swings += 1
 		_attack_started_at = _time
 		if _move_id == &"e_throw_debris":
 			_has_chunk = false
-		elif _move_id == &"e_grab":
+		elif _move_id in GRAB_MOVES:
 			_aim_timer = 0.0
 			_update_throw_aim(0.0)
+		if _following or downed:
+			_string_rest.clear()
+		if not _string_rest.is_empty():
+			AttackDirector.hold_for_followup(fighter)
+		if _counter_pending and _counter_after_parry:
+			parry_counters += 1
+		_counter_after_parry = false
 		_has_move = false
+		_following = false
 		_counter_pending = false
 		_punish_until = 0.0
 		attack_launched.emit(_move_id)
 	else:
+		_tell_move = &""
 		AttackDirector.cancel_swing(fighter)
 		_start_failures += 1
 		if _start_failures > START_FAIL_MAX:
 			_give_up_token()
 
+## Startup (s of the enemy's own time) of `move` this wave.
+func _startup_for(move: StringName) -> float:
+	var s := AttackDirector.enemy_startup_s(move)
+	if Tuning.difficulty == Tuning.Difficulty.EASY:
+		s += EASY_TELL_BONUS
+	return s
+
+## Expected first active frames of the string's later hits, in s after the
+## first hit's: each previous hit's active + whiff recovery, then the next
+## move's startup (the director holds a slack round these estimates).
+func _followup_offsets(move: StringName) -> Array:
+	var out: Array = []
+	var off := 0.0
+	var prev := move
+	for nxt: StringName in _string_rest:
+		var m := MoveLibrary.get_move(prev) if MoveLibrary.has_move(prev) else null
+		var after := (m.active_s() + m.recovery_s(false)) if m != null else Tuning.frames(13.0)
+		off += after + get_physics_process_delta_time() + _startup_for(nxt)
+		out.append(off)
+		prev = nxt
+	return out
+
 func _give_up_token() -> void:
 	AttackDirector.release_token(fighter)
 	_has_move = false
+	_following = false
+	_string_rest.clear()
 	_counter_pending = false
+	_counter_after_parry = false
 	_interval_left = REQUEST_RETRY * 2.0
 
 ## The attack interval runs start to start: the time the attack took counts.
+## A string goes on with its next move while the token is held.
 func _on_attack_ended(_move_id_ended: StringName) -> void:
+	if not _string_rest.is_empty() and AttackDirector.has_token(fighter) and not fighter.is_dead():
+		_move_id = _string_rest.pop_front()
+		_has_move = true
+		_following = true
+		_approach_time = 0.0
+		_in_range_time = 0.0
+		_start_failures = 0
+		return
+	_string_rest.clear()
 	_interval_left = maxf(_new_interval() - (_time - _attack_started_at), REQUEST_RETRY)
 
 func _new_interval() -> float:
@@ -787,36 +1206,70 @@ func _new_interval() -> float:
 		return _rng.randf_range(LONE_INTERVAL.x, LONE_INTERVAL.y)
 	return _rng.randf_range(Tuning.ATTACK_INTERVAL.x, Tuning.ATTACK_INTERVAL.y) * CROWD_INTERVAL_MULT
 
-func _pick_move(dist: float, _player: Fighter) -> StringName:
+func _pick_move(dist: float, _player: Fighter, downed := false) -> StringName:
+	_string_rest.clear()
 	var pick: StringName = &""
-	match fighter.archetype:
-		&"brawler":
-			if _brawler_wants_grab() and not _arm_broken:
-				pick = &"e_grab"
-		&"brute":
-			if dist >= 3.0 and _rng.randf() < 0.75:
-				pick = &"e_charge"  # a shoulder charge: fine with a broken arm too
-		&"duelist":
-			if _counter_pending:
-				pick = &"e_hook" if not _arm_broken else &"e_kick"
-			elif _time < _punish_until:
-				pick = &"e_kick"  # a whiff is punished with a launch
-			elif _player_block_time > 0.5 and _rng.randf() < 0.7 and not _arm_broken:
-				pick = &"e_grab"
-		&"thrower":
-			if dist >= 2.5:
-				pick = &"e_throw_debris"
+	if downed:
+		for m in DOWNED_MOVES:
+			if _move_available(m):
+				pick = m
+				break
+	if pick == &"":
+		match fighter.archetype:
+			&"heavy":
+				if dist >= HEAVY_CHARGE_FROM and _move_available(&"e_charge") and _rng.randf() < HEAVY_CHARGE_CHANCE:
+					pick = &"e_charge"
+			&"brawler":
+				if _brawler_wants_grab() and not _arm_broken:
+					pick = &"e_grab"
+			&"brute":
+				if dist >= 3.0 and _rng.randf() < 0.75:
+					pick = &"e_charge"  # a shoulder charge: fine with a broken arm too
+			&"duelist":
+				if _counter_pending:
+					pick = &"e_hook" if not _arm_broken else &"e_kick"
+				elif _time < _punish_until:
+					pick = &"e_kick"  # a whiff is punished with a launch
+				elif _player_block_time > 0.5 and _rng.randf() < 0.7 and not _arm_broken:
+					pick = &"e_grab"
+			&"thrower":
+				if dist >= 2.5:
+					pick = &"e_throw_debris"
 	if pick == &"":
 		pick = _weighted_pick()
-	_note_level(pick)
-	return pick
+	var resolved := _resolve_move(pick)
+	if resolved == pick and not downed:
+		for nxt: StringName in STRINGS.get(pick, []):
+			if _move_available(nxt) and MoveLibrary.has_move(nxt):
+				_string_rest.append(nxt)
+	_note_level(resolved)
+	return resolved
 
-## Weighted pick from MOVE_MIX: only moves the archetype has (e_sweep once
-## MoveLibrary has it), kicks only with a broken arm, and never a third
-## attack in a row at the same height (so crouching or jumping on a guess
-## does not always work, nor does blocking everything).
+## A move B's MoveLibrary has: `move`, or its MOVE_FALLBACK while B's Round 5
+## move has not landed.
+func _resolve_move(move: StringName) -> StringName:
+	if MoveLibrary.has_move(move):
+		return move
+	return MOVE_FALLBACK.get(move, move)
+
+## The moves this enemy has now: its archetype's, the grunt's once a stick
+## enemy has dropped his stick.
+func _moves() -> Array:
+	if fighter.archetype == &"stick" and not has_stick():
+		return Tuning.ARCHETYPES[&"grunt"].get("moves", [])
+	return fighter.config.get("moves", [])
+
+func _mix() -> Dictionary:
+	if fighter.archetype == &"stick" and not has_stick():
+		return MOVE_MIX[&"grunt"]
+	return MOVE_MIX.get(fighter.archetype, {})
+
+## Weighted pick from the mix: only moves the enemy has (e_sweep once
+## MoveLibrary has it) and its limbs allow, kicks only with a broken arm, and
+## never a third attack in a row at the same height (so crouching or jumping
+## on a guess does not always work, nor does blocking everything).
 func _weighted_pick() -> StringName:
-	var mix: Dictionary = MOVE_MIX.get(fighter.archetype, {})
+	var mix := _mix()
 	var cands: Array[StringName] = []
 	var weights: Array[float] = []
 	for m: StringName in mix:
@@ -829,7 +1282,10 @@ func _weighted_pick() -> StringName:
 	if cands.is_empty():
 		if _arm_broken and _move_available(&"e_kick", true):
 			return &"e_kick"
-		var moves: Array = fighter.config.get("moves", [&"e_hook"])
+		for m: StringName in _moves():
+			if _limbs_allow(m):
+				return m
+		var moves := _moves()
 		return moves[0] if not moves.is_empty() else &"e_hook"
 	# Height variety: drop the repeated height when the last MAX_SAME_LEVEL matched.
 	if _recent_levels.size() >= MAX_SAME_LEVEL:
@@ -857,15 +1313,43 @@ func _weighted_pick() -> StringName:
 			return cands[i]
 	return cands[-1]
 
-## The archetype can use `move`: listed in its Tuning moves, or e_sweep /
-## e_kick added by the Upgrade 2 height mix once MoveLibrary has them.
+## The enemy can use `move`: listed in its moves, or e_sweep / e_kick added
+## by the Upgrade 2 height mix once MoveLibrary has them; MoveLibrary (or a
+## fallback) has it; and its remaining limbs can throw it.
 func _move_available(move: StringName, any_archetype := false) -> bool:
-	var listed: Array = fighter.config.get("moves", [])
+	if not _limbs_allow(move):
+		return false
+	var listed := _moves()
 	if move in listed:
-		return true
-	if not (any_archetype or move in MOVE_MIX.get(fighter.archetype, {})):
+		return MoveLibrary.has_move(_resolve_move(move))
+	if not (any_archetype or move in _mix()):
 		return false
 	return MoveLibrary.has_move(move)
+
+## One-handed after losing an arm: grabs need both hands; a strike needs at
+## least one of its striking hands (feet always work). A stick attack needs
+## the stick.
+func _limbs_allow(move: StringName) -> bool:
+	if String(move).begins_with("e_stick") and not has_stick():
+		return false
+	if _lost_arm.is_empty():
+		return true
+	if move in GRAB_MOVES:
+		return false
+	var hands: Array[StringName] = []
+	for b: StringName in PoseLibrary.STRIKE_BONES.get(move, []):
+		if String(b).ends_with("Hand") or String(b).ends_with("Arm"):
+			hands.append(b)
+	if hands.is_empty():
+		var id := String(move)
+		if id.contains("kick") or id.contains("sweep") or id.contains("charge"):
+			return true
+		hands.append(&"LeftHand" if id.contains("jab") else &"RightHand")
+	for b in hands:
+		var side := &"left" if String(b).begins_with("Left") else &"right"
+		if not _lost_arm.has(side):
+			return true
+	return false
 
 ## Hit height of an enemy move: MoveData.hit_level from B's MoveLibrary,
 ## else the spec's table (hook and grab HIGH, kicks MID, sweep LOW). While
@@ -888,22 +1372,75 @@ func _on_arm_broken(f: Node3D, _zone: int) -> void:
 	if f == fighter:
 		_arm_broken = true
 
-func _tell_for(move_id: StringName) -> float:
-	if _counter_pending or _time < _punish_until:
-		return Tuning.TELL_MIN
-	var t: float = MOVE_TELL.get(move_id, 0.45) + _rng.randf_range(-TELL_JITTER, TELL_JITTER)
-	if Tuning.difficulty == Tuning.Difficulty.EASY:
-		t += EASY_TELL_BONUS
-	return clampf(t, Tuning.TELL_MIN, Tuning.TELL_MAX)
-
 func _brawler_wants_grab() -> bool:
 	if fighter.archetype != &"brawler":
 		return false
 	return _player_block_time > float(fighter.config.get("grab_blocker_after", 1.0))
 
+# --- Reactions to the player's strikes (Round 5) -------------------------------
+
+## B: a strike's startup began. A sprint attack aimed at us from further than
+## Tuning.SIDESTEP_SPRINT_MIN_DIST: sidestep it Tuning.SIDESTEP_SPRINT_CHANCE of
+## the time (heavies never). A tapped strike (charge level 0) aimed at us:
+## guard it with the archetype's "guard_chance" (grunts: Tuning.GUARD_TAP_CHANCE).
+func _on_strike_started(attacker: Node3D, target: Node3D, _move: StringName, sprint: bool, charge_level: int) -> void:
+	if target != fighter or not attacker is Fighter or attacker == fighter:
+		return
+	var a := attacker as Fighter
+	if a.team == fighter.team or mode != Mode.FIGHT or fighter.is_dead() or is_fleeing():
+		return
+	if _is_impaired() or _is_attacking():
+		return
+	if sprint and _can_sidestep() and _dist_to(a) > Tuning.SIDESTEP_SPRINT_MIN_DIST:
+		if _rng.randf() < Tuning.SIDESTEP_SPRINT_CHANCE:
+			_sprint_sidestep(a)
+			return
+	var guard_chance := float(fighter.config.get("guard_chance", 0.0))
+	if charge_level == 0 and guard_chance > 0.0:
+		# Already guarding (the string goes on): keep it up; else roll.
+		if _time < _tap_guard_until or _rng.randf() < guard_chance:
+			_tap_guard(a)
+
+func _can_sidestep() -> bool:
+	return bool(fighter.config.get("sidesteps_sprint", false)) and not fighter.is_heavy() \
+		and fighter.can_act()
+
+## Step SPRINT_SIDESTEP_DIST to the side with room, out of the sprint
+## attack's line (P's &"sidestep" pose when it exists).
+func _sprint_sidestep(a: Fighter) -> void:
+	var away := _flat(_pos() - a.get_ground_position())
+	if away.length() < 0.05:
+		away = -fighter.get_forward()
+	away = away.normalized()
+	var side := Vector3(-away.z, 0.0, away.x) * (1.0 if _rng.randf() < 0.5 else -1.0)
+	if not _clear_line(_pos(), _pos() + side * SPRINT_SIDESTEP_DIST):
+		side = -side
+	_sidestep_dir = side
+	_sidestep_until = _time + SPRINT_SIDESTEP_TIME
+	fighter.knockback(side * (SPRINT_SIDESTEP_DIST / SPRINT_SIDESTEP_TIME), SPRINT_SIDESTEP_TIME)
+	_face(a.get_ground_position())
+	if fighter.animator and PoseLibrary.has_move(&"sidestep"):
+		fighter.animator.play_timed(&"sidestep", SPRINT_SIDESTEP_TIME)
+	sidesteps += 1
+
+## Raise the guard now and hold it until the strike's active frames are past.
+func _tap_guard(a: Fighter) -> void:
+	var tta := a.combat.time_to_active() if a.combat else 0.1
+	if not is_finite(tta):
+		tta = 0.1
+	var hold := minf(tta * Engine.time_scale + Tuning.frames(4.0) + TAP_GUARD_AFTER, TAP_GUARD_MAX)
+	if _time >= _tap_guard_until:
+		tap_guards += 1
+	_tap_guard_until = maxf(_tap_guard_until, _time + hold)
+	_face(a.get_ground_position())
+	_want_guard = true
+	_apply_guard()
+
 # --- Guard -------------------------------------------------------------------
 
 func _guard_wanted(dist: float, with_token: bool) -> bool:
+	if _time < _tap_guard_until:
+		return true
 	match fighter.archetype:
 		&"shield":
 			if with_token:
@@ -927,6 +1464,224 @@ func _apply_guard() -> void:
 		fighter.combat.press(CombatController.Action.BLOCK)
 	else:
 		fighter.combat.release(CombatController.Action.BLOCK)
+
+# --- Limb loss (F10) -----------------------------------------------------------
+
+func _on_limb_severed(f: Node3D, cut: StringName, _piece: Node3D) -> void:
+	if f != fighter or fighter.is_dead():
+		return
+	match cut:
+		&"arm_l", &"forearm_l":
+			_lost_arm[&"left"] = true
+		&"arm_r", &"forearm_r":
+			_lost_arm[&"right"] = true
+			if has_stick():
+				_drop_stick(Vector3.ZERO)
+		&"leg_l", &"leg_r", &"shin_l", &"shin_r":
+			_lost_leg = true
+	_has_move = false
+	_following = false
+	_string_rest.clear()
+	_update_flee()  # starts at once: no token, fleeing_changed, limp / crawl
+
+## Lost a leg: crawl. Lost an arm at or below Tuning.LIMB_LOST_FLEE_HP: limp.
+## Starting to flee gives the token back and tells everyone.
+func _update_flee() -> void:
+	if fighter.is_dead():
+		return
+	var want: StringName = &""
+	if _lost_leg:
+		want = &"crawl"
+	elif not _lost_arm.is_empty() and fighter.hp <= Tuning.LIMB_LOST_FLEE_HP:
+		want = &"limp"
+	if want == _flee:
+		return
+	var was := _flee != &""
+	_flee = want
+	if fighter.animator and fighter.animator.has_method(&"set_locomotion_style"):
+		fighter.animator.set_locomotion_style(want if want != &"" else &"walk")
+	if (want != &"") != was:
+		if want != &"":
+			_want_guard = false
+			_tap_guard_until = -INF
+			_has_move = false
+			_following = false
+			_string_rest.clear()
+			_counter_pending = false
+			if AttackDirector.has_token(fighter) and not _is_attacking():
+				AttackDirector.release_token(fighter)
+		GameEvents.fleeing_changed.emit(fighter, want != &"")
+
+## Limp or crawl away from the player (no attacks, no guard), and stop to
+## cower once FLEE_REST_DIST away. Speeds: Tuning.CRAWL_SPEED / LIMP_SPEED.
+func _do_flee(player: Fighter) -> void:
+	_want_guard = false
+	if AttackDirector.has_token(fighter) and not _is_attacking():
+		AttackDirector.release_token(fighter)
+	if player == null or player.is_dead() or _is_attacking():
+		fighter.move_input = Vector3.ZERO
+		return
+	var speed := Tuning.CRAWL_SPEED if _flee == &"crawl" else LIMP_SPEED
+	var mult := speed / Tuning.ENEMY_WALK_SPEED
+	var center := player.get_ground_position()
+	var me := _pos()
+	var away := _flat(me - center)
+	var d := away.length()
+	if d >= FLEE_REST_DIST:
+		fighter.move_input = Vector3.ZERO
+		_face(center)
+		return
+	var dir := away / d if d > 0.05 else _flat(-fighter.get_forward()).normalized()
+	# Cornered (a wall or the bounds ahead): turn along it, whichever way
+	# gains the most distance from the player.
+	var best := dir
+	var best_score := -INF
+	for ang: float in [0.0, 0.6, -0.6, 1.2, -1.2, 1.6, -1.6]:
+		var cand := dir.rotated(Vector3.UP, ang)
+		var g := _clamp_to_bounds(me + cand * FLEE_STEP)
+		var gain := _flat(g - center).length() - d
+		if not _clear_line(me, g):
+			gain -= 2.0
+		var score := gain - absf(ang) * 0.3
+		if score > best_score:
+			best_score = score
+			best = cand
+	var goal := _route(_clamp_to_bounds(me + best * FLEE_STEP), center)
+	var v := _flat(goal - me)
+	v = v.normalized() if v.length() > 0.05 else best
+	v += _separation() * 0.5
+	v = _avoid_walls(v, WALL_PROBE)
+	v.y = 0.0
+	fighter.move_input = v.limit_length(1.0) * mult
+	if v.length() > 0.05:
+		fighter.face_dir = v.normalized()
+
+## A hit on us: a string stops; a ground strike finishes a fleeing enemy (the
+## doc's rule; B may already deal it as a kill); a stagger or more knocks the
+## stick out of a stick enemy's hand.
+func _on_hit_landed(info: HitInfo) -> void:
+	if info == null or info.victim != fighter:
+		return
+	_string_rest.clear()
+	_following = false
+	if is_fleeing() and info.ground_strike and not fighter.is_dead():
+		fighter.apply_damage(fighter.hp, &"ground_strike", info)
+	if has_stick() and not fighter.is_dead():
+		var drop_at := int(fighter.config.get("drops_stick_at", HitInfo.Tier.STAGGER))
+		var tier := info.tier
+		if tier == HitInfo.Tier.NONE:
+			tier = _tier_from_reaction(info.reaction)
+		if tier >= drop_at:
+			_drop_stick(info.hit_direction)
+
+static func _tier_from_reaction(reaction: int) -> int:
+	match reaction:
+		HitInfo.Reaction.STAGGER:
+			return HitInfo.Tier.STAGGER
+		HitInfo.Reaction.LAUNCH:
+			return HitInfo.Tier.LAUNCH
+		HitInfo.Reaction.FLINCH:
+			return HitInfo.Tier.FLINCH
+	return HitInfo.Tier.NONE
+
+func _on_fighter_died(f: Node3D, _info: HitInfo) -> void:
+	if f == fighter and has_stick():
+		_drop_stick(Vector3.ZERO)
+
+# --- The stick (stick enemy) ----------------------------------------------------
+
+func _armed_archetype() -> bool:
+	var app: Dictionary = fighter.config.get("appearance", {})
+	return fighter.archetype == &"stick" or StringName(app.get("accessory", &"none")) == &"stick"
+
+## A wooden stick in the right fist: along the fist's forward axis, tilted
+## STICK_TILT down, gripped STICK_GRIP from the butt.
+func _build_stick() -> void:
+	if fighter.rig == null:
+		return
+	var att := fighter.rig.get_attachment(&"RightHand")
+	if att == null:
+		return
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = STICK_RADIUS * 0.85
+	mesh.bottom_radius = STICK_RADIUS
+	mesh.height = STICK_LENGTH
+	mesh.radial_segments = 8
+	mesh.rings = 1
+	_stick_mat = StandardMaterial3D.new()
+	_stick_mat.albedo_color = STICK_COLOR
+	_stick_mat.roughness = 0.85
+	_stick = MeshInstance3D.new()
+	_stick.name = "Stick"
+	_stick.mesh = mesh
+	_stick.material_override = _stick_mat
+	_stick.layers = Layers.VIS_CHARACTERS
+	_stick.add_to_group(FOCUS_KEEP_GROUP)  # while held; the dropped prop is an ordinary prop
+	var t := deg_to_rad(STICK_TILT)
+	var axis := Vector3(0.0, -sin(t), -cos(t))
+	var fist := att.global_transform.affine_inverse() * fighter.rig.get_fist_position(&"RightHand") \
+		if att.is_inside_tree() else HumanoidRig.FIST_OFFSET
+	_stick.transform = Transform3D(Basis(Quaternion(Vector3.UP, axis)), fist + axis * (STICK_LENGTH * 0.5 - STICK_GRIP))
+	att.add_child(_stick)
+
+func _track_hand(delta: float) -> void:
+	if not has_stick() or delta <= 0.0:
+		return
+	var p := _stick.global_position
+	if _hand_prev != Vector3.INF:
+		_hand_vel = ((p - _hand_prev) / delta).limit_length(HAND_SPEED_MAX)
+	_hand_prev = p
+
+## Drop the stick: free the mesh in the hand and spawn D's ThrowableProp
+## (kind &"stick") at the stick's transform with the hand's velocity plus a
+## small toss along the hit. He fights on with the grunt's moves.
+func _drop_stick(push_dir: Vector3) -> void:
+	if not has_stick():
+		return
+	var xf := _stick.global_transform
+	var flat := _flat(push_dir)
+	var v := _hand_vel + (flat.normalized() * STICK_DROP_TOSS.x if flat.length() > 0.01 else Vector3.ZERO) \
+		+ Vector3.UP * STICK_DROP_TOSS.y
+	var mesh_node := _stick
+	_stick = null
+	_stick_mat = null
+	_has_move = false
+	_string_rest.clear()
+	var parent := fighter.get_parent()
+	if parent == null or not parent.is_inside_tree():
+		mesh_node.queue_free()
+		return
+	# D's prop builds its own stick (same size, along its local Y like ours).
+	var prop := ThrowableProp.spawn(parent, &"stick", xf, false)
+	prop.name = "DroppedStick"
+	if _prop_is_bare(prop):
+		# The prop built nothing for &"stick": dress it with this mesh.
+		mesh_node.remove_from_group(FOCUS_KEEP_GROUP)
+		mesh_node.get_parent().remove_child(mesh_node)
+		prop.add_child(mesh_node)
+		mesh_node.transform = Transform3D()
+		var col := CollisionShape3D.new()
+		var shape := CylinderShape3D.new()
+		shape.radius = STICK_RADIUS * 1.2
+		shape.height = STICK_LENGTH
+		col.shape = shape
+		prop.add_child(col)
+		prop.collision_layer = Layers.DEBRIS
+		prop.collision_mask = Layers.MASK_DEBRIS
+		prop.mass = STICK_MASS
+	else:
+		mesh_node.queue_free()
+	prop.linear_velocity = v
+	prop.angular_velocity = Vector3(_rng.randf_range(-6.0, 6.0), _rng.randf_range(-3.0, 3.0), _rng.randf_range(-6.0, 6.0))
+	prop.reset_physics_interpolation()
+	dropped_stick = prop
+
+## True when the prop has no visible mesh and no collision shape of its own.
+static func _prop_is_bare(prop: Node) -> bool:
+	for c in prop.get_children():
+		if c is CollisionShape3D or c is MeshInstance3D or c is CollisionPolygon3D:
+			return false
+	return true
 
 # --- Player tracking, Duelist reactions ---------------------------------------
 
@@ -956,8 +1711,15 @@ func _dodge_chance() -> float:
 	var chances: Array = fighter.config.get("dodge_chance", [0.0, 0.0])
 	return float(chances[clampi(Tuning.difficulty, 0, chances.size() - 1)])
 
-## The player started an attack: maybe perfect-dodge it (Duelist). Repeating
-## the same move within MASH_WINDOW raises the chance (anti-mash).
+## The Round 5 Defence (H) owns parry / teleport for this fighter.
+func _defence_on() -> bool:
+	return fighter.defence != null and fighter.defence.is_enabled()
+
+## The player started an attack: maybe read it (Duelist). Repeating the same
+## move within MASH_WINDOW raises the chance (anti-mash). A read is a Block
+## tap just before the hit: H's parry (Round 5 Defence; GameEvents.parried
+## starts the counter) or, with the Defence off (debug), the Upgrade 2
+## perfect dodge.
 func _on_player_attack_incoming(move: StringName, time_to_active: float) -> void:
 	var family := String(move).rstrip("0123456789")
 	var repeats := 0
@@ -969,7 +1731,7 @@ func _on_player_attack_incoming(move: StringName, time_to_active: float) -> void
 				repeats += 1
 	kept.append([_time, family])
 	_player_moves = kept
-	if mode != Mode.FIGHT or fighter.is_dead() or _is_disabled() or _is_attacking():
+	if mode != Mode.FIGHT or fighter.is_dead() or _is_impaired() or _is_attacking():
 		return
 	var player := _get_player()
 	if player == null:
@@ -985,11 +1747,13 @@ func _on_player_attack_incoming(move: StringName, time_to_active: float) -> void
 			_dodge_press()
 		else:
 			TimeDirector.real_timer(delay).timeout.connect(_dodge_press)
-	elif dodge_chance_override < 0.0 and time_to_active > Tuning.PERFECT_DODGE_WINDOW + 0.05 \
+	elif dodge_chance_override < 0.0 and time_to_active > Tuning.PARRY_WINDOW + 0.05 \
 			and _rng.randf() < DUELIST_BLOCK_CHANCE[clampi(Tuning.difficulty, 0, 1)]:
-		# A plain block, pressed now (outside the perfect window). Not against
-		# attacks faster than the window: that press would be a perfect dodge.
+		# A plain block, pressed now (outside the parry window). Not against
+		# attacks faster than the window: that press would be a parry.
 		_block_until = _time + time_to_active + BLOCK_AFTER_ACTIVE
+		_want_guard = true
+		_apply_guard()
 
 ## Dodge chance against a player move repeated `repeats` times within
 ## MASH_WINDOW: the Tuning chance, +MASH_BONUS per repeat, capped at MASH_CAP.
@@ -1001,8 +1765,10 @@ func get_dodge_chance(repeats := 0) -> float:
 		return base
 	return maxf(base, minf(base + MASH_BONUS * repeats, MASH_CAP))
 
+## Block tap just before the player's strike lands: B's perfect dodge
+## (Upgrade 2) or H's parry (Round 5 Defence).
 func _dodge_press() -> void:
-	if not is_instance_valid(fighter) or fighter.is_dead() or _is_disabled() or _is_attacking():
+	if not is_instance_valid(fighter) or fighter.is_dead() or _is_impaired() or _is_attacking():
 		return
 	if fighter.combat == null:
 		return
@@ -1012,12 +1778,12 @@ func _dodge_press() -> void:
 	_block_down = true
 	_dodge_hold_until = AttackDirector.now() + DODGE_HOLD
 
-## After a perfect dodge (BT3 vanish exchange): with Focus and B's
-## start_counter, teleport behind the player once visible again (blue tell,
-## back kick); without, a visible sidestep (>= 1 m) and, once it has
-## reappeared, a quick hook through the normal token turn.
+## Upgrade 2 only (H's Defence off, debug): after a perfect dodge, with Focus
+## and B's start_counter, teleport behind the player once visible again
+## (orange tell, back kick); without, a visible sidestep (>= 1 m) and, once
+## it has reappeared, a quick hook through the normal token turn.
 func _on_perfect_dodge(defender: Node3D, attacker: Node3D) -> void:
-	if defender != fighter:
+	if defender != fighter or _defence_on():
 		return
 	_counter_pending = true
 	_counter_deadline = _time + COUNTER_WINDOW
@@ -1040,10 +1806,39 @@ func _on_perfect_dodge(defender: Node3D, attacker: Node3D) -> void:
 		fighter.knockback(side * SIDESTEP_SPEED, SIDESTEP_TIME)
 	_counter_at = _time + SIDESTEP_TIME + 0.02
 
+## Round 5 Defence: we parried the player (he is staggered). Counter the
+## moment he can be attacked again (never in hitstun): with Focus and B's
+## start_counter, DUELIST_TELEPORT_SHARE of the time the teleport counter
+## (behind him, orange tell, back kick); otherwise a quick hook through an
+## urgent token.
+func _on_parried(defender: Node3D, attacker: Node3D) -> void:
+	if defender != fighter:
+		return
+	parries_seen += 1
+	var share := teleport_share_override if teleport_share_override >= 0.0 else DUELIST_TELEPORT_SHARE
+	_has_move = false  # a move picked before the parry gives way to the counter
+	_string_rest.clear()
+	_following = false
+	_counter_pending = true
+	_counter_after_parry = true
+	_counter_teleport = fighter.combat != null and fighter.combat.has_method(&"start_counter") \
+		and fighter.focus + 1e-4 >= Tuning.TELEPORT_COST and attacker is Fighter and _rng.randf() < share
+	_counter_deadline = _time + COUNTER_WINDOW
+	_counter_at = _time + 0.02
+
+## The player tapped Block with nothing in its window: his parry is locked
+## for Tuning.PARRY_LOCKOUT. A Duelist in reach punishes the mash.
+func _on_parry_whiffed(defender: Node3D) -> void:
+	if fighter.archetype != &"duelist" or defender == null or defender != _get_player():
+		return
+	if mode == Mode.FIGHT and not is_fleeing() and _dist_to(defender as Fighter) < PUNISH_RANGE:
+		_punish_until = _time + PUNISH_WINDOW
+
 ## Runs the post-dodge counter. Returns true while it owns this frame.
 func _tick_counter(player: Fighter) -> bool:
 	if _time > _counter_deadline or player.is_dead():
 		_counter_pending = false
+		_counter_after_parry = false
 		return false
 	var vanished := fighter.combat != null and fighter.combat.has_method(&"is_vanished") \
 		and fighter.combat.is_vanished()
@@ -1053,7 +1848,25 @@ func _tick_counter(player: Fighter) -> bool:
 		_face(player.get_ground_position())
 		return true
 	if not _counter_teleport:
-		return false  # the normal token turn swings the quick hook
+		if AttackDirector.has_token(fighter):
+			return false  # the normal token turn swings the quick hook
+		# No turn yet (the parried player reels: never swung at in hitstun).
+		# Close in meanwhile, so the hook comes the moment he can be hit.
+		var center := player.get_ground_position()
+		var d := _dist_to(player)
+		var r: float = MOVE_RANGE[&"e_hook"] * COUNTER_CLOSE_IN
+		_want_guard = false
+		if d > r:
+			var to := _flat(center - _pos())
+			var dir := to.normalized() if to.length() > 0.01 else fighter.get_forward()
+			var goal := _route(_approach_goal(center, dir, r), center)
+			_finish_move(_flat(goal - _pos()).normalized(), center, false)
+		else:
+			fighter.move_input = Vector3.ZERO
+		_face(center)
+		if AttackDirector.request_token(fighter, true):
+			_begin_turn(d, player)
+		return true
 	if _is_attacking() or not fighter.can_act():
 		return true
 	if not AttackDirector.request_token(fighter, true):
@@ -1066,6 +1879,9 @@ func _tick_counter(player: Fighter) -> bool:
 	AttackDirector.notify_attack_started(fighter, tta if is_finite(tta) else COUNTER_TELL)
 	attacks_started += 1
 	counters_started += 1
+	if _counter_after_parry:
+		parry_counters += 1
+	_counter_after_parry = false
 	_attack_started_at = _time
 	_counter_pending = false
 	_has_move = false
@@ -1085,11 +1901,14 @@ func _on_attack_whiff(attacker: Node3D, _move: StringName) -> void:
 func _update_throw_aim(delta: float) -> void:
 	if fighter.combat == null:
 		return
-	var grabbing := fighter.combat.holding != null \
-		or (fighter.combat.is_attacking() and fighter.combat.current_move_id() == &"e_grab")
+	# Holding the player through G's Carry (Carry reads combat.throw_aim for the
+	# grab-throw's direction).
+	var holding := _carrying()
+	var grabbing := holding \
+		or (fighter.combat.is_attacking() and fighter.combat.current_move_id() in GRAB_MOVES)
 	if not grabbing:
 		if _aim_set:
-			fighter.combat.throw_aim = Vector3.ZERO
+			_set_throw_aim(Vector3.ZERO)
 			_aim_set = false
 		return
 	_aim_timer -= delta
@@ -1097,10 +1916,16 @@ func _update_throw_aim(delta: float) -> void:
 		return
 	_aim_timer = 0.15
 	var aim := find_throw_aim()
-	fighter.combat.throw_aim = aim
+	_set_throw_aim(aim)
 	_aim_set = true
-	if aim != Vector3.ZERO and fighter.combat.holding != null:
+	if aim != Vector3.ZERO and holding:
 		fighter.face_dir = aim
+
+## Both readers: G's Carry (enemy hold) and the Upgrade 2 grab.
+func _set_throw_aim(aim: Vector3) -> void:
+	fighter.combat.throw_aim = aim
+	if fighter.carry != null and &"throw_aim" in fighter.carry:
+		fighter.carry.set(&"throw_aim", aim)
 
 ## Direction for a throw: the nearest breakable wall within THROW_WALL_RANGE
 ## in a +-60 degree fan, else the nearest wall, else the first fan direction
@@ -1223,7 +2048,9 @@ func _finish_move(v: Vector3, player_pos: Vector3, keep_player_space: bool) -> v
 	# (round a wall end, through a room) where the bounds push would fight it.
 	if _nav_path.is_empty():
 		v += _bounds_push()
-	if _time < _detour_until:
+	if _time < _backoff_until:
+		v = _detour_dir  # the escalation's back-out overrides the steering
+	elif _time < _detour_until:
 		v = v * 0.3 + _detour_dir
 	v = _avoid_walls(v, WALL_PROBE)
 	_steer_out = v
@@ -1277,6 +2104,9 @@ func _route(goal: Vector3, anchor: Vector3) -> Vector3:
 		return side
 	if _blocked_time < ROUTE_BLOCKED_TIME:
 		return goal
+	if not AttackDirector.take_route_budget():
+		_route_age = ROUTE_REPLAN  # another enemy searched this tick: next tick
+		return goal if _route_point == Vector3.INF else _route_point
 	var found := _find_waypoint(me, anchor)
 	if found != Vector3.INF:
 		_route_point = found
@@ -1294,8 +2124,24 @@ func _nav_route(me: Vector3, goal: Vector3) -> Vector3:
 		return Vector3.INF
 	var dt := get_physics_process_delta_time()
 	_npath_age += dt
-	if _nav_path.is_empty() or _npath_age > NAV_REPLAN or _flat(goal - _nav_goal).length() > NAV_GOAL_MOVE:
-		var p := AttackDirector.nav_path(me, goal)
+	var replan := _npath_age > NAV_REPLAN or _flat(goal - _nav_goal).length() > NAV_GOAL_MOVE
+	if _nav_path.is_empty() or (replan and _my_tick()):
+		# Both layers: the wide way (0.42 m clearance: off jambs, clutter
+		# corners and hole edges) whenever it exists for a wide body, and for
+		# the rest unless it is more than WIDE_DETOUR_MAX longer than the
+		# normal way; the normal way when no wide one exists (a wide body then
+		# squeezes).
+		var p := AttackDirector.nav_path(me, goal, true)
+		var complete := not p.is_empty() and AttackDirector.nav.last_path_complete
+		if AttackDirector.nav_has_budget():
+			var p2 := AttackDirector.nav_path(me, goal, false)
+			var c2 := not p2.is_empty() and AttackDirector.nav.last_path_complete
+			var detour_ok := _wide or AINavGrid.path_length(me, p) <= AINavGrid.path_length(me, p2) + WIDE_DETOUR_MAX
+			if c2 and (not complete or not detour_ok):
+				p = p2
+				complete = true
+			elif p.is_empty():
+				p = p2
 		if not p.is_empty():
 			_nav_path = p
 			_nav_goal = goal
@@ -1304,7 +2150,7 @@ func _nav_route(me: Vector3, goal: Vector3) -> Vector3:
 			_nav_look_age = INF
 			# A partial path stops at the closest reachable cell: the goal is
 			# walled off (a sealed room, a hole too small to walk through).
-			nav_unreachable = not AttackDirector.nav.last_path_complete
+			nav_unreachable = not complete
 			nav_path_length = INF if nav_unreachable else AINavGrid.path_length(me, p)
 		elif AttackDirector.nav_has_budget():
 			_nav_path = PackedVector3Array()  # no path at all
@@ -1315,7 +2161,7 @@ func _nav_route(me: Vector3, goal: Vector3) -> Vector3:
 	while _nav_index < _nav_path.size() - 1 and _flat(_nav_path[_nav_index] - me).length() < AINavGrid.CELL * 1.5:
 		_nav_index += 1
 	_nav_look_age += dt
-	if _nav_look_age > NAV_LOOK_EVERY:
+	if _nav_look_age > NAV_LOOK_EVERY and (_my_tick() or not is_finite(_nav_look_age)):
 		_nav_look_age = 0.0
 		_nav_target = _nav_path[_nav_index]
 		for k in range(_nav_index + 1, mini(_nav_index + NAV_LOOKAHEAD, _nav_path.size())):
@@ -1475,6 +2321,10 @@ func _get_nav_points() -> PackedVector3Array:
 			_nav_points.append_array(entry.get("path", PackedVector3Array()))
 	return _nav_points
 
+## True on this brain's tick of every SLOT_STRIDE (periodic path work).
+func _my_tick() -> bool:
+	return (Engine.get_physics_frames() + _slot) % SLOT_STRIDE == 0
+
 func _set_move(v: Vector3) -> void:
 	v.y = 0.0
 	# Guarding already slows the walk (Fighter.BLOCK_WALK_MULT); do not stack.
@@ -1515,7 +2365,7 @@ func _avoid_walls(v: Vector3, probe: float) -> Vector3:
 	var speed := v.length()
 	# Forward at waist and head height (a hole knocked into a wall at one
 	# height is no way through), plus two whiskers.
-	for probe_ray: Vector2 in [Vector2(0.0, 0.0), Vector2(0.0, HEAD_PROBE_RISE),
+	for probe_ray: Vector2 in [Vector2(0.0, 0.0), Vector2(0.0, HEAD_PROBE_RISE), Vector2(0.0, -LOW_PROBE_DROP),
 			Vector2(WHISKER_ANGLE, 0.0), Vector2(-WHISKER_ANGLE, 0.0)]:
 		var angle := probe_ray.x
 		var d := dir.rotated(Vector3.UP, angle)
@@ -1544,6 +2394,57 @@ func _avoid_walls(v: Vector3, probe: float) -> Vector3:
 		if dist < 0.6:
 			v += n * 0.3 * (1.0 - dist / 0.6)
 	return v
+
+## The stuck metric, from what the last tick asked (move_input) and where the
+## body went. Not free to move (down, stunned, held, attacking, a knockback or
+## sidestep, a hitstop freeze) never counts as stuck.
+func _track_stall(delta: float) -> void:
+	var free := not fighter.is_dead() and not _is_impaired() and not _is_attacking() and not fighter.is_frozen() \
+		and not (fighter.combat != null and fighter.combat.has_forced_velocity()) and _time >= _sidestep_until
+	if _sw_start == Vector3.INF:
+		_sw_start = _pos()
+	_sw_t += delta
+	if free:
+		_sw_free += delta
+		var mult := fighter.combat.get_move_speed_mult() if fighter.combat else 1.0
+		_sw_asked += _flat(fighter.move_input).limit_length(1.0).length() * Tuning.ENEMY_WALK_SPEED * mult * delta
+	if _sw_t < STALL_WINDOW:
+		return
+	var moved := _flat(_pos() - _sw_start).length()
+	var stalled := _sw_free >= _sw_t * 0.8 and _sw_asked >= STALL_MIN_SPEED * _sw_t \
+		and moved < STALL_SHARE * _sw_asked
+	if stalled:
+		stuck_time += _sw_t
+		if stuck_time > max_stuck_time:
+			max_stuck_time = stuck_time
+			max_stuck_at = _pos()
+		if stuck_time >= _next_escalate:
+			_next_escalate = stuck_time + STALL_ESCALATE
+			_escalate_stall()
+	else:
+		stuck_time = 0.0
+		_next_escalate = STALL_ESCALATE
+	_sw_t = 0.0
+	_sw_free = 0.0
+	_sw_asked = 0.0
+	_sw_start = _pos()
+
+## Stalled for STALL_ESCALATE: the grid may be wrong here (a shoved prop, a
+## broken piece): re-test the cells round us, re-plan, and detour the other way.
+func _escalate_stall() -> void:
+	if AttackDirector.nav_ready():
+		AttackDirector.nav.refresh(_pos(), 2.0)
+		AttackDirector.nav.penalize(_pos(), STALL_PENALTY_RADIUS)
+	_nav_path = PackedVector3Array()
+	_route_point = Vector3.INF
+	_side_locked = false
+	_side_sign = -_side_sign
+	var base := _flat(fighter.move_input)
+	base = base.normalized() if base.length() > 0.05 else fighter.get_forward()
+	# Back straight out of the wedge (a little to the other side), then re-plan.
+	_detour_dir = (-base * 0.8 + Vector3(-base.z, 0.0, base.x) * _side_sign * 0.6).normalized()
+	_backoff_until = _time + STALL_BACKOFF
+	_detour_until = _time + STALL_BACKOFF + DETOUR_TIME * 0.5
 
 func _check_stuck(v: Vector3) -> void:
 	_stuck_timer += get_physics_process_delta_time()

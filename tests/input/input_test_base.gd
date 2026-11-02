@@ -96,6 +96,20 @@ func press(action: StringName) -> void:
 func release(action: StringName) -> void:
 	Input.action_release(action)
 
+## A real press-and-release input event for `action` (reaches _input /
+## _unhandled_input handlers, e.g. the camera rig's lock_on), one tick apart.
+func tap_action(action: StringName) -> void:
+	var e := InputEventAction.new()
+	e.action = action
+	e.pressed = true
+	Input.parse_input_event(e)
+	await ticks(1)
+	var r := InputEventAction.new()
+	r.action = action
+	r.pressed = false
+	Input.parse_input_event(r)
+	await ticks(1)
+
 func release_all_input() -> void:
 	for a: StringName in Controls.ACTIONS:
 		if InputMap.has_action(a):

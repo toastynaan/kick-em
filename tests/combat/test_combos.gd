@@ -1,18 +1,26 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Upgrade 2 combos (U4): the spec's 8 strings, enders, juggles flattened
-## toward the wall, damage scaling, sweeps (stumble / trip / lift), one trip
-## per combo, Brute armour, daze (blocked hits, L2 head hit), ground
-## finishers, upward throw.
+## Round 5 combo graph (ComboGraph header): three buttons, strings of at most
+## three hits, knees and elbows from strings. Each string is pressed hit by
+## hit through real strikes on a grunt; the move ids, P and tier are checked.
+## The third hit of a TAP string gets the finisher bonus (+1 P), whether or not
+## the hits before it landed; a charged hit ends the string; after Tuning.STRING_RESET
+## a press starts a new string; after the third hit the next press is a new
+## string. Stance variants: back + Kick and crouch + Kick sweep, back + Light
+## is the backfist, any attack in the air is a dropping strike (class by button).
+## Combo damage scaling by hit number is unchanged.
 
 const L := CombatController.Action.LIGHT
+const H := CombatController.Action.HEAVY
 const K := CombatController.Action.KICK
+const N := &"neutral"
+const B := &"back"
 var _x := 0.0
 
 func _init() -> void:
 	_timeout = 150.0
 
 func _lane(arch := &"grunt", dist := 1.0) -> Array:
-	_x += 9.0
+	_x += 10.0
 	var p := spawn_fake(&"player", Vector3(_x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER, true)
 	var e := spawn(arch, Vector3(_x, 0, -dist), Vector3.BACK)
 	await ticks(12)
@@ -23,24 +31,33 @@ func _log(f: Fighter) -> Array:
 	f.combat.attack_started.connect(func(id: StringName) -> void: starts.append(id))
 	return starts
 
-func _hit(move_id: StringName, victim: Fighter) -> HitInfo:
-	for i in range(events.size() - 1, -1, -1):
-		var ev: Array = events[i]
-		if ev[0] == &"hit_landed" and (ev[1] as HitInfo).move_id == move_id and (ev[1] as HitInfo).victim == victim:
-			return ev[1]
-	return null
+func _hits_on(victim: Fighter) -> Array[HitInfo]:
+	var out: Array[HitInfo] = []
+	for ev: Array in events:
+		if ev[0] == &"hit_landed" and (ev[1] as HitInfo).victim == victim:
+			out.append(ev[1])
+	return out
 
-## Press a sequence of [action, intent, air] steps, each on the previous hit.
-func _string(p: Fighter, _e: Fighter, steps: Array) -> void:
+## Press [action, intent, crouch, air, hold s] steps, each once the previous hit landed.
+func _string(p: Fighter, steps: Array) -> void:
 	for st: Array in steps:
 		p.fake_intent = st[1]
-		p.fake_air = st[2]
+		p.fake_crouch = st[2]
+		p.fake_air = st[3]
 		var n := count_events(&"hit_landed")
-		tap(p, st[0])
-		await wait_until(func() -> bool: return count_events(&"hit_landed") > n or not p.combat.is_attacking(), 1.2)
-		p.fake_intent = &"neutral"
+		var hold: float = st[4]
+		if hold > 0.0:
+			await hold_press(p, st[0], hold)
+		else:
+			tap(p, st[0])
+		await wait_until(func() -> bool: return count_events(&"hit_landed") > n or not p.combat.is_attacking(), 1.5)
+		p.fake_intent = N
+		p.fake_crouch = false
 		p.fake_air = false
-	await wait_real(0.6)
+	await wait_real(0.5)
+
+func _st(action: int, intent := N, crouch := false, air := false, hold := 0.0) -> Array:
+	return [action, intent, crouch, air, hold]
 
 func run() -> void:
 	print("combo scaling")
@@ -49,14 +66,20 @@ func run() -> void:
 		sc.append(CombatController.combo_scale(n))
 	check(sc == [1.0, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.5], "hits 1-2 full, -10%% each, floor 50%% (%s)" % [sc])
 
-	print("strings")
-	var N := &"neutral"
-	var F := &"forward"
+	print("strings (tapped)")
+	# [name, steps, move ids, P of each hit, tier of the last hit]
 	var cases := [
-		["P,P,P", [[L, N, false], [L, N, false], [L, N, false]], [&"jab1", &"cross", &"hook"]],
-		["P,P,fP", [[L, N, false], [L, N, false], [L, F, false]], [&"jab1", &"cross", &"uppercut"]],
-		["P,P,K", [[L, N, false], [L, N, false], [K, N, false]], [&"jab1", &"cross", &"sparta_kick"]],
-		["K,K", [[K, N, false], [K, N, false]], [&"sparta_kick", &"roundhouse"]],
+		["L,L,L", [_st(L), _st(L), _st(L)], [&"jab1", &"jab2", &"elbow"], [1.0, 1.0, 2.5], HitInfo.Tier.STAGGER],
+		["L,H (one-two)", [_st(L), _st(H)], [&"jab1", &"cross"], [1.0, 2.0], HitInfo.Tier.STAGGER],
+		["L,L,K", [_st(L), _st(L), _st(K)], [&"jab1", &"jab2", &"roundhouse"], [1.0, 1.0, 3.5], HitInfo.Tier.KNOCKDOWN],
+		["K,K,K", [_st(K), _st(K), _st(K)], [&"sparta_kick", &"knee_strike", &"roundhouse"], [2.5, 1.5, 3.5], HitInfo.Tier.KNOCKDOWN],
+		["H,H,H", [_st(H), _st(H), _st(H)], [&"cross", &"hook", &"uppercut"], [2.0, 2.0, 3.0], HitInfo.Tier.STAGGER],
+		["L,K", [_st(L), _st(K)], [&"jab1", &"knee_strike"], [1.0, 1.5], HitInfo.Tier.FLINCH],
+		["back + K", [_st(K, B)], [&"leg_sweep"], [1.5], HitInfo.Tier.STUMBLE],
+		["crouch + K", [_st(K, N, true)], [&"leg_sweep"], [1.5], HitInfo.Tier.STUMBLE],
+		["back + L", [_st(L, B)], [&"backfist"], [2.0], HitInfo.Tier.STAGGER],
+		["L,L, back + K (sweep as the third hit)", [_st(L), _st(L), _st(K, B)], [&"jab1", &"jab2", &"leg_sweep"], [1.0, 1.0, 2.5], HitInfo.Tier.STUMBLE],
+		["L,L, hold L (charged: no finisher)", [_st(L), _st(L), _st(L, N, false, false, 0.4)], [&"jab1", &"jab2", &"elbow"], [1.0, 1.0, 2.4], HitInfo.Tier.STAGGER],
 	]
 	for c: Array in cases:
 		var pe: Array = await _lane(&"grunt", 1.0)
@@ -64,233 +87,60 @@ func run() -> void:
 		var e: Fighter = pe[1]
 		var starts := _log(p)
 		clear_events()
-		await _string(p, e, c[1])
-		check(starts == c[2], "%s -> %s (%s)" % [c[0], c[2], starts])
-		match c[0]:
-			"P,P,P":
-				var h := _hit(&"hook", e)
-				check(h != null and h.reaction == HitInfo.Reaction.STAGGER, "hook staggers")
-				var cp := last_event(&"combo_progress")
-				check(not cp.is_empty() and cp[2] == 3 and is_equal_approx(cp[3], 0.9), "combo_progress 3 hits at x0.9")
-			"P,P,fP":
-				var u := _hit(&"uppercut", e)
-				var g: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8)
-				check(u != null and absf(u.launch_velocity.y - sqrt(2.0 * g * Tuning.LAUNCHER_LIFT)) < 0.2,
-					"uppercut lifts %.1f m (v_up %.2f)" % [Tuning.LAUNCHER_LIFT, u.launch_velocity.y if u else 0.0])
-			"P,P,K":
-				var k := _hit(&"sparta_kick", e)
-				check(k != null and k.reaction == HitInfo.Reaction.LAUNCH, "front kick ender launches")
-			"K,K":
-				var r := _hit(&"roundhouse", e)
-				if r != null:
-					var right := p.get_forward().cross(Vector3.UP).normalized()
-					check(r.launch_velocity.dot(-right) > 0.5 * r.launch_velocity.length(), "roundhouse launches sideways")
-				else:
-					check(e.is_launched(), "roundhouse follows the launched body (juggle) or hits")
-		await wait_real(1.5)
+		await _string(p, c[1])
+		var hits := _hits_on(e)
+		var ps: Array = []
+		for h in hits:
+			ps.append(snappedf(h.power, 0.01))
+		print("  %-38s moves %s P %s" % [c[0], starts, ps])
+		check(starts == c[2], "%s -> %s" % [c[0], c[2]])
+		check(ps == c[3], "%s: P %s (want %s)" % [c[0], ps, c[3]])
+		if not hits.is_empty():
+			check(hits[-1].tier == c[4], "%s: last hit %s (want %s)" % [c[0], HitInfo.tier_name(hits[-1].tier),
+				HitInfo.tier_name(c[4])])
 
-	print("uppercut, jump + K: air juggle")
-	var pe2: Array = await _lane(&"grunt", 1.0)
-	var p2: Fighter = pe2[0]
-	var e2: Fighter = pe2[1]
-	var log2 := _log(p2)
-	clear_events()
-	await _string(p2, e2, [[L, N, false], [L, N, false], [L, F, false]])
-	p2.fake_air = true
-	tap(p2, K)
-	await wait_real(0.6)
-	p2.fake_air = false
-	check(log2.size() >= 4 and log2[3] == &"flying_kick", "uppercut links into flying_kick (%s)" % [log2])
-	var fk := _hit(&"flying_kick", e2)
-	if fk != null:
-		check(fk.juggle, "flying kick on the lifted body is a juggle")
-	await wait_real(1.5)
+	print("air: any attack is a dropping strike (class by button)")
+	for row: Array in [[L, &"jab"], [H, &"cross"], [K, &"kick"]]:
+		var pe: Array = await _lane(&"grunt", 1.0)
+		var p: Fighter = pe[0]
+		var starts := _log(p)
+		p.fake_air = true
+		tap(p, row[0])
+		await ticks(3)
+		check(starts == [&"drop_strike"], "air %s -> drop_strike (%s)" % [row[1], starts])
+		var dbg: Dictionary = p.combat.get_strike_debug()
+		check(dbg.get("class", &"") == row[1], "drop strike class %s (%s)" % [row[1], dbg.get("class", &"")])
+		p.fake_air = false
 
-	print("enders: no cancel into a starter")
-	var pe3: Array = await _lane(&"grunt", 1.0)
-	var p3: Fighter = pe3[0]
-	var log3 := _log(p3)
-	await _string(p3, pe3[1], [[L, N, false], [L, N, false]])
+	print("the third hit of a tap string gets the finisher even if an earlier one missed")
+	var pw: Array = await _lane(&"grunt", 1.0)
+	var pf: Fighter = pw[0]
+	var ef: Fighter = pw[1]
 	clear_events()
-	var t_hook := [0.0]
-	var t_next := [0.0]
-	p3.combat.attack_started.connect(func(id: StringName) -> void:
-		if id == &"hook": t_hook[0] = TimeDirector.now()
-		elif t_hook[0] > 0.0 and t_next[0] == 0.0: t_next[0] = TimeDirector.now())
-	tap(p3, L)  # hook (ender)
-	await wait_until(func() -> bool: return count_events(&"hit_landed") > 0, 1.0)
-	tap(p3, L)  # mashed into the hook's recovery: buffered, not a cancel
-	await wait_real(1.0)
-	check(log3.size() >= 3 and log3[2] == &"hook", "hook played")
-	var hook := MoveLibrary.get_move(&"hook")
-	var hook_len := Tuning.frames(hook.startup + hook.active + hook.recovery)
-	var gap: float = t_next[0] - t_hook[0]
-	check(log3.size() >= 4 and log3[3] == &"jab1" and t_next[0] > 0.0 and gap >= hook_len - 0.02,
-		"after the hook (ender) the next press starts jab1 only when the hook ends (%.3f s >= %.3f s, %s)" % [gap, hook_len, log3])
-
-	print("juggle: flattened toward the nearest wall")
-	_x += 9.0
-	var wall := StaticBody3D.new()
-	wall.collision_layer = Layers.WORLD
-	var wcs := CollisionShape3D.new()
-	var wb := BoxShape3D.new()
-	wb.size = Vector3(0.4, 3.0, 8.0)
-	wcs.shape = wb
-	wall.add_child(wcs)
-	add_child(wall)
-	wall.global_position = Vector3(_x + 4.0, 1.5, -1.0)  # 4 m to the side (+X)
-	var pj := spawn_fake(&"player", Vector3(_x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER, true)
-	var ej := spawn(&"grunt", Vector3(_x, 0, -1.1), Vector3.BACK)
-	await ticks(12)
-	var wd := pj.combat.nearest_wall_dir(ej.get_center_of_mass(), 10.0)
-	check(wd.dot(Vector3.RIGHT) > 0.9, "nearest wall is to the +X side (%s)" % wd)
-	clear_events()
-	tap(pj, CombatController.Action.SWEEP)
-	await wait_until(func() -> bool: return ej.combat.is_stumbling(), 1.0)
-	tap(pj, K)
-	await wait_until(func() -> bool: return _hit(&"sparta_kick", ej) != null, 1.5)
-	var jk := _hit(&"sparta_kick", ej)
-	check(jk != null and jk.juggle, "kick on the stumbling enemy is a juggle")
-	if jk:
-		var flat := Vector3(jk.launch_velocity.x, 0, jk.launch_velocity.z).normalized()
-		check(flat.dot(Vector3.RIGHT) > 0.5, "launch bent toward the wall (%s)" % flat)
-		var up_deg := rad_to_deg(asin(jk.launch_velocity.normalized().y))
-		check(up_deg < 10.0, "flat launch (%.1f deg up)" % up_deg)
-	await wait_real(1.5)
-
-	print("sweeps: L3 lifts, one trip per combo, Brute only stumbles at L3")
-	var ps: Array = await _lane(&"grunt", 1.1)
-	clear_events()
-	await hold_press(ps[0], CombatController.Action.SWEEP, 0.9)
-	await wait_until(func() -> bool: return _hit(&"leg_sweep", ps[1]) != null, 1.0)
-	var s3 := _hit(&"leg_sweep", ps[1])
-	check(s3 != null and s3.charge_level == 3 and s3.launch_velocity.y > 4.5, "L3 sweep launches upward (v_up %.1f)" % (s3.launch_velocity.y if s3 else 0.0))
-	await wait_real(2.5)
-	ps = await _lane(&"grunt", 1.1)
-	clear_events()
-	await hold_press(ps[0], CombatController.Action.SWEEP, 0.3)
-	await wait_until(func() -> bool: return count_events(&"tripped") > 0, 1.0)
-	await wait_real(0.35)
-	var to: Vector3 = (ps[1] as Fighter).get_ground_position() - (ps[0] as Fighter).global_position
-	to.y = 0
-	(ps[0] as Fighter).snap_facing(to)
-	clear_events()
-	await hold_press(ps[0], CombatController.Action.SWEEP, 0.3)
-	await wait_real(0.6)
-	var s2 := _hit(&"leg_sweep", ps[1])
-	if s2 != null:
-		check(count_events(&"tripped") == 0 and s2.launch_velocity.length() <= CombatController.KNOCKDOWN_LAUNCH + 0.1,
-			"second sweep in the combo only knocks down (%.1f m/s)" % s2.launch_velocity.length())
-	else:
-		print("  SKIP second sweep: the tripped body was out of reach")
-	await wait_real(2.0)
-	var pb: Array = await _lane(&"brute", 1.3)
-	clear_events()
-	tap(pb[0], CombatController.Action.SWEEP)
-	await wait_real(0.6)
-	check(count_events(&"stumbled") == 0 and not (pb[1] as Fighter).combat.is_stumbling(), "tap sweep does not stumble the Brute")
-	await wait_real(Tuning.COMBO_DROP)
-	clear_events()
-	await hold_press(pb[0], CombatController.Action.SWEEP, 0.9)
-	await wait_real(0.6)
-	check(count_events(&"stumbled") == 1, "an L3 sweep stumbles the Brute")
-	await wait_real(1.5)
-
-	print("dazed: three blocked hits, then the next hit launches")
-	var pd: Array = await _lane(&"grunt", 1.0)
-	var ed: Fighter = pd[1]
-	ed.combat.press(CombatController.Action.BLOCK)
-	await ticks(3)
-	clear_events()
-	for i in Tuning.DAZE_BLOCKED_HITS:
-		tap(pd[0], L)
-		await wait_real(0.45)
-	check(count_events(&"dazed") == 1 and ed.combat.is_dazed(), "guard broken after %d blocked hits" % Tuning.DAZE_BLOCKED_HITS)
-	check(not ed.combat.is_blocking(), "a dazed fighter cannot block")
-	clear_events()
-	tap(pd[0], L)
-	await wait_until(func() -> bool: return count_events(&"hit_landed") > 0, 1.0)
-	var dh: HitInfo = last_event(&"hit_landed")[1] if count_events(&"hit_landed") > 0 else null
-	check(dh != null and dh.reaction == HitInfo.Reaction.LAUNCH, "a jab on a dazed fighter launches")
-	await wait_real(2.0)
-	print("dazed: level 2 head hit")
-	var ph: Array = await _lane(&"grunt", 1.0)
-	(ph[0] as Fighter).aim_zone = BodyZones.Zone.HEAD
-	(ph[0] as Fighter).aim_bone = &"Head"
-	clear_events()
-	await hold_press(ph[0], L, 0.55)
-	await wait_until(func() -> bool: return count_events(&"dazed") > 0, 1.0)
-	check(count_events(&"dazed") == 1 and (ph[1] as Fighter).combat.is_dazed(), "a level 2 head hit dazes")
-	await wait_real(2.0)
-
-	print("ground finishers")
-	var pg: Array = await _lane(&"grunt", 1.1)
-	var pgp: Fighter = pg[0]
-	var eg: Fighter = pg[1]
-	await hold_press(pgp, CombatController.Action.SWEEP, 0.3)
-	await wait_until(func() -> bool: return eg.get_state() == RagdollController.State.GROUNDED, 4.0)
-	var tg := eg.get_ground_position() - pgp.global_position
-	tg.y = 0
-	pgp.teleport_to(eg.get_ground_position() - tg.normalized() * 0.7, tg)
-	await ticks(3)
-	var logg := _log(pgp)
-	for i in 5:
-		tap(pgp, L)  # mashed: presses buffer into the next mount punch
-		await wait_real(0.15)
-	await wait_real(0.5)
-	var mounts := logg.count(&"mount_punch")
-	check(mounts == CombatController.MOUNT_PUNCHES, "P over a downed enemy: %d mount punches, then no more (%s)" % [mounts, logg])
-	await wait_real(2.5)
-	pg = await _lane(&"grunt", 1.1)
-	pgp = pg[0]
-	eg = pg[1]
-	await hold_press(pgp, CombatController.Action.SWEEP, 0.3)
-	await wait_until(func() -> bool: return eg.get_state() == RagdollController.State.GROUNDED, 4.0)
-	tg = eg.get_ground_position() - pgp.global_position
-	tg.y = 0
-	pgp.teleport_to(eg.get_ground_position() - tg.normalized() * 0.6, tg)
+	# First jab into the air (the grunt steps out of reach), then two hits.
+	ef.global_position = Vector3(_x, 0, -8.0)
+	ef.reset_physics_interpolation()
 	await ticks(2)
-	logg = _log(pgp)
-	clear_events()
-	tap(pgp, K)
-	await wait_real(0.5)
-	check(not logg.is_empty() and logg[0] == &"stomp", "K standing over a downed enemy: stomp (%s)" % [logg])
-	check(_hit(&"stomp", eg) != null, "the stomp landed")
-	await wait_real(2.0)
+	tap(pf, L)
+	await wait_until(func() -> bool: return pf.combat.is_in_recovery() or not pf.combat.is_attacking(), 1.0)
+	ef.global_position = pf.global_position + pf.get_forward() * 1.0
+	ef.reset_physics_interpolation()
+	await ticks(1)
+	await _string(pf, [_st(L), _st(L)])
+	var fh := _hits_on(ef)
+	check(fh.size() == 2 and is_equal_approx(fh[-1].finisher_bonus, Tuning.FINISHER_BONUS) and is_equal_approx(fh[-1].power, 2.5),
+		"whiff, hit, hit: the third hit (elbow) gets +1 (%s)" % [fh.map(func(h: HitInfo) -> float: return h.finisher_bonus)])
 
-	print("grab, P x3 knees, then throw; upward throw")
-	var pk: Array = await _lane(&"grunt", 1.0)
-	var pkp: Fighter = pk[0]
-	clear_events()
-	pkp.combat.press(CombatController.Action.GRAB)
-	await wait_until(func() -> bool: return count_events(&"grab_started") > 0, 1.0)
-	for i in 4:
-		tap(pkp, L)
-		await wait_real(0.2)
-	var knees := 0
-	for ev in events:
-		if ev[0] == &"hit_landed" and (ev[1] as HitInfo).move_id == &"knee":
-			knees += 1
-	check(knees == CombatController.MAX_KNEES, "knees while holding: %d" % knees)
-	pkp.fake_intent = &"back"
-	pkp.combat.release(CombatController.Action.GRAB)
-	await wait_until(func() -> bool: return count_events(&"thrown") > 0, 1.0)
-	pkp.fake_intent = &"neutral"
-	var tv: Vector3 = last_event(&"thrown")[3] if count_events(&"thrown") > 0 else Vector3.ZERO
-	var g2: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8)
-	check(absf(tv.y - sqrt(2.0 * g2 * Tuning.UPWARD_THROW_LIFT)) < 0.2 and Vector2(tv.x, tv.z).length() < 1.0,
-		"back + release: upward throw (%s)" % tv)
-	await wait_real(2.0)
-
-	print("back + P: backfist hits the enemy behind")
-	_x += 9.0
-	var pbk := spawn_fake(&"player", Vector3(_x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER, true)
-	var ebk := spawn(&"grunt", Vector3(_x, 0, 1.0), Vector3.FORWARD)
-	await ticks(12)
-	clear_events()
-	pbk.fake_intent = &"back"
-	tap(pbk, L)
-	pbk.fake_intent = &"neutral"
-	await wait_until(func() -> bool: return _hit(&"backfist", ebk) != null, 1.0)
-	check(_hit(&"backfist", ebk) != null, "backfist landed on the enemy behind")
+	print("string reset and string end")
+	var pr: Array = await _lane(&"grunt", 1.0)
+	var p2: Fighter = pr[0]
+	var starts2 := _log(p2)
+	await _string(p2, [_st(L)])
+	await wait_real(Tuning.STRING_RESET + 0.4)
+	await _string(p2, [_st(L)])
+	check(starts2 == [&"jab1", &"jab1"], "a press after STRING_RESET starts a new string (%s)" % [starts2])
+	await wait_real(Tuning.COMBO_DROP + 0.4)
+	starts2.clear()
+	await _string(p2, [_st(L), _st(L), _st(L), _st(L)])
+	check(starts2.size() == 4 and starts2[3] == &"jab1", "after the third hit the next press is a new string (%s)" % [starts2])
 	done()

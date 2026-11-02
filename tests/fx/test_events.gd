@@ -103,6 +103,93 @@ func _ready() -> void:
 	await get_tree().create_timer(0.3).timeout
 	enemy2.queue_free()
 	GameEvents.limb_severed.emit(enemy2, &"forearm_l", null)
+	# Round 5 signals, with edge cases (null fighters, zero vectors, odd kinds).
+	var r5 := U.hit(enemy, &"kick", chest, fwd, 20.0, 0.0, &"strike", HitInfo.Tier.SEVER)
+	r5.attacker = player
+	r5.ground_strike = true
+	GameEvents.hit_landed.emit(r5)
+	var no_tier := U.hit(enemy, &"cross", chest, fwd, 8.0, 0.0)
+	no_tier.power = 6.4  # power but no tier: FXRules maps it
+	GameEvents.hit_landed.emit(no_tier)
+	for args in [[player, enemy, &"jab1", false, 0], [player, null, &"sparta_kick", true, 3],
+			[enemy, player, &"e_heavy", false, 0], [null, null, &"", false, 1], [player, enemy, &"no_such_move", true, 2]]:
+		GameEvents.strike_started.emit(args[0], args[1], args[2], args[3], args[4])
+	GameEvents.parried.emit(player, enemy)
+	GameEvents.parried.emit(player, null)
+	GameEvents.parried.emit(null, enemy)
+	GameEvents.parry_whiffed.emit(player)
+	GameEvents.parry_whiffed.emit(null)
+	GameEvents.teleported.emit(player, Vector3(0, 0, 2), Vector3(0, 0, -2), &"counter")
+	GameEvents.teleported.emit(player, Vector3.ZERO, Vector3.ZERO, &"pursuit")
+	GameEvents.teleported.emit(null, Vector3.ZERO, Vector3.ONE, &"other")
+	GameEvents.teleported.emit(bare, Vector3.ZERO, Vector3.ONE, &"counter")
+	GameEvents.sidestepped.emit(player, Vector3.RIGHT)
+	GameEvents.sidestepped.emit(player, Vector3.ZERO)
+	GameEvents.sidestepped.emit(null, Vector3.LEFT)
+	GameEvents.counter_bonus_changed.emit(player, 2.5)
+	GameEvents.sprint_started.emit(player)
+	GameEvents.sprint_started.emit(null)
+	GameEvents.sprint_ended.emit(player)
+	for surf in [&"concrete", &"water", &"metal", &"dirt", &"wood", &"", &"unknown"]:
+		GameEvents.footstep.emit(player, Vector3(0, 0, 1), surf, 0.7)
+	GameEvents.footstep.emit(null, Vector3.ZERO, &"water", 2.0)
+	for kind in [&"step", &"vault", &"mantle", &"kickoff", &"air_mantle", &"bogus"]:
+		GameEvents.parkour.emit(player, kind, Vector3(0, 1, -1), 1.0)
+	GameEvents.parkour.emit(null, &"kickoff", Vector3.ZERO, 3.0)
+	GameEvents.wall_run_started.emit(player, panel, -1)
+	GameEvents.wall_run_started.emit(player, null, 1)
+	GameEvents.wall_run_step.emit(player, Vector3(4.9, 1, 0), Vector3(-1, 0, 0))
+	GameEvents.wall_run_step.emit(null, Vector3.ZERO, Vector3.ZERO)
+	GameEvents.wall_run_ended.emit(player, &"jump")
+	GameEvents.wall_run_ended.emit(null, &"time")
+	for level in [&"soft", &"hard", &"heavy", &"weird"]:
+		GameEvents.landing.emit(player, level, Vector3(1, 0, 1), 10.0)
+	GameEvents.landing.emit(null, &"heavy", Vector3(-1, 0, 1), 0.0)
+	GameEvents.shockwave.emit(player, Vector3.ZERO, 2.5, 1.0)
+	GameEvents.rammed.emit(player, enemy, &"stumble", &"none")
+	GameEvents.carry_changed.emit(player, enemy)
+	GameEvents.carry_changed.emit(player, null)
+	GameEvents.body_slammed.emit(player, enemy, Vector3(0, 0, -1))
+	GameEvents.body_slammed.emit(null, null, Vector3.ZERO)
+	GameEvents.prop_picked_up.emit(player, bare)
+	GameEvents.prop_thrown.emit(player, bare, Vector3(0, 2, -10))
+	GameEvents.prop_thrown.emit(null, null, Vector3.ZERO)
+	for kind in [&"brick", &"bottle", &"chair_leg", &"crate_small", &"stick", &"limb", &""]:
+		GameEvents.prop_broken.emit(null, Vector3(0, 0.3, 0), kind)
+	GameEvents.wall_broken_by.emit(enemy, panel, 5000.0)
+	GameEvents.fleeing_changed.emit(enemy, true)
+	GameEvents.charge_started.emit(player, &"sparta_kick")
+	GameEvents.charge_level_changed.emit(player, 2)
+	GameEvents.charge_level_changed.emit(player, 9)
+	GameEvents.charge_released.emit(player, &"sparta_kick", 2)
+	GameEvents.charge_started.emit(null, &"jab1")
+	GameEvents.charge_level_changed.emit(null, 1)
+	GameEvents.charge_released.emit(null, &"jab1", 1)
+	GameEvents.body_impact.emit(enemy, Vector3(0, 0, -1), Vector3.UP, 3000.0, &"water")
+	GameEvents.focus_started.emit(player)
+	GameEvents.focus_ended.emit(player)
+	GameEvents.last_kill.emit(enemy)
+	GameEvents.run_ended.emit({})
+	# Round 6 signals, with edge cases (null nodes, unknown kinds, odd levels).
+	for kind in Tuning.FURNITURE:
+		GameEvents.furniture_broken.emit(null, Vector3(0, 0.5, 1), kind, 800.0, enemy)
+	GameEvents.furniture_broken.emit(panel, Vector3(4.9, 1, 0), &"no_such_kind", 0.0, null)
+	GameEvents.furniture_broken.emit(bare, Vector3.ZERO, &"glass", -5.0, bare)
+	for kind in [&"overhead", &"panel", &"platform", &""]:
+		GameEvents.structure_collapsed.emit(null, Vector3(0, 3, -2), kind)
+	var piece2 := RigidBody3D.new()
+	piece2.mass = 60.0
+	add_child(piece2)
+	GameEvents.debris_landed.emit(piece2, Vector3(0, 0.1, -2), 6.0, &"concrete")
+	GameEvents.debris_landed.emit(null, Vector3.ZERO, 6.0, &"concrete")
+	for level in [0, 1, 2, 3, 7]:
+		GameEvents.floor_damaged.emit(Vector3(2, 0, 2), 0.0 if level == 0 else 0.8, level, &"concrete")
+	for surf in [&"tile", &"water", &"metal", &"", &"glass"]:
+		GameEvents.floor_damaged.emit(Vector3(-2, 0, 2), 0.6, 1, surf)
+	GameEvents.world_blast.emit(Vector3.ZERO, 0.0, 0.0, &"slam")
+	GameEvents.world_blast.emit(Vector3(1, 0, 1), 2.5, 50000.0, &"structure")
+	GameEvents.world_blast.emit(Vector3(1, 0, 1), -1.0, -100.0, &"")
+	await U.physics_frames(get_tree(), 10)
 	# Flow
 	GameEvents.round_started.emit(&"duel")
 	GameEvents.wave_started.emit(0, 4)

@@ -5,6 +5,7 @@ extends Node3D
 const FakeRig := preload("res://tests/fx/fx_fake_rig.gd")
 
 var rig: Node3D
+var traversal: Node   ## tests/fx/fx_fake_traversal.gd when a test needs one
 var hp := 1000.0
 var max_hp := 1000.0
 var com_velocity := Vector3.ZERO
@@ -37,3 +38,13 @@ func get_center_of_mass() -> Vector3:
 
 func get_aim_point() -> Vector3:
 	return global_position + Vector3.UP * 1.3
+
+func get_ground_position() -> Vector3:
+	return global_position
+
+## Attach a fake Traversal (sprint_charge, airborne, speed).
+func add_traversal() -> Node:
+	traversal = preload("res://tests/fx/fx_fake_traversal.gd").new()
+	traversal.name = "Traversal"
+	add_child(traversal)
+	return traversal

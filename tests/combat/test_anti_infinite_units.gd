@@ -1,7 +1,9 @@
 extends "res://tests/combat/combat_test_base.gd"
 ## Anti-infinite unit checks: stun decay per hit, the victim count shared by
 ## two attackers (damage scaling per victim), the juggle relaunch cap, a short
-## string still at full stun, and the break-away hit itself.
+## string still at full stun, and the break-away hit itself. Round 5: the stun
+## of a hit is its tier's act-again time (Tuning.REACT_*), and only a strike
+## with P in the launch band relaunches a flying body.
 
 const L := CombatController.Action.LIGHT
 
@@ -52,12 +54,13 @@ func run() -> void:
 		await wait_until(func() -> bool: return stuns.size() > n0, 1.0)
 		await wait_real(0.12)
 	print("  stun after each hit: ", stuns)
-	var base := {&"jab1": MoveLibrary.get_move(&"jab1").hitstun, &"cross": MoveLibrary.get_move(&"cross").hitstun,
-		&"hook": CombatController.STAGGER_TIME * CombatController.STAGGER_STRENGTH}
+	# jab, jab (flinches), elbow (the finisher: a stagger), then a new string's jab.
+	var flinch: float = Tuning.REACT_FLINCH["act"]
+	var base := {&"jab1": flinch, &"jab2": flinch, &"elbow": float(Tuning.REACT_STAGGER["act"])}
 	var full := stuns.size() >= 3
 	for i in mini(3, stuns.size()):
 		full = full and absf(float(stuns[i][1]) - float(base[stuns[i][0]])) < 0.02
-	check(full, "hits 1-3 (jab, cross, hook) at full stun")
+	check(full, "hits 1-3 (jab, jab, elbow) at full stun")
 	if stuns.size() >= 4:
 		check(absf(float(stuns[3][1]) - float(base[stuns[3][0]]) * CombatController.stun_decay(4)) < 0.02,
 			"hit 4 at x%.2f stun" % CombatController.stun_decay(4))
@@ -66,17 +69,27 @@ func run() -> void:
 	print("juggle relaunch cap")
 	var pj := spawn(&"player", Vector3(16, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var gj := spawn(&"grunt", Vector3(16, 0, -1.0), Vector3.BACK)
+	gj.max_hp = 1000.0  # survives the landing from the juggle; the test needs it to get up
+	gj.hp = gj.max_hp
 	await ticks(12)
 	gj.launch(Vector3(0, 6, 0), gj.get_center_of_mass(), &"Chest")
 	await wait_real(0.15)
-	pj.combat._move = MoveLibrary.get_move(&"jab1")
-	pj.combat._move_charge = 0
+	# A level-3 kick (P 8) on the flying body: a relaunch. A jab (P 1): a nudge.
+	pj.combat._move = MoveLibrary.get_move(&"sparta_kick")
+	pj.combat._strike_class = &"kick"
+	pj.combat._move_charge = 3
 	var info := pj.combat._build_hit(gj, &"Chest", gj.get_center_of_mass())
-	check(info.juggle and info.reaction == HitInfo.Reaction.LAUNCH, "a hit on the flying body is a juggle relaunch")
+	check(info.juggle and HitInfo.is_launch_tier(info.tier), "a launch-band hit on the flying body relaunches it (%s)" % info)
 	gj.combat.juggle_relaunches = Tuning.JUGGLE_MAX_RELAUNCH
 	info = pj.combat._build_hit(gj, &"Chest", gj.get_center_of_mass())
-	check(info.juggle and info.reaction == HitInfo.Reaction.NONE and info.get_meta(&"juggle_capped", false),
-		"after %d relaunches: damage only, the body falls" % Tuning.JUGGLE_MAX_RELAUNCH)
+	check(not info.juggle and info.tier == HitInfo.Tier.FLINCH and info.get_meta(&"juggle_capped", false) \
+		and info.has_meta(&"nudge"), "after %d relaunches: a nudge and damage only, the body falls" % Tuning.JUGGLE_MAX_RELAUNCH)
+	gj.combat.juggle_relaunches = 0
+	pj.combat._move = MoveLibrary.get_move(&"jab1")
+	pj.combat._strike_class = &"jab"
+	pj.combat._move_charge = 0
+	info = pj.combat._build_hit(gj, &"Chest", gj.get_center_of_mass())
+	check(not info.juggle and info.has_meta(&"nudge"), "a jab (P 1) only nudges a flying body")
 	gj.combat.juggle_relaunches = 0
 	var r0 := gj.combat.juggle_relaunches
 	var real := HitInfo.new()

@@ -42,8 +42,9 @@ func _downed_brawler() -> void:
 	check(t_ref > 0.0 and t_mash > 0.0, "the Brawler got up both times")
 	check(t_mash <= t_ref + 1.0, "under P-mash it gets up within %.2f s + 1 (%.2f)" % [t_ref, t_mash])
 
-## Trip the Brawler (crouch + held kick), then optionally mash P over it;
-## seconds from the trip until it is back on its feet.
+## Trip the Brawler (crouch + kick held to charge level 3: a sweep at P 4.8
+## is a knockdown), then optionally mash P over it (ground strikes); seconds
+## from the trip until it is back on its feet.
 func _knockdown_time(mash_p: bool) -> float:
 	await start_duel(&"brawler")
 	var br := enemy
@@ -57,7 +58,7 @@ func _knockdown_time(mash_p: bool) -> float:
 	Input.action_press(&"crouch")
 	await get_tree().physics_frame
 	Input.action_press(&"kick")
-	for i in 36:
+	for i in int((Tuning.CHARGE_LEVELS[2] + 0.05) * Engine.physics_ticks_per_second):
 		await get_tree().physics_frame
 	Input.action_release(&"kick")
 	await get_tree().physics_frame

@@ -109,31 +109,33 @@ func _ready() -> void:
 	if not BloodFX.get_highlight_parts().is_empty():
 		fails.append("null target did not clear the highlight")
 
-	# --- impact flash ---------------------------------------------------------------
-	var jab := U.hit(f, &"jab1", Vector3(0, 1.4, -0.85), Vector3(0, 0, -1), 15.0, 140.0)
+	# --- impact flash (Round 5: sized by tier) -----------------------------------------
+	var jab := U.hit(f, &"jab1", Vector3(0, 1.4, -0.85), Vector3(0, 0, -1), 15.0, 140.0, &"strike",
+			HitInfo.Tier.FLINCH)
 	GameEvents.hit_landed.emit(jab)
 	var small := BloodFX._impact_nodes[(BloodFX._impact_next + BloodFX.IMPACT_POOL - 1) % BloodFX.IMPACT_POOL] as MeshInstance3D
 	var small_scale := small.scale.x
-	var big := U.hit(f, &"power_punch", Vector3(0, 1.3, -0.85), Vector3(0, 0, -1), 120.0, 11000.0)
+	var big := U.hit(f, &"power_punch", Vector3(0, 1.3, -0.85), Vector3(0, 0, -1), 120.0, 11000.0, &"strike",
+			HitInfo.Tier.SEVER)
 	big.charge_level = 3
 	GameEvents.hit_landed.emit(big)
 	var bigq := BloodFX._impact_nodes[(BloodFX._impact_next + BloodFX.IMPACT_POOL - 1) % BloodFX.IMPACT_POOL] as MeshInstance3D
-	print("impact flash: jab %.2f m, charged power punch %.2f m, live %d" % [small_scale, bigq.scale.x, BloodFX.active_impact_flashes()])
+	print("impact flash: flinch %.2f m, severing launch %.2f m, live %d" % [small_scale, bigq.scale.x, BloodFX.active_impact_flashes()])
 	if BloodFX.active_impact_flashes() != 2 or not bigq.visible:
 		fails.append("hits made no impact flash")
 	if bigq.global_position.distance_to(big.hit_position) > 0.001:
 		fails.append("flash not at the contact point")
 	if bigq.scale.x < small_scale * 2.5:
-		fails.append("flash not sized by hit power")
+		fails.append("flash not sized by tier")
 	await get_tree().create_timer(0.25).timeout
 	if BloodFX.active_impact_flashes() != 0:
 		fails.append("impact flash lasted too long")
 
 	# --- dust on floor and wall impacts ----------------------------------------------
 	var d0: int = BloodFX._dust_next
-	GameEvents.body_impact.emit(f, Vector3(0, 0, -1), Vector3.UP, 600.0, &"concrete")
+	GameEvents.body_impact.emit(f, Vector3(0, 0, -1), Vector3.UP, 400.0, &"concrete")
 	if BloodFX._dust_next != d0:
-		fails.append("dust below IMPACT_DUST_ENERGY")
+		fails.append("dust below Tuning.IMPACT_MIN_ENERGY")
 	GameEvents.body_impact.emit(f, Vector3(0, 0, -1), Vector3.UP, 1500.0, &"concrete")
 	var puff := BloodFX._puffs[d0] as GPUParticles3D
 	var chips := BloodFX._chips[d0] as GPUParticles3D
@@ -146,8 +148,10 @@ func _ready() -> void:
 
 	# --- blood on the player -----------------------------------------------------------
 	BloodFX.reset()
-	var hit_e := U.hit(f, &"e_hook", f.global_position + Vector3(0, 1.35, 0.12), Vector3(0, 0, -1), 60.0, 200.0)
-	var hit_p := U.hit(player, &"e_hook", player.global_position + Vector3(0, 1.35, 0.12), Vector3(0, 0, -1), 60.0, 200.0)
+	var hit_e := U.hit(f, &"e_hook", f.global_position + Vector3(0, 1.35, 0.12), Vector3(0, 0, -1), 60.0, 200.0,
+			&"strike", HitInfo.Tier.STAGGER)
+	var hit_p := U.hit(player, &"e_hook", player.global_position + Vector3(0, 1.35, 0.12), Vector3(0, 0, -1), 60.0, 200.0,
+			&"strike", HitInfo.Tier.STAGGER)
 	GameEvents.hit_landed.emit(hit_e)
 	GameEvents.hit_landed.emit(hit_p)
 	var re: Array = BloodFX.get_wound_points(f.rig.get_bone_parts(Bones.CHEST)[0])

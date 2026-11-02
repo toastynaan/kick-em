@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/fx/test_real_contact.gd" id="1"]
+
+[node name="TestRealContact" type="Node3D"]
+script = ExtResource("1")

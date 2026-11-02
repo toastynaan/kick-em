@@ -8,6 +8,9 @@ shader_type spatial;
 // the body, so an enemy's blood shows how hurt it is. A soft view-dependent rim
 // keeps fighters readable against the floor. BloodFX writes blood_points,
 // blood_count, blood_color, blood_level and flash; GameMode/Fighter tween dissolve.
+// Round 5 (BloodFX): jitter, a world-space offset that shakes the victim's mesh
+// 2-4 cm during the hitstop freeze (Feel Reference: Contact frame, item 2).
+// Purely visual: physics never sees it.
 // Upgrade 2 (BloodFX): glow (limb-glow tells, charge), highlight (aimed body
 // zone) and view_fade (screen-door fade of a fighter that blocks the camera).
 
@@ -40,6 +43,8 @@ uniform float view_fade : hint_range(0.0, 1.0) = 0.0;
 // How far lost-HP grime spreads over the body (BloodFX sets more on the player,
 // whose back faces the camera, so damage taken shows from behind).
 uniform float blood_spread : hint_range(0.0, 3.0) = 1.0;
+// Round 5: world-space mesh offset during the hitstop freeze (BloodFX).
+uniform vec3 jitter = vec3(0.0);
 
 varying vec3 model_pos;
 
@@ -62,7 +67,10 @@ float vnoise(vec3 p) {
 }
 
 void vertex() {
-	model_pos = VERTEX;
+	model_pos = VERTEX;  // before the jitter, so stains stay put on the part
+	if (jitter != vec3(0.0)) {
+		VERTEX += (inverse(MODEL_MATRIX) * vec4(jitter, 0.0)).xyz;
+	}
 }
 
 // 4x4 ordered dither threshold (0..1) for a screen pixel.
@@ -79,8 +87,13 @@ void fragment() {
 	if (dissolve > 0.0 && hash13(floor(model_pos * 60.0)) < dissolve) {
 		discard;
 	}
-	// Keep about 15% of the pixels at full fade so the silhouette still reads.
-	if (view_fade > 0.0 && bayer4(FRAGCOORD.xy) < view_fade * 0.85) {
+	// Camera fade: the same screen-door dither as the world blocker fade
+	// (WorldMaterials), opaque pipeline, no sorting. The camera caps the amount
+	// so a silhouette stays. Directional shadow maps render with an
+	// orthographic projection: skip the dither there so the fighter keeps a
+	// solid shadow on the floor while faded.
+	bool shadow_pass = PROJECTION_MATRIX[3][3] > 0.5;
+	if (view_fade > 0.001 && !shadow_pass && bayer4(FRAGCOORD.xy) < view_fade) {
 		discard;
 	}
 	// Edge breakup (fine) and damage blotches (coarse).

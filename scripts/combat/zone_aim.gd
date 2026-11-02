@@ -1,28 +1,40 @@
 class_name ZoneAim
 extends RefCounted
 ## Body-zone aiming for the player (Upgrade 2: Body-zone targeting > Picking a
-## zone). Each tick PlayerController calls update() with the soft target:
-## 1. A ray from the screen centre of the active Camera3D is tested against
-##    the target's hurtboxes (each Hurtbox knows its bone); the nearest one
-##    along the ray picks the zone (BodyZones.of_bone).
-## 2. A miss falls back to the torso.
+## zone; Round 4: free camera and lock-on). Each tick PlayerController calls
+## update() with the soft target and the lock-on target:
+## 1. The camera rig's screen-centre ray (its Camera3D, h_offset included: the
+##    reticle) is tested against hurtboxes (each Hurtbox knows its bone); the
+##    nearest one along the ray picks the zone (BodyZones.of_bone). Free camera:
+##    every opponent within AIM_RANGE counts, so the reticle on any enemy aims at
+##    that enemy. Locked: only the lock target (the rig keeps its aim point at
+##    the screen centre).
+## 2. A miss falls back to the torso of the lock target, else the soft target.
 ## 3. The aimer's crouch forces the legs; a jump forces the head.
 ## 4. In Focus the aim is exact (no settle delay) and more forgiving: every
 ##    hurtbox is FOCUS_MARGIN fatter, so a near miss still picks the nearest part.
-## Writes fighter.aim_zone / aim_bone and emits GameEvents.aim_zone_changed
-## (aimer, target, zone) when the zone or the target changes (target null = none).
+## Writes fighter.aim_target / aim_zone / aim_bone and emits
+## GameEvents.aim_zone_changed (aimer, target, zone) when the zone or the target
+## changes (target null = none). Strikes and grabs read Fighter.zone_for(victim):
+## the aimed zone only on the aimed target.
 ##
 ## The ray test is analytic against the hurtbox capsules (no physics query), so
-## only the target's own hurtboxes count: the player's body, other enemies and
-## walls never steal the aim. Fighters whose hurtbox set has no arm boxes
-## (minions) get arm capsules built from the rig's bone positions, so every zone
-## can be aimed at on every body.
+## only opponents' hurtboxes count: the player's own body and walls never steal
+## the aim. Arm bones without a hurtbox (forearms on every body, both arm
+## bones on minions) get capsules built from the rig's bone positions, so every
+## zone can be aimed at on every body.
 ## OWNER: agent H (body & player input).
 
 const FOCUS_MARGIN := 0.15   ## m added to every hurtbox radius in Focus (forgiving aim)
 const SETTLE_TIME := 0.06    ## player s a new zone must stay under the crosshair before it shows (outside Focus)
 const MAX_RAY := 60.0        ## m
-## Arm capsules for fighters without arm hurtboxes: [bone, from, to].
+const AIM_RANGE := 15.0      ## m from the aimer: free-camera aim candidates
+## m: capsules the ray enters within this of the first entry compete, and the
+## one it passes through most centrally wins (an arm tucked against the chest
+## in the guard pose is aimed at through the chest's edge).
+const DEPTH_WINDOW := 0.2
+const BODY_REACH := 1.5      ## m (x height scale) from a body's centre: ray farther than this skips its capsules
+## Arm capsules for arm bones without a hurtbox: [bone, from, to].
 const ARM_SEGMENTS := [
 	[&"LeftUpperArm", &"LeftUpperArm", &"LeftLowerArm"],
 	[&"LeftLowerArm", &"LeftLowerArm", &"LeftHand"],
@@ -49,26 +61,38 @@ func _init(p_fighter: Fighter = null) -> void:
 	fighter = p_fighter
 
 ## Run once per physics tick. `p_target` is the soft target (null = none),
-## `delta` the physics delta, `focus` true while the player is in Focus.
-func update(p_target: Fighter, delta: float, focus := false) -> void:
+## `delta` the physics delta, `focus` true while the player is in Focus,
+## `lock` the lock-on target (null = free camera).
+func update(p_target: Fighter, delta: float, focus := false, lock: Fighter = null) -> void:
 	if fighter == null:
 		return
 	_clock += TimeDirector.player_delta(delta)
-	if p_target != null and (not is_instance_valid(p_target) or p_target.is_dead()):
+	if not _alive(p_target):
 		p_target = null
+	if not _alive(lock):
+		lock = null
+	if lock != null:
+		p_target = lock
 	var zone: int = BodyZones.Zone.TORSO
 	var bone: StringName = &""
 	hit_bone = &""
 	if fighter.is_crouching():
 		zone = BodyZones.Zone.LEGS
-	elif fighter.is_airborne():
-		zone = BodyZones.Zone.HEAD
-	elif p_target != null:
+	elif fighter.is_airborne() and not fighter.is_hanging():
+		zone = BodyZones.Zone.HEAD  # a jump strikes the head (not a pursuit hang: Fighter.zone_for)
+	else:
 		var ray := _ray()
 		if not ray.is_empty():
-			bone = pick_bone(p_target, ray[0], ray[1], FOCUS_MARGIN if focus else 0.0)
-			hit_bone = bone
-			if bone != &"":
+			var cands: Array[Fighter] = []
+			if lock != null:
+				cands.append(lock)
+			else:
+				cands = _candidates(p_target)
+			var hit := pick(cands, ray[0], ray[1], FOCUS_MARGIN if focus else 0.0)
+			if not hit.is_empty():
+				p_target = hit[0]
+				bone = hit[1]
+				hit_bone = bone
 				zone = BodyZones.of_bone(bone)
 	var aim := aim_bone_for(zone, bone)
 	# Outside Focus a new zone must hold for SETTLE_TIME so the highlight does
@@ -82,6 +106,7 @@ func update(p_target: Fighter, delta: float, focus := false) -> void:
 			return
 	_pending_zone = -1
 	target = p_target
+	fighter.aim_target = target
 	fighter.aim_zone = zone
 	fighter.aim_bone = aim
 	if not _shown_once or zone != _shown_zone or target != _shown_target:
@@ -90,12 +115,18 @@ func update(p_target: Fighter, delta: float, focus := false) -> void:
 		_shown_target = target
 		GameEvents.aim_zone_changed.emit(fighter, target, zone)
 
+## Zone a strike or grab on `victim` takes (Fighter.zone_for): the aimed zone
+## only on the aimed target, else the torso.
+func zone_for(victim: Node3D) -> int:
+	return fighter.zone_for(victim) if fighter != null else BodyZones.Zone.TORSO
+
 ## Forget the target (input disabled, death): torso, and tell listeners.
 func clear() -> void:
 	_pending_zone = -1
 	target = null
 	hit_bone = &""
 	if fighter != null:
+		fighter.aim_target = null
 		fighter.aim_zone = BodyZones.Zone.TORSO
 		fighter.aim_bone = Bones.CHEST
 	if _shown_once and (_shown_target != null or _shown_zone != BodyZones.Zone.TORSO):
@@ -104,29 +135,95 @@ func clear() -> void:
 		GameEvents.aim_zone_changed.emit(fighter, null, BodyZones.Zone.TORSO)
 
 ## [origin, unit direction] of the screen-centre ray, or [] without a camera.
-## The centre pixel's ray is the camera transform's -Z (h_offset/v_offset,
-## used for the shoulder view, are part of that transform).
+## The camera is the rig's (get_camera()), else the viewport's current one.
+## The centre pixel's ray is the camera transform's -Z: h_offset / v_offset
+## (the rig's shoulder shift) are part of get_camera_transform(), so this is
+## exactly the ray under a reticle drawn at the screen centre.
 func _ray() -> Array:
 	if ray_override.size() == 2:
 		return ray_override
-	if fighter == null or not fighter.is_inside_tree():
-		return []
-	var vp := fighter.get_viewport()
-	var cam := vp.get_camera_3d() if vp else null
-	if cam == null or not cam.is_inside_tree():
+	var cam := camera()
+	if cam == null:
 		return []
 	var xf := cam.get_camera_transform()
 	return [xf.origin, -xf.basis.z.normalized()]
 
-## Bone of the target's hurtbox the ray hits first (&"" on a miss). With a
-## margin, every capsule is that much fatter and, if no capsule is hit, the one
-## nearest the ray within the margin is taken.
+## The camera the player sees through (null if none).
+func camera() -> Camera3D:
+	if fighter == null or not fighter.is_inside_tree():
+		return null
+	var cam: Camera3D = null
+	var rig := fighter.get_tree().get_first_node_in_group(&"camera_rig")
+	if rig != null and rig.has_method(&"get_camera"):
+		cam = rig.call(&"get_camera") as Camera3D
+	if cam == null:
+		var vp := fighter.get_viewport()
+		cam = vp.get_camera_3d() if vp else null
+	return cam if cam != null and cam.is_inside_tree() else null
+
+## Free-camera candidates: live opponents within AIM_RANGE (downed ones too),
+## plus the soft target.
+func _candidates(soft: Fighter) -> Array[Fighter]:
+	var out: Array[Fighter] = []
+	var origin := fighter.get_ground_position()
+	for f in Targeting.opponents_of(fighter):
+		var d := f.get_ground_position() - origin
+		d.y = 0.0
+		if d.length() <= AIM_RANGE:
+			out.append(f)
+	if soft != null and not out.has(soft):
+		out.append(soft)
+	return out
+
+func _alive(f: Fighter) -> bool:
+	return f != null and is_instance_valid(f) and f.is_inside_tree() and not f.is_dead()
+
+## [fighter, bone] the ray hits first among `fighters` ([] on a miss). With a
+## margin every capsule is that much fatter, and if nothing is hit the body
+## part nearest the ray within the margin is taken.
+static func pick(fighters: Array[Fighter], origin: Vector3, dir: Vector3, margin := 0.0) -> Array:
+	if dir.length_squared() < 1e-8:
+		return []
+	dir = dir.normalized()
+	var best: Array = []
+	var best_t := INF
+	var near: Array = []
+	var near_d := INF
+	for f in fighters:
+		if f == null or not is_instance_valid(f):
+			continue
+		# Cheap reject: the ray passes nowhere near this body.
+		var c := f.get_center_of_mass()
+		var along_c := (c - origin).dot(dir)
+		if along_c < -BODY_REACH or along_c > MAX_RAY + BODY_REACH:
+			continue
+		if (origin + dir * along_c).distance_to(c) > BODY_REACH * f.get_height_scale() + margin:
+			continue
+		var r := _pick_in(f, origin, dir, margin)
+		if r[1] != &"" and r[0] < best_t:
+			best_t = r[0]
+			best = [f, r[1]]
+		if r[3] != &"" and r[2] < near_d:
+			near_d = r[2]
+			near = [f, r[3]]
+	return best if not best.is_empty() else near
+
+## Bone of `t`'s hurtbox the ray hits first (&"" on a miss). With a margin,
+## every capsule is that much fatter and, if no capsule is hit, the one nearest
+## the ray within the margin is taken.
 static func pick_bone(t: Fighter, origin: Vector3, dir: Vector3, margin := 0.0) -> StringName:
 	if t == null or dir.length_squared() < 1e-8:
 		return &""
-	dir = dir.normalized()
-	var best_bone: StringName = &""
-	var best_t := INF
+	var r := _pick_in(t, origin, dir.normalized(), margin)
+	return r[1] if r[1] != &"" else r[3]
+
+## [entry distance, bone hit, near-miss gap, near-miss bone] for one body
+## (unit `dir`; bones are &"" when none). Of the capsules the ray enters within
+## DEPTH_WINDOW of the first entry, the one it passes most centrally through
+## (distance / radius) is the bone hit.
+static func _pick_in(t: Fighter, origin: Vector3, dir: Vector3, margin: float) -> Array:
+	var hits: Array = []   # [entry, bone, distance / radius]
+	var first := INF
 	var near_bone: StringName = &""
 	var near_d := INF
 	for cap in capsules_of(t):
@@ -138,19 +235,24 @@ static func pick_bone(t: Fighter, origin: Vector3, dir: Vector3, margin := 0.0) 
 			continue
 		if d <= cap[3]:
 			var entry := along - sqrt(maxf(cap[3] * cap[3] - d * d, 0.0))
-			if entry < best_t:
-				best_t = entry
-				best_bone = cap[0]
+			hits.append([entry, cap[0], d / maxf(cap[3], 0.001)])
+			first = minf(first, entry)
 		elif d <= r and d - cap[3] < near_d:
 			near_d = d - cap[3]
 			near_bone = cap[0]
-	return best_bone if best_bone != &"" else near_bone
+	var best_bone: StringName = &""
+	var best_c := INF
+	for h in hits:
+		if h[0] <= first + DEPTH_WINDOW and h[2] < best_c:
+			best_c = h[2]
+			best_bone = h[1]
+	return [first, best_bone, near_d, near_bone]
 
 ## The target's hurtbox capsules in world space: [bone, a, b, radius] each,
-## plus rig-built arm capsules when the hurtbox set has no arms.
+## plus rig-built capsules for arm bones that have no hurtbox.
 static func capsules_of(t: Fighter) -> Array:
 	var out: Array = []
-	var has_arm := false
+	var boxed := {}
 	for hb in t.hurtboxes:
 		if not is_instance_valid(hb) or not hb.is_inside_tree() or not hb.monitorable:
 			continue
@@ -165,12 +267,13 @@ static func capsules_of(t: Fighter) -> Array:
 			var r := shape.radius * maxf(sc.x, sc.z)
 			var half := maxf(shape.height * 0.5 * sc.y - r, 0.0)
 			out.append([hb.bone, xf.origin - axis * half, xf.origin + axis * half, r])
-			if BodyZones.is_arm(BodyZones.of_bone(hb.bone)):
-				has_arm = true
-	if not has_arm and t.rig != null and t.rig.skeleton != null:
+			boxed[hb.bone] = true
+	if t.rig != null and t.rig.skeleton != null:
 		var w := float(t.config.get("appearance", {}).get("width", 1.0))
 		for seg in ARM_SEGMENTS:
 			var bone: StringName = seg[0]
+			if boxed.has(bone) or t.rig.is_bone_severed(bone):
+				continue  # severed limbs are gone (Round 5: Fighter.sever_limb)
 			var a := t.rig.get_bone_global_position(seg[1])
 			var b := t.rig.get_bone_global_position(seg[2])
 			if a.distance_squared_to(b) < 1e-4:

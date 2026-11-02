@@ -2,10 +2,12 @@ extends Node
 ## AIBrain in a crowd, against a passive player dummy:
 ## A. A Grunt walks its entry path into the courtyard, then takes a ring
 ##    position around the player.
-## B. Five Grunts: ~1.6 m separation, ring positions, inside the bounds,
-##    never more than Tuning.TOKENS holders, active frames of different
-##    attackers >= SWING_SPACING apart, no attack starts while the player is
-##    down or held. OWNER: agent C (AI tests).
+## B. Five Grunts: ~1.6 m separation, waiting in a loose ring at
+##    Tuning.CIRCLE_RING (3-5 m; the next in line on its inner part), inside
+##    the bounds, never more than Tuning.TOKEN_MAX holders, first active
+##    frames of different attackers >= Tuning.TOKEN_ACTIVE_GAP apart, no
+##    attack starts while the player is down or held, except a holder's free
+##    swing at a knocked-down player. OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 const BOUNDS_HALF := 10.0  ## AIBrain.DEFAULT_BOUNDS_HALF (no arena node here)
@@ -63,7 +65,7 @@ func _spawn(pos: Vector3, path := PackedVector3Array()) -> Fighter:
 	var brain := e.brain as AIBrain
 	brain.attack_launched.connect(func(_m: StringName) -> void:
 		starts += 1
-		if not _player_open():
+		if not _player_open() and not AttackDirector.is_player_knocked_down():
 			starts_while_closed += 1)
 	e.combat.attack_ended.connect(func(_m: StringName) -> void:
 		attack_end_game[e] = Util.game_now()
@@ -90,7 +92,7 @@ func _settled(e: Fighter) -> bool:
 	return now - float(ring_since[e]) > 2.0 and now - float(attack_end.get(e, -INF)) > 2.0
 
 func _player_open() -> bool:
-	return not (player.is_down() or player.is_in_hitstun() or (player.combat and player.combat.held_by != null))
+	return not (player.is_down() or player.is_in_hitstun() or (player.carry and player.carry.is_held()))
 
 ## The player dummy stays put: invulnerable (hits ignored, no launches), so
 ## the test measures positioning around a fixed centre.
@@ -137,10 +139,10 @@ func _part_entry() -> void:
 func _ring_ok(e: Fighter, slack: float) -> bool:
 	var d := Util.flat_dist(e.get_ground_position(), player.get_ground_position())
 	var ring := AttackDirector.get_ring(e)
-	var band: Vector2 = Tuning.NEAR_RING if ring == AttackDirector.Ring.NEAR else Tuning.FAR_RING
+	var band: Vector2 = (e.brain as AIBrain).ring_band(ring != AttackDirector.Ring.NEAR)
 	# A FAR enemy may not fit its band near a wall; the bounds clamp wins.
 	if ring != AttackDirector.Ring.NEAR and not _ring_fits(band.x):
-		return d >= Tuning.NEAR_RING.y - slack
+		return d >= band.x - slack
 	return d >= band.x - slack and d <= band.y + slack
 
 func _ring_fits(r: float) -> bool:
@@ -195,14 +197,14 @@ func _part_crowd() -> void:
 			min_sep = minf(min_sep, frame_min)
 			if frame_min < 1.3:
 				close_samples += 1
-	var cap: int = Tuning.TOKENS[Tuning.difficulty]
+	var cap: int = mini(Tuning.TOKENS[Tuning.difficulty], Tuning.TOKEN_MAX)
 	check(max_holders <= cap, "never more than %d token holders (max %d)" % [cap, max_holders])
 	check(samples > 0 and close_samples <= samples * 0.05 and min_sep > 0.8,
 		"waiting enemies keep their distance: min %.2f m, < 1.3 m in %d/%d frames" % [min_sep, close_samples, samples])
 	check(ring_samples > 0 and ring_ok >= ring_samples * 0.75,
 		"waiting enemies hold ring positions (%d/%d samples)" % [ring_ok, ring_samples])
 	check(out_of_bounds == 0, "everyone stays inside the courtyard (%d violations)" % out_of_bounds)
-	check(starts_while_closed == 0, "no attack started while the player was down / held / in hitstun (%d)" % starts_while_closed)
+	check(starts_while_closed == 0, "no attack started while the player was held / in hitstun, or down beyond a free swing (%d)" % starts_while_closed)
 	# Rule 6 on real attacks.
 	var worst := INF
 	for i in range(1, actives.size()):
@@ -212,8 +214,9 @@ func _part_crowd() -> void:
 		print("[ai] BLOCKED: no attack started in 11 s (combat.start_enemy_attack returned false - CombatController stub?)")
 		failures += 1
 	else:
-		check(worst >= Tuning.SWING_SPACING - 0.03,
-			"active frames of different attackers >= %.2f s apart (closest %.3f s, %d actives)" % [Tuning.SWING_SPACING, worst, actives.size()])
+		check(worst >= Tuning.TOKEN_ACTIVE_GAP - 0.005,
+			"first active frames of different attackers >= %.0f frames apart (closest %.1f frames, %d actives)" % [
+				Tuning.TOKEN_ACTIVE_GAP * 60.0, worst * 60.0, actives.size()])
 		print("[ai] info: %d attacks started by 5 grunts in 11 s; outcomes %s" % [starts, str(outcomes)])
 
 func _finish() -> void:

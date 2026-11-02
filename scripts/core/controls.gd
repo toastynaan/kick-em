@@ -2,27 +2,34 @@ extends Node
 ## Autoload "Controls": registers every input action at startup so the bindings
 ## live in one readable place. OWNER: core (contract).
 ##
+## Round 5 key map (Feel Reference: Controls and targeting). No two actions
+## share a binding; Sweep is the only combination (pull back + Kick).
+##
 ## Keyboard + mouse                      Gamepad (Xbox layout)
 ##   Move ........ WASD                    Left stick
 ##   Camera ...... Mouse                   Right stick
-##   Punch ....... LMB / J                 X        tap = next move in the string, hold = charge it
-##   Kick ........ RMB / K                 Y        crouch + kick = sweep
-##   Grab ........ F                       B        tap or hold; release throws
 ##   Jump ........ Space                   A
-##   Crouch (hold) C                       Left stick click
-##   Block ....... Q                       RB       tap just before a hit = perfect dodge
-##   Dash ........ Shift                   Right trigger   after a launch: pursuit
-##   Focus (hold)  E                       LB       the world slows, you don't
+##   Light (jab) . LMB / J                 X        tap = next move in the string, hold = charge
+##   Heavy (cross) RMB / L                 Y        tap or hold to charge
+##   Kick ........ E / K                   B        tap or hold to charge
+##   Sweep ....... S + E                   back + B  ("back" is toward the camera)
+##   Block ....... Q                       RB       tap = parry, hold = guard
+##   Dash/sprint . Shift                   RT       tap = dash / teleport / pursuit, hold = sprint
+##   Grab ........ G                       LT       grab, grab break, release
+##   Focus mode .. F                       LB       the world slows for 2 s (1 bar)
+##   Crouch ...... C                       R3 (right stick click)
+##   Lock-on ..... MMB / Tab               L3 (left stick click)   Round 4; moved off R3 for crouch
+##   Lock next/prev  wheel                 D-pad right / left
 ##   Pause ....... Esc                     Start
 ##   Restart ..... R                       Back
 ##   Help ........ F1
 ##   Debug ....... F3
 ##   Fullscreen .. F11 / Alt+Enter
 ##
-## Upgrade 2 key map (docs/Ragdoll Brawler — Upgrade Spec 2.md). Ctrl is not a
-## crouch key: on macOS Ctrl+click is a right click, so crouch + punch would
-## read as a kick. Fullscreen left Cmd+Ctrl+F because F is grab; the player's
-## InputInterpreter also drops presses made while Cmd is held.
+## The Light action keeps its Upgrade 2 name "punch" (bots, tests and the
+## showcase use it). Ctrl is not a crouch key: on macOS Ctrl+click is a right
+## click, so crouch + punch would read as Heavy. The player's InputInterpreter
+## drops presses made while Cmd is held.
 ##
 ## A key spec may carry a modifier mask as a third element:
 ## [&"key", KEY_ENTER, KEY_MASK_ALT] is Alt+Enter.
@@ -42,14 +49,19 @@ const ACTIONS := {
 	&"cam_right": [[&"axis", JOY_AXIS_RIGHT_X, 1.0]],
 	&"cam_up": [[&"axis", JOY_AXIS_RIGHT_Y, -1.0]],
 	&"cam_down": [[&"axis", JOY_AXIS_RIGHT_Y, 1.0]],
-	&"punch": [[&"mouse", MOUSE_BUTTON_LEFT], [&"key", KEY_J], [&"joy", JOY_BUTTON_X]],
-	&"kick": [[&"mouse", MOUSE_BUTTON_RIGHT], [&"key", KEY_K], [&"joy", JOY_BUTTON_Y]],
-	&"grab": [[&"key", KEY_F], [&"joy", JOY_BUTTON_B]],
+	&"punch": [[&"mouse", MOUSE_BUTTON_LEFT], [&"key", KEY_J], [&"joy", JOY_BUTTON_X]],  # Light (jab)
+	&"heavy": [[&"mouse", MOUSE_BUTTON_RIGHT], [&"key", KEY_L], [&"joy", JOY_BUTTON_Y]],  # Heavy (cross)
+	&"kick": [[&"key", KEY_E], [&"key", KEY_K], [&"joy", JOY_BUTTON_B]],
+	&"grab": [[&"key", KEY_G], [&"axis", JOY_AXIS_TRIGGER_LEFT, 1.0]],
 	&"jump": [[&"key", KEY_SPACE], [&"joy", JOY_BUTTON_A]],
-	&"crouch": [[&"key", KEY_C], [&"joy", JOY_BUTTON_LEFT_STICK]],
+	&"crouch": [[&"key", KEY_C], [&"joy", JOY_BUTTON_RIGHT_STICK]],
 	&"block": [[&"key", KEY_Q], [&"joy", JOY_BUTTON_RIGHT_SHOULDER]],
 	&"dash": [[&"key", KEY_SHIFT], [&"axis", JOY_AXIS_TRIGGER_RIGHT, 1.0]],
-	&"focus": [[&"key", KEY_E], [&"joy", JOY_BUTTON_LEFT_SHOULDER]],
+	&"focus": [[&"key", KEY_F], [&"joy", JOY_BUTTON_LEFT_SHOULDER]],
+	# Round 4 lock-on: toggle, then cycle targets while locked.
+	&"lock_on": [[&"mouse", MOUSE_BUTTON_MIDDLE], [&"key", KEY_TAB], [&"joy", JOY_BUTTON_LEFT_STICK]],
+	&"lock_next": [[&"mouse", MOUSE_BUTTON_WHEEL_DOWN], [&"joy", JOY_BUTTON_DPAD_RIGHT]],
+	&"lock_prev": [[&"mouse", MOUSE_BUTTON_WHEEL_UP], [&"joy", JOY_BUTTON_DPAD_LEFT]],
 	&"pause": [[&"key", KEY_ESCAPE], [&"joy", JOY_BUTTON_START]],
 	&"restart": [[&"key", KEY_R], [&"joy", JOY_BUTTON_BACK]],
 	&"help": [[&"key", KEY_F1]],

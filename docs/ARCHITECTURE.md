@@ -181,3 +181,249 @@ Damage scaling alone never ends a stun loop (P,P,P mashed with the stick neutral
 - From hit `COMBO_STUN_DECAY_FROM`, flinch/stagger/stumble/daze stun shrinks by `COMBO_STUN_DECAY` per hit, down to `COMBO_STUN_MIN`.
 - At `COMBO_ESCAPE_HITS` hits or `COMBO_ESCAPE_STUN` s of stun in one combo the victim breaks away: damage but no stun, `COMBO_ESCAPE_GUARD` s of auto-guard, `COMBO_ESCAPE_PUSH` m of separation, count reset. Applies to the player too.
 - At most `JUGGLE_MAX_RELAUNCH` juggle relaunches per flight; ordinary strikes never relaunch a downed body, and hits extend a get-up at most once per knockdown.
+
+## Round 4: free camera and lock-on
+
+The camera is free by default: it turns only when the player turns it (mouse, right stick). No auto-rotation toward enemies or back behind the player during play. Lock-on is a toggle. Contract (lead): `Controls` actions `lock_on` (MMB / Tab / R3), `lock_next` / `lock_prev` (mouse wheel / D-pad); `Tuning` "Camera control and lock-on" block (`CAM_MOUSE_SENS`, `CAM_STICK_SPEED`, `CAM_SENS_RANGE`, `LOCK_*`); `GameEvents.lock_on_changed(fighter, target)`; F1 help rows.
+- **E** (camera_rig, HUD, menus) owns the lock: `CameraRig.get_lock_target() -> Fighter` (null = free), and `get_soft_target()` returns the locked target while locked, so combat follows it unchanged. While locked, mouse / right-stick motion moves an aim point over the target's body (zone aiming) and the camera keeps that point at the screen centre. Lock drops beyond `LOCK_BREAK_RANGE`, after `LOCK_LOS_GRACE` s hidden, or on a second press; on the target's KO it moves to the next enemy in range. `lock_on` with no enemy in range recentres the camera behind the player. Mouse sensitivity is a pause-menu setting saved to `user://settings.cfg`.
+- **H** (player controller, zone aim): while locked the fighter faces the target and strafes (camera-relative movement circles it); unlocked, movement is as before. Zone aim reads the real camera's centre ray in both modes.
+- Cinematic moments the player does not control (own knockdown, KO close-up) may still move the camera; they keep the player in frame.
+
+## Round 5: Feel Reference (docs/Feel Reference — Sifu × Prototype for the Ragdoll Brawler.md)
+
+Scope: every build task F0–F11 (including F7b) of the Feel Reference. **Where it disagrees with the original spec, Upgrade Spec 2 or an earlier round here, the Feel Reference wins.** Never remove or replace the ragdoll system: everything is built on top of it. Every number goes in `Tuning` (the "Round 5" block at the end); a number you need that is not there is a local `const` with a comment, listed in your report.
+
+### Ownership (Round 5)
+
+Same rules: edit only your own files; test on a private copy (`<scratchpad>/agent_<id>/proj`); `--fixed-fps 120`; treat `SCRIPT ERROR`, `Parse Error` and `ERROR:` lines as failures.
+
+| Owner | Files |
+| --- | --- |
+| core (lead) | `project.godot`, `scripts/core/*` (incl. new `power.gd`), `scripts/game/fighter_factory.gd`, `tests/core/*`, `tests/integration/*`, `tests/run_all.sh`, this doc |
+| A — ragdoll & rig | `humanoid_rig.gd`, `ragdoll_controller.gd`, `ragdoll_profile.gd`, `scripts/lab/*`, `scenes/ragdoll_lab.tscn`, `tests/rig/*` |
+| P — poses & animation (new) | `pose_library.gd`, `pose_animator.gd`, `tests/anim/*` (new module dir) |
+| B — combat | `combat_controller.gd`, `move_data.gd`, `move_library.gd`, `combo_graph.gd`, `hurtbox.gd`, `combat_fx.gd`, `thrown_chunk.gd`, `projectile_probe.gd`, `tests/combat/*` |
+| C — AI | `scripts/ai/*`, `tests/ai/*` |
+| D — world | `scripts/world/*` (incl. new `world_tags.gd`, `throwable_prop.gd`), `tests/world/*` |
+| E — camera & time | `scripts/core/time_director.gd` (autoload), `scripts/game/camera_rig.gd`, `tests/game/test_camera_rig*`, `tests/game/test_time_director*`, new `tests/game/test_cam_*` / `test_time_*` |
+| F — FX & audio | `scripts/fx/*` (incl. new screen effects), `shaders/*`, `tests/fx/*` |
+| G — grabs & carry | new `scripts/combat/carry.gd`, `limb_grab.gd`, `grab_lab.gd`, `scenes/grab_lab.tscn`, `tests/grab/*` |
+| H — fighter, player & defence | `fighter.gd`, `player_controller.gd`, `input_interpreter.gd`, `zone_aim.gd`, new `scripts/combat/defence.gd`, `tests/input/*`, new `tests/defence/*` |
+| J — HUD, flow & menus (new) | `scripts/game/hud.gd`, `game_menus.gd`, `game_mode.gd`, `ui_kit.gd`, `scenes/main.tscn`, `tests/game/*` except E's |
+| M — movement (new) | new `scripts/fighter/traversal.gd`, new `tests/move/*` |
+
+(`run_all.sh` modules: core rig anim combat ai world game fx grab input defence move. Put each new test scene in your own module dir.)
+
+### Contract already in the tree (lead)
+
+- **`Tuning` Round 5 block**: power score, frame data, damage, tiers, hitstop, launches, defence, Focus, slow-time table, sprint, parkour, wall run, jump/landing, Battering Ram, grabs/throws/props, enemy roster and startups, bodies, camera, screen effects; debug settings as `static var`s (`debug_speed_cap`, `debug_ram_level`, `debug_start_focus`, `debug_overlay`). Values changed in place: archetype health and masses (player 100 HP/70 kg, grunt 100/75, new `stick` 100/75, new `heavy` 160/110; legacy brawler/shield/brute/thrower rescaled and out of Waves; Duelist 200 HP for Duel), `DMG_ENEMY`, `CHARGE_LEVELS` 0.3/0.6/1.0 s, `CHARGE_MULT` (alias `CHARGE_DAMAGE`) 1.0/1.6/2.3/3.2, `GRAB_RANGE` 1.4, `WAVES`, `MAX_ENEMIES_ON_FIELD` 8, `CORPSE_MAX` 20, `CRACK_FRACTION` 0.4, brick 6,000 J, concrete 15,000 J.
+- **`Power`** (`scripts/core/power.gd`): `score()`, `tier_of()`, `sweep_tier_of()`, `launch_speed()`, `launch_angle()`, `launch_velocity()`, `launch_speed_for()` (heavies 80%), `launch_damage()`, `strike_damage()`, `pursuit_speed()`, `hitstop_for()`, `trauma_for()`, `wall_energy()`, `bowl_tier()`, `throw_speed()`, `speed_cap()`. `tests/core/test_power` checks all 12 worked examples and the wall table. **Use these; never re-derive the formulas.**
+- **`HitInfo`**: `enum Tier { NONE, FLINCH, STUMBLE, STAGGER, KNOCKDOWN, LAUNCH, HARD_LAUNCH, SEVER }`, fields `power`, `tier`, `power_base`, `speed_bonus`, `counter_bonus`, `finisher_bonus`, `sprint`, `ground_strike`, `pursuit`, `sever_cut`; `tier_name()`, `reaction_for_tier()`, `is_launch_tier()`. `reaction` stays for older listeners (B keeps it in step).
+- **`Layers.DEAD_BODY`** (bit 9, `MASK_DEAD_BODY`): dead bodies; capsules never touch them.
+- **`Controls`**: the Feel Reference table. Light keeps the action name `punch`; new `heavy` (RMB / L / Y); `kick` E / K / B; `grab` G / LT; `focus` F / LB; `crouch` C / R3; lock-on moved to L3 (MMB / Tab unchanged). `tests/core/test_controls` checks both devices and clashes.
+- **`Targeting.pick_strike_target(from, aim_dir, sprinting)`**, `strike_score()`, `pick_ground_target()` (the Feel Reference cone scoring).
+- **`Bones.CUTS`** gains whole-limb cuts `arm_l`, `arm_r`, `leg_l`, `leg_r`; `Bones.limb_cut_for(bone)`.
+- **New signals in `GameEvents`** (Round 5 block, each says who emits): `strike_started`, `parried`, `parry_whiffed`, `teleported`, `sidestepped`, `counter_bonus_changed`, `sprint_started/ended`, `footstep`, `parkour`, `wall_run_started/step/ended`, `landing`, `shockwave`, `rammed`, `carry_changed`, `body_slammed`, `prop_picked_up`, `prop_thrown`, `prop_broken`, `wall_broken_by`, `fleeing_changed`, `last_kill`, `run_ended`.
+- **Stubs with fixed signatures** (owners implement; callers code against them now; they do nothing yet, so the game plays as before):
+
+| API | Owner | Callers |
+| --- | --- | --- |
+| `Traversal` (player only, `fighter.traversal`): `physics_move(delta) -> bool`, `on_dash_pressed() -> bool`, `on_dash_released()`, `on_jump_pressed() -> bool`, `on_strike_started(sprint)`, `begin_drop_strike() -> bool`, `hang(t)`, `get_speed()`, `speed_toward(dir)`, `get_speed_cap()`, `sprint_charge`, `is_sprinting()`, `is_charge_steering()`, `is_vaulting()`, `get_vault_progress()`, `is_wall_running()`, `get_wall_side()`, `get_wall_normal()`, `is_airborne()`, `get_fall_height()` | M | H, B, E, F, J |
+| `Defence` (every fighter, `fighter.defence`): `is_enabled()`, `on_block_pressed(now)`, `on_dash_pressed(now) -> bool`, `intercepts(attacker, move_id) -> bool`, `counter_bonus()`, `consume_counter_bonus()`, `get_pursuit_target()`, `on_pursuit_hit(victim)`, `is_parry_locked()`, `is_vanished()` | H | B, C, J |
+| `Carry` (every fighter, `fighter.carry`): `is_enabled()`, `on_grab_pressed/released(now)`, `on_attack_pressed(action, now) -> bool`, `on_attack_released`, `held`, `is_holding()`, `is_held()`, `get_holder()`, `connect_enemy_grab(victim, move_id) -> bool`, `drop(reason)`, `get_move_speed_mult()`, `get_sprint_cap_mult()`, `get_vault_max_height()` | G | B, M, H, C, J |
+| `RagdollController.stumble(dir, leg_bone)`, `knockdown(dir, hit_bone)`, `limp_chain(bones, physics_amount, fade_time)`, `restore_chain(bones)`, `get_bone_strength(bone)`, `set_getup_after(s)`, `begin_held(bone, hand, holder)`, `end_held()`, `is_held()`, `wake()` | A | H, B, G |
+| `PoseAnimator.play_timed(pose_id, duration)`, `set_locomotion_style(style)`, `set_upper_overlay(pose_id)` | P | M, G, B, C, H |
+| `Fighter.stumble(dir, leg_bone)`, `knockdown(dir, hit_bone)`, `sever_limb(cut) -> bool`, `get_actor_time()`, `is_fleeing()`, `is_heavy()`, `add_focus(amount, reason)` | H | B, M, G, C, D |
+| `CombatController.get_attack_target()`, `suppresses_ram_with(other)`; `time_to_active()` is already real seconds | B | H, M |
+| `AttackDirector.set_wave(i)`, `wave_index`, `enemy_startup_frames(move_id)`; `AIBrain.is_fleeing()` | C | J, B, H |
+| `WorldTags.is_runnable(collider)`, `surface_of(collider)`, `is_obstacle(collider)` | D | M, F |
+| `ThrowableProp` (`kind`, `can_pick_up()`, `pick_up(holder)`, `drop(v)`, `throw(v, thrower)`, `is_held()`) | D | G, A (loose limbs, kind &"limb"), C (dropped stick) |
+| `PlayerController.get_aim_dir()` (stick, or camera forward when neutral), `get_sprint_target()` | H | B, J |
+| `AIBrain.get_damage_mult()` (one-armed enemies hit at half damage) | C | B |
+| Autoload `ScreenFX` (`scripts/fx/screen_fx.gd`): radial blur, speed lines, Focus tint, hit flash; `get_blur_strength()` | F | tests |
+
+- **Routing already wired (lead):** `CombatController.press(BLOCK)` → `defence.on_block_pressed()` first (when enabled); `press(DASH)` → `defence.on_dash_pressed()` → `traversal.on_dash_pressed()` → the old dash; `release(DASH)` → `traversal.on_dash_released()`; `press/release(GRAB)` → `carry` (when enabled); attack presses while `carry.is_holding()` → `carry.on_attack_pressed()`. While `defence.is_enabled()` is false the Upgrade 2 perfect dodge, teleport counter and pursuit still run; likewise `carry.is_enabled()` for grabs. Owners flip their switch to true when their module works; **B then deletes the dead Upgrade 2 code**. `Fighter._physics_process` calls `traversal.physics_move(delta)` after the frozen / ragdolling / held early-outs.
+
+### How the pieces meet (Round 5)
+
+- **One hit pipeline.** Every hit — strikes, enemy hits, thrown bodies, props, Battering Ram, landing shockwaves, ground strikes — is a `HitInfo` passed to `victim.take_hit(info)` → `CombatController.receive_hit()` (B). Strikes carry `power` and B sets `tier` with `Power.tier_of` (sweeps: `sweep_tier_of`); other sources **preset `tier`** (and damage) and B uses it as is. B applies guard, Defence interception, armor/`ignore_flinch`, damage (strike + launch + limb), the reaction by tier, then emits `hit_landed`. Reaction by tier → `Fighter.flinch / stumble / stagger / knockdown / launch / sever_limb` (H) → `RagdollController` (A). Strike reactions come **only from P**: Upgrade 2 rules that forced a reaction (daze auto-launch, juggle x1.3, launcher lift, fixed kick/counter launch speeds, charge-to-launch, air counter x1.25) give way to P. Anti-infinite stun decay / break-away, the juggle relaunch cap and combo damage scaling stay as guards.
+- **Contact frame.** On the hit: hitstop on attacker and victim only (`Power.hitstop_for(tier)`, the player capped at `Tuning.PLAYER_HITSTOP_MAX`, via `TimeDirector.hitstop`); the victim holds its contact pose and jitters; then the reaction starts with each bone's velocity from the last two animated poses, **cached before the freeze** (A). Block and Dash pressed during the player's freeze are buffered and fire when it ends (B). A wall break freezes only the flying body for `Tuning.WALL_BREAK_FREEZE` (D).
+- **Effects listen, combat does not call them.** Flash, shock ring, blood, sound by tier, screen flash, trails, after-image, charge glow, dust: F, from `GameEvents`. Camera trauma by tier (`Power.trauma_for`, wall break, heavy landing, limb lost): E, from `GameEvents`. Modules stop emitting `screen_shake` for hits, wall breaks and landings (it stays for one-offs such as wall strikes).
+- **Slow time has one owner.** TimeDirector (E) implements the `Tuning.SLOW_TIME` table: the strongest (lowest scale) active request wins, nothing stacks, a 1 s cooldown between cooldown-respecting events, and it **requests them itself from events**: `parried` → parry, `teleported` (kind &"counter") → teleport, `wall_broken` → wall break, `limb_severed` → sever, `last_kill` → last kill, player `fighter_died` → player death. Focus mode: H calls `TimeDirector.begin_focus()/end_focus()`. The old `request_slowmo()` stays for callers that still use it. **During any slow motion the player keeps real time** (`player_time_factor() = 1 / Engine.time_scale`), except that a KO / player death ends it; player-side impulses into ragdolls use real speed (velocity x time scale).
+- **Per-fighter time.** `Fighter.get_actor_time()` is 0 while frozen: animation, movement and frame timers stop for that fighter only; a ragdolling body stores its bone velocities, gravity off, and gets them back (A). Enemy frame data runs in their own scaled time.
+- **Focus.** Bars 0–3 on `fighter.focus`. Income only through `Fighter.add_focus(amount, reason)` (H; ignored during Focus mode): H credits stagger / knockdown / launch hits from `hit_landed` and wall breaks from `wall_broken_by` (the launcher from `ImpactResolver.get_launcher()`); Defence credits parries. Spend: teleport, pursuit, Focus mode (1 each). J sets `player.focus` to `Tuning.debug_start_focus` (default 1) at every wave start.
+- **Player speed.** `Traversal.speed_toward(dir)` feeds the speed bonus; B samples it at the strike's commit (press, or charge release) **before** calling `traversal.on_strike_started()`, which drops a sprinting player to walk. A wall-run strike and a vault's dropping strike count as full sprint.
+- **AI and the player's strikes.** B emits `strike_started(attacker, target, move_id, sprint, charge_level)` on every strike; C sidesteps sprint attacks and guards tapped strikes from it. Enemy moves (B's `MoveLibrary`, C chooses, P poses): `e_jab`, `e_hook` (the grunt's cross), `e_kick` (front kick), `e_grab`, `e_stick_swing`, `e_stick_thrust`, `e_heavy` (overhead smash), `e_charge` (shoulder charge), `e_grab_slam`. Enemy strikes glow orange from wind-up to first active frame, grabs glow blue on both hands (C via `BloodFX.limb_glow`); Focus tint never dims them (F).
+- **Bodies stay.** Dead bodies: `Layers.DEAD_BODY`, freeze after `Tuning.DEAD_FREEZE_AFTER` s at rest (A), up to `CORPSE_MAX` per round, oldest fades (J). The player's feet nudge bodies they walk through (H). Debris stays (freezes at 4 s, cap 150: D); blood decals cap 30 (F); loose limbs cap 12 (A).
+
+### Decisions on open points (lead; defaults until the user says otherwise)
+
+1. The player keeps real time in **all** slow motion, as the doc's "Time, in code" section says (not only Focus mode).
+2. **Dash**: a fresh press is first offered to Defence (teleport / sidestep / pursuit, decided at the press by predicting each incoming attack's first active frame in real time); otherwise the short dash starts at once, and a press still held after 150 ms flows into the sprint (no input delay).
+3. **Parry** is judged against each attack's first active frame: a Block press in the 8 frames (133 ms) before it parries; one press covers every attack in that window.
+4. A **sweep** never hard-launches or severs (it caps at the launch tier).
+5. **Heavy** = archetype flag `heavy` or mass ≥ 95 kg.
+6. **Lock-on** (Round 4) stays; the free camera stays. Launch framing pulls back to 9 m and leans the look-at toward the body for at most 1 s; yaw turns only if the player or the body would leave the frame, at most 60°/s, and never against the player's camera input.
+7. **Concrete** pillars and panels break at 15,000 J (always two hits); the arena's outer boundary walls stay unbreakable.
+8. **Focus** is set to exactly 1 bar at every wave start (debug setting overrides).
+9. **Roster**: Waves uses grunt / stick / heavy; legacy archetypes stay defined for old tests only; Duel keeps the Duelist.
+10. **No Mixamo or Blender**: every new animation is a procedural pose (P). "Split limb meshes" are the mannequin's per-bone parts; wound caps are procedural meshes (A).
+11. The Yard gets a shallow **water** patch and a **metal** plate so footstep, landing and body effects are seen (D tags them, F draws them).
+12. Gaps in the doc filled with guesses in Tuning and marked: enemy shoulder-charge damage 20, ground-strike frame data, ground-strike range 1.6 m, wood wall damage 10.
+13. Focus-mode body-part aiming (open question 2) is **not built**.
+14. Player gravity: 9.8 m/s² rising, x1.6 falling (the doc's landing speeds assume this).
+
+Made during the build (owners' calls the lead accepted):
+
+15. A launch-tier strike (P ≥ 5) breaks through any guard, so sprint and charged hits always pay off (B).
+16. Battering Ram and landing-shockwave hits deal 0 damage: they are crowd control; launching still takes an attack.
+17. Last kill and player death slow the player with the world (and end Focus). All other slow motion keeps the player in real time.
+18. Parry and teleport slow time run only for the player's own parries and teleports, not when the Duelist parries the player.
+19. Only walls and pillars get wall-break slow time and trauma; broken furniture gets a small shake only.
+20. **Earned speed**: the power score's speed bonus, throw speed and the Battering Ram read the sprint ramp only. A dash burst, a lunge or knockback adds nothing, so a dash-tap jab is a standing jab (M, G).
+21. Air dash: a Dash tap in the air is the 3 m short dash, once per airtime, adding no power; it gets the full sprint blur (M, F).
+22. Crawling enemies (lost a leg) are ground-strike targets, never ordinary strike targets (`Targeting.is_crawling`).
+23. A vault's dropping strike counts as full sprint only when the vault began at sprint speed; a walking vault keeps its own speed (M).
+24. The air mantle reaches at most 3 m above the take-off floor (one storey), so nobody climbs the outer walls; crouching stops a sprint (M).
+25. Only the player and archetypes with `perfect_dodge` (the Duelist) parry; other enemies' Block is a plain guard. The Duelist counters every parry (40% teleport when he has Focus, else a hook) (H, C).
+26. Enemies break a neutral grab by chance per archetype (grunt 25%, stick 20%, heavy 50%, Duelist 60%) through `AIBrain.wants_grab_break()` (C, G).
+27. Tell colours are shared: `Tuning.TELL_COLOR_STRIKE` (orange), `Tuning.TELL_COLOR_GRAB` (blue).
+
+From the spec-accuracy review:
+
+28. Throws keep an aim assist: along the stick, snapping to an enemy in the strike cone (the same target picking as strikes).
+29. The teleport after-image fades over 0.2 s of world time, so it lingers through the teleport's slow motion.
+30. Upgraded caps make the speed effects stronger ("same signals, stronger"): at 8 m/s they are exactly the doc's numbers; above it blur, speed lines, trails and wind scale by `1 + 0.5 × (cap − 8) / 4`, blur clamped at 0.85.
+31. The Upgrade 2 zone effects (leg-hit slow, arm break after 100 zone damage) are gone: the doc's damage table is complete. Zone aiming still picks the hit zone and chain.
+32. The +1 finisher goes to the third hit of a tap string whether or not the earlier hits landed.
+33. Any strike that lands on a fleeing enemy (lost a limb, limping or crawling) finishes him.
+34. A strike faster than the 150 ms tap/hold threshold (jab, knee, elbow) waits at the end of its startup only while its button is still held; a quick tap fires on its frame data.
+35. Pursuit relaunch speed is `Power.pursuit_speed` (heavies 80%, capped at 18 m/s like every flying body).
+36. Sprint opening: a Dash press starts the short dash at once, peaking at the speed cap and easing to exactly 6 m/s at 150 ms; a hold hands off there to the ramp, which reaches the cap 1.2 s after the press ("1.2 s of holding"). Speed never falls after the hand-off except for the turn penalty, a strike or a release.
+37. A charge (strike or throw) never blocks automatic parkour: it rides the vault or mantle curve and keeps charging. A vault never ends in a dead stop: with a fighter behind the wall it lands shorter or to the side.
+38. One turn costs one turn penalty; the wall-run "same wall" cooldown is per wall plane (a facade of panels counts as one wall).
+
+### Acceptance checks (who proves each one)
+
+Each check is an automated test in the owner's module dir that prints its measured numbers.
+
+| Task | Check | Owner |
+| --- | --- | --- |
+| F0 | physics ≤ 8 ms avg / 12 ms max with 8 live, 20 dead, 150 debris | lead (`tests/integration/perf_crowd`) |
+| F0 | Focus mode: same distance per real second within 5% | H |
+| F0 | 110 ms hitstop on two fighters, a third keeps moving | H |
+| F0 | ragdoll masses 70 / 75 / 110 kg within 1 kg | A |
+| F0 | controls: every action on both devices, no clashes | lead (`tests/core/test_controls`) |
+| F0 | Ragdoll Lab: one arm limp, rest animated | A |
+| F1 | 50 random launches: player in the viewport every frame | E |
+| F2 | cap in 1.2 ± 0.1 s; 90° turn in 0.2 s loses 30%; charging at a sprint keeps speed within 5% and turns ≤ 30°/s; any sprint strike drops to walk | M (with B) |
+| F2 | blur 0.15 at half charge, 0.6 at full | F |
+| F3 | the 12 worked examples through real strikes; launch speed/angle at P 5, 7, 9, 11; level-3 kick on a full grunt leaves it alive and it gets up | B (unit math: lead `test_power`) |
+| F3 | walls crack/break per the wall table, concrete on the second 18 m/s hit | D |
+| F3 | a jab to the head lowers muscle strength only in the head chain | A (with B) |
+| F4 | flash, sound and blood on the hit event's physics frame; a different sound stream per tier | F |
+| F4 | player freeze ≤ 60 ms; Block pressed during it fires afterwards | H (with B) |
+| F5 | glows ≥ 18 frames before first active early; ≤ 2 token holders 20+ frames apart over 5 min | C |
+| F5 | parry bot 100/100; a press outside any window locks parry 20 frames; jab after a parry is P 3.5, knockdown | H (with B) |
+| F5 | a staggered stick enemy drops the stick and it can be picked up | C (with G, D) |
+| F6 | sidestep at 0 Focus; wall behind → side spot or sidestep + refund; sprint bot through 100 wind-ups spends no Focus; pursuit relaunch rule, third refused; no Focus gained in Focus mode | H |
+| F6 | every wave starts with 1 bar | J |
+| F6 | two slow-motion requests: only the strongest applies | E |
+| F7 | vault 0.9 m keeps ≥ 90%; 1.8 m blocks walking, mantles sprinting; Soft/Hard/Heavy landing levels and the slam stumbles a dummy 2 m away; 200 landings never knock the player down; attack in the last 40% of a vault → dropping strike | M |
+| F7b | sprint + Jump by a runnable wall starts a run, walking does not; 200 sprint jabs along a wall start 0 runs; tapped kick off a run P ≥ 5 launches; kick-off reaches the 1.8 m platform; cracked panel not runnable | M (with D) |
+| F8 | base: heavy knocks you down, act again within 1.1 s; grunt: both stumble; level 3 knocks down a line of 3 grunts; 200 sprint attacks never knock you down; no collision launches | M |
+| F9 | held legs keep moving; tapped throw cracks drywall, level-3 breaks it; 16 m/s throw downs ≥ 2 of 3 grunts; grab flying / downed / dead bodies; thrown brick staggers and shatters | G |
+| F10 | severing hides the limb, shows the cap, loose limb at the bone's speed; loose limbs ≤ 12 | A |
+| F10 | a legless enemy crawls away and a ground strike finishes him | C (with B) |
+| F11 | camera distance follows enemies alive; last kill close-up over 20 waves; death camera | E |
+| F11 | death → results screen; end-of-wave counts of bodies, broken props, decals match what was created | J (with D, F) |
+
+### Process (Round 5)
+
+- Work through F0 → F11 in order **inside your own files**, keeping the game playable and your module's tests green after each step. Callers will land against your stubs before you implement them; keep stub signatures.
+- **Tests that encode superseded behaviour are rewritten to the Feel Reference by their owner**, never deleted without a replacement and never weakened to pass.
+- Other agents' files change under you. If a file you do not own fails to parse, wait a minute and recopy. If you need an API that is not in the contract, use a local fallback and list it under "Requests" in your report: the lead adds it and routes it to the owner.
+- Final report: what you built (file by file), the acceptance checks you own with their measured numbers, every test result line, anything stubbed or known broken, requests for other modules.
+
+### Round 5 status (all build tasks F0–F11 done)
+
+- **Tests:** `tests/run_all.sh` → 164 pass, 0 fail (core 2, rig 18, anim 4, combat 27, ai 20, world 20, game 13, fx 22, grab 13, input 12, defence 5, move 8). Every acceptance check in the table above is an automated test that prints its measured numbers; the three bugs the review caught past test doubles are now covered through real input (`tests/combat/test_real_input`, `tests/move/test_review_real`).
+- **F0 performance** (`tests/integration/run_perf.sh <copy> [runs]`, `REALTIME=1` for the verdict): 8 live, 20 dead, 150 debris → real time avg 2.72 ms, max 6.74 ms; fixed fps avg 1.96, max 5.03 (budget 8 / 12). Corpse freezing is the one setting that matters.
+- **Soaks** (`tests/integration/run_soak.sh <copy> waves|duel <s>`, `FAST=1`): Waves 180 s and Duel 120 s, 0 errors.
+- **Review:** four independent reviewers checked F0–F11 against the doc; every finding was fixed or decided above (decisions 28–38).
+- **Numbers live in two places by design:** every number the Feel Reference states is in `Tuning` (Round 5 block). Implementation constants each module needed (probe sizes, blend rates, motor gains) stay as commented local `const`s in their files.
+- **Known limits:** the launch camera always keeps the player in frame, but frames the flying body on about 63% of follow frames (a body flying past the camera can't be caught within 60°/s and 9 m). The old soak bot (no parries or teleports) dies to wave 1 in about 25 s: the doc's damage and health numbers are flagged by the doc itself as numbers to watch in the first playtests.
+- **Not built (by the doc):** the roguelike (speed caps and Battering Ram levels are debug settings in the pause menu), Focus-mode body-part aiming (open question 2).
+- **Still the user's:** the doc's feel check after every task (three rounds: did I want to sprint at someone, did a launch feel earned, did I lose track of where I was, did the bodies look physical, did I want to play again).
+
+## Round 6: more destruction (user request)
+
+The user asked for more destructible environment: **clutter in the fight area, breakable structure, and floor and impact damage**. There is no design doc for this round; this section is the spec. It follows the Feel Reference's rules: one energy model (E = ½Mv² of a flying body straight into the object, cracks at `CRACK_FRACTION`), **things stay** for the round, effects listen to events, budgets hold (debris 150, blood decals 30), and the F0 performance budget (≤ 8 ms average, ≤ 12 ms max, real time) must still pass with everything in place. Numbers are in `Tuning` ("Round 6" block).
+
+### Ownership (Round 6)
+
+| Owner | Files |
+| --- | --- |
+| core (lead) | `scripts/core/*`, `project.godot`, `tests/core/*`, `tests/integration/*`, `tests/run_all.sh`, this doc |
+| D — world: structure & floor | `scripts/world/*` **except K's files**, incl. the new `world_damage.gd` (autoload `WorldDamage`), `tests/world/*` |
+| K — clutter (new) | `scripts/world/clutter_layout.gd`, `scripts/world/loose_prop.gd` (moved from D), any new `scripts/world/furniture*.gd` / `glass_pane.gd` / clutter classes it creates, `tests/clutter/*` (new module dir) |
+| F — FX & audio | `scripts/fx/*`, `shaders/*`, `tests/fx/*` |
+| Phase B (after D and K land the layout): C AI, M movement, E camera, J HUD & flow | their Round 5 files |
+
+### Contract (lead, already in the tree)
+
+- **Breakable world contract (duck-typed).** Any world object that can break implements:
+  - `receive_impact(energy, hit_pos, velocity, footprint := Rect2()) -> StringName`: a flying body (ImpactResolver). Returns `&"bounce"`, `&"crack"`, `&"hole"` or `&"break"`.
+  - `receive_strike(attacker, hit_pos, direction, power) -> StringName`: punches and kicks (CombatController, unchanged).
+  - `receive_blast(center, radius, power, source) -> StringName`: shockwaves (WorldDamage).
+  - Members `absorption`, `kind`, `surface`, `is_broken`; `get_face_normal(from)` and `get_half_extent_along(n)` (used by the resolver's energy direction); group `&"breakables"`.
+
+  `WorldTags.breakable_of(collider)` finds it, and D switches ImpactResolver from `is Destructible or is Pillar` to this so flying bodies break clutter too.
+- **`ClutterLayout.build(yard)`** (K): YardBuilder calls it at the end of `build()`, after the spawns exist.
+- **Autoload `WorldDamage`** (D): `floor_level_at(pos)`, `damage_floor(pos, energy, surface)`, `blast(center, radius, power, source)`, `get_floor_counts()`, `reset()`. It listens to `landing` (hard and heavy), `shockwave`, `body_slammed`, `body_impact` (floor), `wall_broken` and `structure_collapsed`; nobody needs to call it.
+- **Events** (`GameEvents`, Round 6 block): `furniture_broken(node, position, kind, energy, by)` (K), `structure_collapsed(node, position, kind)` (D), `floor_damaged(position, radius, level, surface)` (D), `world_blast(center, radius, power, source)` (D).
+- **Falling structure** hits fighters through the normal pipeline: a preset-tier `HitInfo` with kind `&"debris"` via `victim.take_hit()` (stagger or knockdown by the piece's energy, `Tuning.FALLING_*`). Small debris never hurts anyone.
+
+### Rules
+
+- **Readable fight space.** Clutter sits at the edges of the fight space, around pillars, along walls and in a lobby corner; the centre lanes, spawns, entries, breach spots, the platform's approaches and the wall-run lanes' open floor stay clear. Low clutter (tables, benches, barrels, planters) is a vaultable obstacle; tall clutter (shelves, glass panes, partitions) is a wall until it breaks.
+- **Bodies are the main tool.** A launched or thrown body that breaks clutter keeps `sqrt(1 − absorb)` of its speed and takes `FURNITURE_BODY_DAMAGE`; it can break several things in one flight. Strikes break things by `strike_hp`. Blasts break the lightest things (glass, cardboard) and shove or crack the rest.
+- **Things stay.** Broken pieces, wall holes, collapsed sections, fallen overhead pieces and floor marks persist for the round (pieces freeze after 4 s at rest). Raise `DEBRIS_MAX` above 150 only if the performance check still passes with it.
+- **Physics stays physical.** Pieces are real bodies built from the object's own parts. Overhead pieces fall under gravity after a short creak and dust, and land where physics puts them.
+
+### Decisions (Round 6)
+
+1. "Open floor" beside a wall-run lane is the band 1.2–3.5 m from the runnable face along the lane; it is keep-clear (`get_structure_features()` `run_open`), so a wall-run strike always lands on open floor.
+2. Blasts break only `RUN_THROUGH_KINDS` (glass, cardboard). Every other breakable at most cracks (lowering its break energy) or comes loose; bodies and strikes do the breaking.
+3. One event is one floor mark: a carry body slam, its heavy landing and the victim's floor impact count once. Floor marks sit on the floor (never on clutter, rubble, corpses or mid-air).
+4. Falling structure is physical: it breaks or cracks the breakables it lands on by its own ½mv², hurts fighters only while falling or moving fast (≥ 3 m/s), and its blast fires where it lands.
+5. `DEBRIS_MAX` is 250 (measured with full clutter: real time 2.5–2.7 ms average, ≤ 7.3 ms max).
+6. Ram and shockwave hits on clutter follow the normal rules: running into glass or cardboard at `RUN_THROUGH_SPEED` smashes it and the runner keeps 100%; loose props are shoved (the runner keeps M/(M+m)).
+
+### Acceptance checks (Round 6)
+
+| Check | Owner |
+| --- | --- |
+| The courtyard holds at least `CLUTTER_MIN_COUNT` (30) breakable clutter objects of at least `CLUTTER_MIN_KINDS` (8) kinds; fight lanes, spawns, entries, breach spots and wall-run lanes stay clear (a test measures every clearance) | K |
+| Every clutter kind: below its break energy it holds (crack or bounce), above it it breaks; strikes break it at `strike_hp`; its pieces persist and freeze; a body that breaks it keeps `sqrt(1 − absorb)` of its speed and takes 5 damage; one thrown body breaks two things in a line | K |
+| A broken shelf spills 2–4 throwable props; glass shatters from a body, a strike and a nearby slam; a fighter running at 6 m/s or more smashes glass and cardboard | K |
+| The platform's faces break into holes (wood) and its deck stays walkable and mantle-able; the second low wall is concrete and breaks on the second 18 m/s hit; at least 2 partitions and the door frames break | D |
+| Panel collapse: knocking out the cells under part of a panel leaves no floating cells; unsupported cells fall within `COLLAPSE_DELAY` | D |
+| Every pillar holds an overhead piece; snapping the pillar drops it within `PILLAR_COLLAPSE_DELAY`; it lands, persists, and knocks down a fighter standing under it (any fighter, the player included) | D |
+| Floor: a soft landing marks nothing, a hard landing cracks, a slam craters; damage accumulates (repeated hard landings on one spot reach a crater); the tiled plaza pops tiles as persistent pieces; a slam shatters glass within 2.5 m and hops light props; floor marks persist up to `FLOOR_DECAL_MAX` | D (marks drawn by F) |
+| Effects for every Round 6 event: splinters, glass, cardboard, fabric by surface; collapse creak, dust and boom; crack and crater decals by level; blast chips and dust; each on the event's frame, within budgets | F |
+| F0 performance with the full clutter plus 8 live, 20 dead and 150 debris: real time ≤ 8 ms average, ≤ 12 ms max | D + K (lead runs it) |
+| AI reaches the player from every spawn through the clutter; no enemy is stuck for more than 3 s in a 300 s Waves soak (C). Parkour in the new Yard: low clutter vaults, tall clutter blocks walking (M). The camera keeps the player visible through clutter and overhead pieces (E). The end-of-wave counts include clutter, collapses and floor marks (J). Soaks: 0 errors | C, M, E, J, lead |
+
+### Process (Round 6)
+
+Same rules as Round 5: own files only, private copies under `<scratchpad>/agent_<id>/`, `--fixed-fps 120`, every check proved by a test that prints measured numbers and goes through the real game path, superseded tests rewritten not weakened, requests in the report. Phase A (D, K, F) builds the content; phase B (C, M, E, J) adapts and verifies once the layout exists; then a review, the performance run and the soaks.
+
+### Round 6 status (done)
+
+- **Tests:** `tests/run_all.sh` → 183 tests (core 2, rig 18, anim 4, combat 27, ai 21, world 26, game 14, fx 24, grab 13, input 12, defence 5, move 10, clutter 7); the final run passed 182 and the one flaky check (`defence/test_focus_income`, a launcher read during the launch hitstop) was fixed and passes 5/5.
+- **What's in the Yard:** 32 courtyard clutter objects of all 11 kinds (lobby, market, garden, pillar groups) plus side-room clutter (56 total); breakable platform skirts, two partitions, both low walls, 9 door frames with falling lintels, a 160 kg beam and sign on every pillar, a tiled plaza, and a floor that cracks, craters and turns to rubble. Everything stays for the round; `DEBRIS_MAX` 250.
+- **Performance** (full clutter, 8 live, 20 dead, 150 debris): real time 2.85 ms avg / 6.21 ms max (with the editor and a game instance running); fixed fps 2.04 / 4.13. Budget 8 / 12.
+- **Soaks:** Waves 180 s and Duel 120 s, 0 errors; bodies break and crack clutter in normal play.
+- **AI:** no enemy stalls more than 3 s in 300 s Waves soaks over 8 seeds (worst 2.5 s); navigation keeps a wide-body layer and refreshes on every break and collapse.
+- **Movement through clutter:** steps keep 100% of a sprint, vaults keep 90%, sprinting smashes glass and cardboard at 100%, tall clutter blocks walking; every courtyard object has a clear approach.

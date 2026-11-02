@@ -70,9 +70,12 @@ static func is_red(c: Color) -> bool:
 static func near(a: float, b: float, eps := 0.01) -> bool:
 	return absf(a - b) <= eps
 
+## A landed hit. Round 5: effects follow `tier` (HitInfo.Tier); NONE leaves the
+## legacy reaction (FLINCH) to decide.
 static func hit(victim: Node3D, move: StringName, pos: Vector3, dir: Vector3, damage: float,
-		energy: float, kind := &"strike") -> HitInfo:
+		energy: float, kind := &"strike", tier := HitInfo.Tier.NONE) -> HitInfo:
 	var h := HitInfo.new()
+	h.tier = tier
 	h.victim = victim
 	h.move_id = move
 	h.kind = kind
