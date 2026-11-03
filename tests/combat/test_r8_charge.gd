@@ -216,6 +216,8 @@ func _fresh() -> void:
 	release_inputs()
 	await wait_until(func() -> bool: return not _p.combat.is_attacking() and _p.can_act(), 3.0)
 	await wait_until(func() -> bool: return _p.combat.get_chain_count() == 0, 2.0)
+	# Round 9: the punch string is back at the jab only after R9_STRING_RESET idle.
+	await wait_until(func() -> bool: return _p.combat.get_string_index() == 0, Tuning.R9_STRING_RESET + 0.5)
 	await ticks(2)
 	_active.clear()
 	_starts.clear()

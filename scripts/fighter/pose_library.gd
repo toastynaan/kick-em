@@ -56,6 +56,10 @@ extends RefCounted
 ## launcher jump air_follow (move and hold). Lists: ROUND8_MOVE_IDS,
 ## ROUND8_HOLD_IDS, ROUND8_AIR_IDS.
 ##
+## Round 9 (docs/Round 9 — Playtest Fixes.md): axe_kick (Tuning.R9_AXE "f")
+## and air_axe ("air_frames"), ROUND9_MOVE_IDS / ROUND9_AIR_IDS. The axe kick
+## charges on heavy_leg_kick_load (charge_load_of(&"axe_kick")).
+##
 ## Joint limits (Round 5): compile() fits every pose inside the ragdoll's soft
 ## ranges (HumanoidRig.JOINT_LIMITS minus LIMIT_MARGIN): elbows / knees swivel
 ## to a legal plane, hinges keep their axis and range, a chest turn past its
@@ -109,6 +113,8 @@ const STRIKE_BONES := {
 	&"heavy_roundhouse": [&"RightFoot", &"RightLowerLeg"],
 	# Round 8 air strikes.
 	&"air_jab": [&"LeftHand"], &"air_cross": [&"RightHand"], &"air_kick": [&"RightFoot", &"RightLowerLeg"],
+	# Round 9 axe kick.
+	&"axe_kick": [&"RightFoot", &"RightLowerLeg"], &"air_axe": [&"RightFoot", &"RightLowerLeg"],
 }
 
 const ALIAS := {
@@ -1489,6 +1495,67 @@ const POSES := {
 		"lfist": Vector3(-0.30, 1.10, 0.12), "lelbow": Vector3(-0.6, -0.4, 1), "rfist": Vector3(0.16, 1.92, -0.36), "relbow": Vector3(1, 0.2, 0.3),
 		"lul": Vector3(-12, 0, -4), "lll": Vector3(-45, 0, 0), "lf": Vector3(-30, 0, 0),
 		"rul": Vector3(110, 0, 6), "rll": Vector3(-115, 0, 0), "rf": Vector3(-15, 0, 0)},
+	# --- Round 9 axe kick (docs/Round 9 — Playtest Fixes.md section 3): the
+	# right knee chambers, the straight leg rises in front and a little outside
+	# (the hips turn the right side forward, the chest turns back square) to
+	# its apex over the head, then the heel chops straight down. The apex is
+	# capped by the joints: hip flex 125 deg and a ~0.9 m hip height put the
+	# ankle at ~1.75 m (toes ~1.9 m), level with the top of the head, which
+	# the lean-back lowers. Ground poses are IK (rankle), so a yaw aim turns
+	# the whole kick; the air ones are joint rotations like the other air poses.
+	&"axe_chamber": {"pos": Vector3(0, -0.02, 0.05), "hips": Vector3(12, 18, 0), "spine": Vector3(-6, 0, 0),
+		"chest": Vector3(-2, -14, 0), "head": Vector3(-6, 0, 0),
+		"lfist": Vector3(-0.16, 1.44, -0.30), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.22, 1.32, -0.08), "relbow": Vector3(0.6, -1, 0.3),
+		"lankle": Vector3(-0.10, 0.10, -0.10), "lknee": Vector3(-0.1, 0, -1), "lfp": -10.0,
+		"rankle": Vector3(0.26, 0.80, -0.22), "rknee": Vector3(0.5, 0.7, -1), "rf": Vector3(-20, 0, 0)},
+	# Apex: on the ball of the standing foot, hips pitched back 45 deg (the
+	# spine and chest take most of it back), the right foot pointed.
+	&"axe_up": {"pos": Vector3(0, 0.05, 0.12), "hips": Vector3(45, 30, 0), "spine": Vector3(-10, 0, 0),
+		"chest": Vector3(-8, -26, 0), "head": Vector3(-26, 0, 0),
+		"lfist": Vector3(-0.42, 1.30, -0.18), "lelbow": Vector3(-1, -0.4, 0.2), "rfist": Vector3(0.36, 1.16, 0.12), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.18, -0.12), "lknee": Vector3(-0.1, 0, -1), "lfp": -45.0,
+		"rankle": Vector3(0.30, 1.74, -0.06), "rknee": Vector3(0.3, 0.2, -1), "rf": Vector3(-40, 0, 0)},
+	# Contact: the flexed heel driving down at ~1.4 m, ~0.7 m in front (chest
+	# to head of a lifted body), the arms pulling down with it.
+	&"axe_hit": {"pos": Vector3(0, -0.01, 0.06), "hips": Vector3(24, 14, 0), "spine": Vector3(-10, 0, 0),
+		"chest": Vector3(-6, -12, 0), "head": Vector3(-18, 0, 0),
+		"lfist": Vector3(-0.30, 1.28, -0.20), "lelbow": Vector3(-0.9, -0.5, 0.2), "rfist": Vector3(0.30, 1.14, 0.08), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.13, -0.10), "lknee": Vector3(-0.1, 0, -1), "lfp": -25.0,
+		"rankle": Vector3(0.12, 1.42, -0.62), "rknee": Vector3(0, 1, 0), "rf": Vector3(20, 0, 0)},
+	&"axe_thru": {"pos": Vector3(0, -0.04, 0.03), "hips": Vector3(12, 8, 0), "spine": Vector3(-10, 0, 0),
+		"chest": Vector3(-6, -8, 0), "head": Vector3(-8, 0, 0),
+		"lfist": Vector3(-0.22, 1.30, -0.26), "lelbow": Vector3(-0.8, -0.6, 0.3), "rfist": Vector3(0.26, 1.18, 0.0), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.10, -0.10), "lknee": Vector3(-0.1, 0, -1), "lfp": -10.0,
+		"rankle": Vector3(0.10, 0.98, -0.76), "rknee": Vector3(0, 1, 0), "rf": Vector3(20, 0, 0)},
+	# Downswing finish: the heel low in front, then the foot plants forward.
+	&"axe_down": {"pos": Vector3(0, -0.09, -0.02), "hips": Vector3(-2, 4, 0), "spine": Vector3(-10, 0, 0),
+		"chest": Vector3(-6, -6, 0), "head": Vector3(4, 0, 0),
+		"lfist": Vector3(-0.14, 1.40, -0.30), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.20, 1.32, -0.12), "relbow": Vector3(0.6, -1, 0.3),
+		"lankle": Vector3(-0.10, 0.08, -0.06), "lknee": Vector3(-0.1, 0, -1),
+		"rankle": Vector3(0.10, 0.24, -0.60), "rknee": Vector3(0, 0.3, -1), "rfp": 10.0},
+	&"axe_plant": {"pos": Vector3(0, -0.08, -0.06), "hips": Vector3(0, -6, 0), "spine": Vector3(-6, 0, 0),
+		"chest": Vector3(-4, -6, 0), "head": Vector3(6, 10, 0),
+		"lfist": Vector3(-0.10, 1.44, -0.32), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.14, 1.40, -0.20), "relbow": Vector3(0.5, -1, 0.4),
+		"lankle": Vector3(-0.12, 0.08, 0.02), "lknee": Vector3(-0.15, 0, -1),
+		"rankle": Vector3(0.12, 0.08, -0.44), "rknee": Vector3(0.1, 0, -1)},
+	# Air axe: both knees tucked, the right one higher; the straight leg
+	# snaps up over the lean-back, then chops down onto the lifted body.
+	&"air_axe_tuck": {"hips": Vector3(-4, 6, 0), "spine": Vector3(-10, 0, 0), "chest": Vector3(-6, -8, 0), "head": Vector3(10, 4, 0),
+		"lfist": Vector3(-0.12, 1.42, -0.30), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.16, 1.36, -0.18), "relbow": Vector3(0.6, -1, 0.4),
+		"lul": Vector3(90, 0, -6), "lll": Vector3(-128, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(110, 0, 10), "rll": Vector3(-135, 0, 0), "rf": Vector3(-25, 0, 0)},
+	&"air_axe_up": {"hips": Vector3(34, 14, 0), "spine": Vector3(-8, 0, 0), "chest": Vector3(-4, -12, 0), "head": Vector3(-24, 0, 0),
+		"lfist": Vector3(-0.36, 1.30, -0.16), "lelbow": Vector3(-1, -0.4, 0.2), "rfist": Vector3(0.34, 1.18, 0.10), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lul": Vector3(70, 0, -6), "lll": Vector3(-115, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(123, 0, 0), "rll": Vector3(-4, 0, 0), "rf": Vector3(-40, 0, 0)},
+	&"air_axe_hit": {"hips": Vector3(14, 8, 0), "spine": Vector3(-6, 0, 0), "chest": Vector3(-4, -8, 0), "head": Vector3(-16, 0, 0),
+		"lfist": Vector3(-0.26, 1.28, -0.20), "lelbow": Vector3(-0.9, -0.5, 0.2), "rfist": Vector3(0.28, 1.16, 0.06), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lul": Vector3(76, 0, -6), "lll": Vector3(-120, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(102, 0, 4), "rll": Vector3(-4, 0, 0), "rf": Vector3(20, 0, 0)},
+	&"air_axe_low": {"hips": Vector3(2, 4, 0), "spine": Vector3(-10, 0, 0), "chest": Vector3(-6, -6, 0), "head": Vector3(-4, 0, 0),
+		"lfist": Vector3(-0.18, 1.34, -0.28), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.22, 1.28, -0.08), "relbow": Vector3(0.6, -1, 0.4),
+		"lul": Vector3(82, 0, -6), "lll": Vector3(-122, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(50, 0, 4), "rll": Vector3(-14, 0, 0), "rf": Vector3(15, 0, 0)},
 }
 
 const MOVES := {
@@ -1709,6 +1776,19 @@ const MOVES := {
 	## Launcher jump (play_timed over the follow, ~R8_AIR_FOLLOW_TIME, or
 	## hold_pose until the first air strike).
 	&"air_follow": {"timed": Vector3(0.25, 0.6, 0.15), "keys": [[0, 1.0, &"air_follow_rise", &"snap"], [1, 1.0, &"air_follow_rise"]]},
+	# =========================================================================
+	# Round 9 (agent P): the axe kick, play_move on Tuning.R9_AXE frames (tap
+	# "f"; air_axe on "air_frames"). Contact on the first active frame, the
+	# heel still dropping through the active frames. The light leg-kick load
+	# opens the tap (starting posture); released from heavy_leg_kick_load
+	# (charge_load_of(&"axe_kick")), the keys up to it are skipped and the
+	# load goes through the chamber into the upswing.
+	# =========================================================================
+	&"axe_kick": {"keys": [[0, 0.12, &"hlk_load", &"smooth", 0.3], [0, 0.42, &"axe_chamber"], [0, 0.8, &"axe_up"],
+		[1, 0.0, &"axe_hit", &"snap"], [1, 1.0, &"axe_thru", &"linear"], [2, 0.3, &"axe_down"], [2, 0.6, &"axe_plant"],
+		[2, 0.9, &"stance"]]},
+	&"air_axe": {"keys": [[0, 0.35, &"air_axe_tuck", &"snap"], [0, 0.8, &"air_axe_up"], [1, 0.0, &"air_axe_hit", &"snap"],
+		[1, 1.0, &"air_axe_hit"], [2, 0.35, &"air_axe_low"], [2, 0.8, &"air_tuck"]]},
 }
 
 ## play_timed() split of a move's length into startup / active / recovery when
@@ -1854,15 +1934,25 @@ const ROUND8_HOLD_IDS: Array[StringName] = [&"heavy_jab_load", &"heavy_cross_loa
 ## The charge-load hold of a Round 8 strike (&"jab" -> &"heavy_jab_load",
 ## &"gut_punch" -> &"gut_punch_load"); &"" if it has none.
 static func charge_load_of(move_id: StringName) -> StringName:
+	if CHARGE_LOAD_SHARED.has(move_id):
+		return CHARGE_LOAD_SHARED[move_id]
 	for h: StringName in [StringName("heavy_" + String(move_id) + "_load"), StringName(String(move_id) + "_load")]:
 		if HOLDS.has(h) and HOLDS[h].get("by_charge", false):
 			return h
 	return &""
 
-## Every move id (older rounds, Round 5, Round 7 and Round 8).
+## Round 9 ids (docs/Round 9 — Playtest Fixes.md): play_move on
+## Tuning.R9_AXE frames ("f" for axe_kick, "air_frames" for air_axe).
+const ROUND9_MOVE_IDS: Array[StringName] = [&"axe_kick", &"air_axe"]
+const ROUND9_AIR_IDS: Array[StringName] = [&"air_axe"]
+## Strikes that charge on another move's load (the axe kick is the leg kick
+## on a lifted body: the leg-kick load is held while charging).
+const CHARGE_LOAD_SHARED := {&"axe_kick": &"heavy_leg_kick_load"}
+
+## Every move id (older rounds, Round 5, Round 7, Round 8 and Round 9).
 static func all_move_ids() -> Array[StringName]:
 	var out: Array[StringName] = ALL_MOVE_IDS.duplicate()
-	for id in ROUND5_MOVE_IDS + ROUND7_MOVE_IDS + ROUND8_MOVE_IDS:
+	for id in ROUND5_MOVE_IDS + ROUND7_MOVE_IDS + ROUND8_MOVE_IDS + ROUND9_MOVE_IDS:
 		if not out.has(id):
 			out.append(id)
 	return out
@@ -1886,7 +1976,7 @@ const NO_AIM: Array[StringName] = [&"leg_sweep", &"throw", &"backfist", &"e_swee
 ## toward the target but never raises or lowers them (a gut punch stays at the
 ## stomach, a leg kick at the thigh, a roundhouse at the head).
 const AIM_YAW_ONLY: Array[StringName] = [&"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse",
-	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse"]
+	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse", &"axe_kick"]
 
 ## IK target keys of each strike bone (aiming).
 const AIM_LIMB := {&"LeftHand": "lfist", &"RightHand": "rfist", &"LeftFoot": "lankle", &"RightFoot": "rankle"}

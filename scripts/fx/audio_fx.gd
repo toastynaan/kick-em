@@ -37,6 +37,11 @@ extends Node
 ##   accents), guard_break (pressure_broken), pressure_tick, air_pop (air_hit),
 ##   dazed (loop while broken). The charge hum follows c; charge_release is the
 ##   release whoosh, by c.
+## Round 9 (Playtest fixes): guard_crackle (the broken loop: a guard break no
+##   longer dazes, so the loop is a quiet electric crackle on the guard; the
+##   dazed loop plays instead when Tuning.R9_BROKEN_STUN), axe_crack (the axe
+##   kick's heel crack, a hit layer, heavier when charged). A spike's floor
+##   boom grows with its blast radius (a charged axe kick's is wider).
 ## Slow motion (Round 5, F0): AudioServer.playback_speed_scale is GLOBAL in
 ##   4.8: AudioStreamPlaybackResampled multiplies every playback's resample
 ##   step by it, whatever bus the player sends to, so a bus alone cannot keep
@@ -102,6 +107,8 @@ const IDS: Array[StringName] = [
 	# Round 8 (Charge and pressure)
 	&"charge_tick", &"charge_full", &"charge_fizzle", &"hit_charged", &"hit_broken", &"guard_break",
 	&"pressure_tick", &"air_pop", &"dazed",
+	# Round 9 (Playtest fixes)
+	&"guard_crackle", &"axe_crack",
 ]
 ## Round 6: a body hitting a clutter surface layers that surface's knock.
 const SURFACE_IMPACT := {&"glass": &"strike_glass", &"cardboard": &"strike_cardboard", &"fabric": &"strike_fabric",
@@ -135,7 +142,7 @@ const STRIKE_MIN_DB := -7.0       ## the weakest strike (a jab) is at most this 
 const STRIKE_HOLE_DB := -3.0      ## a hole layers the surface's break sound this much quieter
 const STRIKE_CRACK_DB := -6.0     ## a crack layers the crack sound
 ## Ids synthesised as seamless loops (played until stopped).
-const LOOP_IDS: Array[StringName] = [&"charge_hum", &"wind", &"dazed"]
+const LOOP_IDS: Array[StringName] = [&"charge_hum", &"wind", &"dazed", &"guard_crackle"]
 
 ## Charge hum: pitch and level (dB). Round 8: they follow the charge amount c
 ## continuously from the first entry (c = 0) to the last (c = 1); the middle
@@ -210,6 +217,8 @@ const BASE_DB := {
 	# Round 8: the guard break is the loudest moment; ticks and the dazed loop stay under everything.
 	&"charge_tick": -9.0, &"charge_full": -4.0, &"charge_fizzle": -6.0, &"hit_charged": -1.0, &"hit_broken": 0.0,
 	&"guard_break": 1.5, &"pressure_tick": -11.0, &"air_pop": -3.0, &"dazed": -14.0,
+	# Round 9: the crackle stays under everything like the dazed loop; the heel crack cuts through the hit.
+	&"guard_crackle": -15.0, &"axe_crack": 0.0,
 }
 
 ## Energy (J) at which a sound plays at its base level; louder above, quieter below.
@@ -650,6 +659,8 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"pressure_tick": _make_pressure_tick(s)
 		&"air_pop": _make_air_pop(s)
 		&"dazed": _make_dazed(s)
+		&"guard_crackle": _make_guard_crackle(s)
+		&"axe_crack": _make_axe_crack(s)
 		_:
 			return PackedFloat32Array()
 	s.normalize(PEAK)
@@ -2626,6 +2637,13 @@ const R7_PROP_THROW_DB := -2.0     ## a prop is lighter than a body
 const R7_RAM_LAUNCH_BOOM_DB := -3.0
 const R7_SPIKE_BOOM_DB := 3.0
 const R7_SPIKE_BOOM_PITCH := 0.82
+## Round 9: dB per unit of spike heft over 1 (FXRules.spike_heft), and the
+## pitch drop (pitch x heft^-this).
+const R9_SPIKE_HEFT_DB := 6.0
+const R9_SPIKE_HEFT_PITCH := 0.35
+## Round 9: the axe kick's heel crack (dB, pitch): tap, charged at c = 0, at c = 1.
+const R9_AXE_DB := Vector3(-1.0, 1.0, 3.5)
+const R9_AXE_PITCH := Vector3(1.08, 0.97, 0.86)
 const STEP_CRUNCH_REACH := 0.9
 const R7_STEP_CRUNCH_DB := Vector2(-2.0, 1.0)  ## at R7_SPEED_CRACK_FROM .. the top cap
 
@@ -2695,7 +2713,18 @@ static func r8_accent_layers(info: HitInfo) -> Array:
 			lerpf(R8_CHARGED_PITCH.x, R8_CHARGED_PITCH.y, c)])
 	if info.broken_bonus:
 		out.append([&"hit_broken", R8_BROKEN_DB, 1.0])
+	out.append_array(axe_layers(info))
 	return out
+
+## Round 9: the axe kick's heel crack, [[id, dB, pitch]] (or []): louder and
+## deeper for a charged one, more with c.
+static func axe_layers(info: HitInfo) -> Array:
+	if not FXRules.is_axe_kick(info):
+		return []
+	if not FXRules.is_charged(info):
+		return [[&"axe_crack", R9_AXE_DB.x, R9_AXE_PITCH.x]]
+	var c := clampf(info.charge, 0.0, 1.0)
+	return [[&"axe_crack", lerpf(R9_AXE_DB.y, R9_AXE_DB.z, c), lerpf(R9_AXE_PITCH.y, R9_AXE_PITCH.z, c)]]
 
 ## A Round 7 player hit: every layer on the hit's physics frame. The attacker
 ## owns the sound (the player's hits keep real-time pitch in slow motion).
@@ -2993,14 +3022,19 @@ func _step_crunch(position: Vector3) -> void:
 ## The pursuit spike's floor impact (B's shockwave with no knockdown radius;
 ## a heavy landing's shockwave is the landing's): a big floor boom, the heavy
 ## crumble and a low thump. The spiker (the player) owns it.
-func _on_shockwave(fighter: Node3D, position: Vector3, _stumble_radius: float, knockdown_radius: float) -> void:
+## Round 9: the blast radius sets the heft (FXRules.spike_heft): a wider blast
+## (a charged axe kick) booms louder and deeper.
+func _on_shockwave(fighter: Node3D, position: Vector3, stumble_radius: float, knockdown_radius: float) -> void:
 	if not FXRules.is_spike_shockwave(knockdown_radius):
 		return
 	var src: Node3D = fighter if is_instance_valid(fighter) else null
-	_play_fresh(&"boom", position, R7_SPIKE_BOOM_DB, R7_SPIKE_BOOM_PITCH, src)
-	_play_fresh(&"land_heavy", position, 0.0, 0.95, src)
-	_play_fresh(&"thump_low", position, 0.0, 0.9, src)
-	_log_r7(&"spike", [&"boom", &"land_heavy", &"thump_low"], [R7_SPIKE_BOOM_DB, 0.0, 0.0])
+	var heft := FXRules.spike_heft(stumble_radius)
+	var db := R7_SPIKE_BOOM_DB + R9_SPIKE_HEFT_DB * (heft - 1.0)
+	var low := pow(heft, -R9_SPIKE_HEFT_PITCH)
+	_play_fresh(&"boom", position, db, R7_SPIKE_BOOM_PITCH * low, src)
+	_play_fresh(&"land_heavy", position, 0.0, 0.95 * low, src)
+	_play_fresh(&"thump_low", position, R9_SPIKE_HEFT_DB * 0.5 * (heft - 1.0), 0.9 * low, src)
+	_log_r7(&"spike", [&"boom", &"land_heavy", &"thump_low"], [db, 0.0, R9_SPIKE_HEFT_DB * 0.5 * (heft - 1.0)])
 
 ## Footstep crack at speed: a small gritty crunch of the floor giving underfoot.
 func _make_step_crunch(s: _Synth) -> void:
@@ -3082,6 +3116,10 @@ var _daze_start := PackedInt32Array()      ## clock ms
 var _daze_db := PackedFloat32Array()
 var _daze_out: Array[bool] = []            ## fading out
 var _daze_seen: Array[bool] = []           ## is_broken() was seen true
+var _daze_id: Array[StringName] = []       ## the loop each slot plays (dazed or guard_crackle)
+## Round 9: the break dazes (the Round 8 dazed loop) instead of crackling on the
+## guard. Tuning.R9_BROKEN_STUN; tests may flip it.
+var broken_stun: bool = Tuning.R9_BROKEN_STUN
 var _r8_connected := false
 
 func _connect_round8() -> void:
@@ -3101,6 +3139,7 @@ func _connect_round8() -> void:
 		_daze_fighter.append(null)
 		_daze_out.append(false)
 		_daze_seen.append(false)
+		_daze_id.append(&"dazed")
 	_daze_start.resize(R8_DAZED_POOL)
 	_daze_db.resize(R8_DAZED_POOL)
 	GameEvents.charge_full.connect(_on_charge_full)
@@ -3147,15 +3186,16 @@ func _pressure_tick(info: HitInfo) -> void:
 	_play_fresh(&"pressure_tick", _hit_point(info), db, pitch, info.attacker)
 	_log_r8(&"pressure_tick", [&"pressure_tick"], [db], [pitch], p)
 
-## The guard break, then the dazed loop on the broken enemy. The attacker (the
+## The guard break on the guard, then the broken loop on the enemy (Round 9:
+## the guard crackle; the dazed loop when broken_stun). The attacker (the
 ## player) owns the break sound: it keeps its pitch in slow motion.
 func _on_pressure_broken(fighter: Node3D, attacker: Node3D) -> void:
 	if not is_instance_valid(fighter):
 		return
-	var at := FXRules.upper_body(fighter)
+	var at := FXRules.guard_point(fighter)
 	_play_fresh(&"guard_break", at, R8_BREAK_DB, 1.0, attacker if is_instance_valid(attacker) else null)
-	_start_dazed(fighter)
-	_log_r8(&"pressure_broken", [&"guard_break", &"dazed"], [R8_BREAK_DB, R8_DAZED_DB], [1.0, 1.0])
+	var loop := _start_dazed(fighter)
+	_log_r8(&"pressure_broken", [&"guard_break", loop], [R8_BREAK_DB, R8_DAZED_DB], [1.0, 1.0])
 
 func _on_pressure_recovered(fighter: Node3D) -> void:
 	_stop_dazed(fighter, false)
@@ -3185,10 +3225,19 @@ static func air_pop_pitch(count: int) -> float:
 
 ## True while `fighter`'s dazed loop plays (tests).
 func is_dazed_playing(fighter: Node3D) -> bool:
+	return is_broken_loop_playing(fighter) and broken_loop_id(fighter) == &"dazed"
+
+## True while `fighter`'s broken loop (either kind) plays (tests).
+func is_broken_loop_playing(fighter: Node3D) -> bool:
 	var i := _daze_slot(fighter)
 	return i >= 0 and not _daze_out[i] and _daze_players[i].playing
 
-## Dazed loops playing (tests, debug).
+## The broken loop `fighter` plays (&"guard_crackle" or &"dazed"), or &"".
+func broken_loop_id(fighter: Node3D) -> StringName:
+	var i := _daze_slot(fighter)
+	return _daze_id[i] if i >= 0 else &""
+
+## Broken loops playing, either kind (tests, debug).
 func active_dazed() -> int:
 	var n := 0
 	for i in _daze_fighter.size():
@@ -3204,9 +3253,10 @@ func _daze_slot(fighter: Node3D) -> int:
 			return i
 	return -1
 
-func _start_dazed(fighter: Node3D) -> void:
+## Starts the broken loop on `fighter`; returns its id (&"" when none).
+func _start_dazed(fighter: Node3D) -> StringName:
 	if _quitting or _daze_players.is_empty():
-		return
+		return &""
 	var slot := _daze_slot(fighter)
 	if slot < 0:
 		var oldest := 0
@@ -3218,22 +3268,30 @@ func _start_dazed(fighter: Node3D) -> void:
 				oldest = i
 		if slot < 0:
 			slot = oldest
-	var stream := _pick_loop(&"dazed")
+	var id: StringName = &"dazed" if broken_stun else &"guard_crackle"
+	var stream := _pick_loop(id)
 	if stream == null:
-		return
+		return &""
 	var h := _daze_players[slot]
 	_daze_fighter[slot] = fighter
+	_daze_id[slot] = id
 	_daze_start[slot] = clock_ms()
 	_daze_out[slot] = false
 	_daze_seen[slot] = false
 	_daze_db[slot] = R8_DAZED_DB - 18.0  # fades in
 	h.stream = stream
-	h.global_position = FXRules.head_of(fighter)
-	h.volume_db = BASE_DB[&"dazed"] + _daze_db[slot]
+	h.global_position = _broken_loop_pos(slot)
+	h.volume_db = BASE_DB[id] + _daze_db[slot]
 	h.pitch_scale = _rng.randf_range(0.95, 1.05)
 	h.play()
 	_used = true
-	sound_played.emit(&"dazed", h.global_position)
+	sound_played.emit(id, h.global_position)
+	return id
+
+## Where a broken loop sits: the head (dazed) or the guard (guard crackle).
+func _broken_loop_pos(i: int) -> Vector3:
+	var f: Node3D = _daze_fighter[i]
+	return FXRules.head_of(f) if _daze_id[i] == &"dazed" else FXRules.guard_point(f)
 
 func _stop_dazed(fighter: Node3D, at_once: bool) -> void:
 	var i := _daze_slot(fighter)
@@ -3271,8 +3329,8 @@ func _update_dazed(delta: float) -> void:
 			_free_dazed(i)
 			continue
 		var h := _daze_players[i]
-		h.global_position = FXRules.head_of(f)
-		h.volume_db = BASE_DB[&"dazed"] + _daze_db[i]
+		h.global_position = _broken_loop_pos(i)
+		h.volume_db = BASE_DB[_daze_id[i]] + _daze_db[i]
 
 # --- Round 8 sound designs ---------------------------------------------------------------
 
@@ -3366,3 +3424,45 @@ func _make_dazed(s: _Synth) -> void:
 			v += sin(p) * tw * (0.5 if j == 0 else 0.3)
 		s.buf[k] = v * (0.8 + 0.2 * sin(TAU * 1.0 * t))
 
+
+# --- Round 9 sound designs ---------------------------------------------------------------
+
+## Guard crackle: a quiet 1 s seamless loop of a cracked guard. Sparse electric
+## snaps (short bright noise ticks with a high ping) over a faint 100 Hz buzz
+## that flickers 6 times a second (whole cycles in the loop; no tick spans the
+## loop point).
+func _make_guard_crackle(s: _Synth) -> void:
+	var n := int(1.0 * _Synth.SR)
+	s.buf.resize(n)
+	for k in n:
+		var t := k / _Synth.SR
+		var flick := pow(0.5 + 0.5 * sin(TAU * 6.0 * t + 0.7 * sin(TAU * 2.0 * t)), 4.0)
+		s.buf[k] = tanh(2.5 * sin(TAU * 100.0 * t)) * 0.06 * (0.3 + 0.7 * flick)
+	var a := 1.0 - exp(-TAU * 9000.0 / _Synth.SR)
+	var hp := 1.0 - exp(-TAU * 2500.0 / _Synth.SR)
+	var snaps := 16
+	for _c in snaps:
+		var t0 := s.rr(0.01, 0.95)
+		var dur := s.rr(0.003, 0.012)
+		var amp := s.rr(0.35, 1.0)
+		var ping := s.rr(3200.0, 5200.0)
+		var i0 := int(t0 * _Synth.SR)
+		var m := int(dur * _Synth.SR)
+		var lp := 0.0
+		var lo := 0.0
+		for j in m:
+			var env := exp(-float(j) / (m * 0.3))
+			lp += a * (s.noise() - lp)
+			lo += hp * (lp - lo)
+			s.buf[i0 + j] += ((lp - lo) * 1.4 + 0.3 * sin(TAU * ping * j / _Synth.SR)) * env * amp
+
+## Axe crack: the heel chopping down. A hard broadband snap, a splintering
+## crackle, a bright heel click and a fast-falling chop thunk (under 0.3 s).
+func _make_axe_crack(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.03, 1.0, 14000.0, 9000.0, 2500.0, 0.0001, 0.004)
+	s.crackle(0.002, 0.07, 0.6, 2600.0, 0.025, 9000.0)
+	s.tone(0.0, 0.07, s.rr(1900.0, 2100.0), s.rr(950.0, 1050.0), 0.012, 0.35, 0.0002, 0.012)
+	var f := s.rr(120.0, 135.0)
+	s.tone(0.0, 0.28, f * 2.4, f * 0.55, 0.018, 0.95, 0.0005, 0.06)
+	s.noise_burst(0.0, 0.12, 0.5, 2200.0, 300.0, 0.0, 0.0005, 0.03)
+	s.drive(2.3)

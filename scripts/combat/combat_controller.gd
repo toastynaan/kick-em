@@ -92,6 +92,32 @@ extends Node
 ##   debug_air_hits hangs the player and the body R8_AIR_HANG; a kick launches
 ##   the body at R8_AIR_KICK_LAUNCH, a punch with the stick pulled back spikes it.
 ##
+## Round 9 (docs/Round 9 — Playtest Fixes.md; wins over Round 8):
+## - Hook: a charged hook's push, knockdown and launch go along the hit (no
+##   longer sideways); right after its knockdown or launch the victim spins
+##   (Fighter.add_spin: Tuning.R9_HOOK_SPIN lerped by c, the sign following the
+##   swing: a left hook turns the victim to its left), and its knockdown hops
+##   the body R9_HOOK_HOP up so the feet leave the floor. The tap is unchanged.
+## - The punch string goes back to the jab only after Tuning.R9_STRING_RESET
+##   with no punch press (counted from the press, or the end of that punch when
+##   later). Whiffs, blocked hits, being hit and the chain ending keep it; a
+##   cancel still gives the position back. The chain keeps its own rules.
+## - Axe kick: a leg kick press whose target is lifted (Fighter.is_lifted) plays
+##   MoveLibrary.AXE (tap or charged, Tuning.R9_AXE): a spike straight down
+##   (SPIKE_DRIFT along the hit) at its speed, with the floor shockwave of its
+##   "blast" radius; from the ground it auto-connects within reach horizontally
+##   and up to R9_AXE "reach_up" above the feet. In the air combo the leg kick is
+##   the air axe kick. No payoffs.
+## - Broken = guard broken: with Tuning.R9_BROKEN_STUN false a break shows no
+##   daze (no Fighter.react &"broken") and the fighter keeps moving and
+##   attacking; it cannot block or guard and takes the break bonus.
+## - Downed bodies: a player strike whose limb sweep touches a lying body
+##   (is_lying: knocked down, a launch at rest, getting up) hits it
+##   (Tuning.R9_GROUND_HIT, react &"ground", HitInfo.ground_strike): damage, a
+##   whole-body shove along the strike plus lift through the ragdoll, pressure,
+##   and the first such hit of a knockdown delays its get-up GROUND_HIT_HOLD.
+##   Never targeted, glided to or auto-connected.
+##
 ## Timing: move phases run in the fighter's own time (the player's in player
 ## time, full speed in any slow motion) and stop during its hitstop. Input
 ## windows (the tap, the charge, the chain grace) use TimeDirector.now() (real
@@ -202,6 +228,12 @@ const CHARGE_HOLD_FALLBACK: Array[StringName] = [&"power_charge"]
 const CHARGE_GLIDE_SLACK := 0.1
 ## s of break left below which a broken fighter's daze is not shown again after a hit reaction.
 const BROKEN_SHOW_MIN := 0.1
+# Round 9 (local; candidates for Tuning)
+## s the first strike on a downed body keeps it down longer (once per knockdown; Round 3's GROUND_HOLD).
+const GROUND_HIT_HOLD := 0.6
+## Hitstop (real s, attacker only) and weight (tap, charged at c = 1) of a strike on a downed body.
+const GROUND_HIT_HITSTOP := 0.05
+const GROUND_HIT_WEIGHT := Vector2(0.3, 0.5)
 
 var fighter: Fighter
 var blocking := false
@@ -278,6 +310,7 @@ var _chain_count := 0
 var _chain_until := -INF        ## real time the idle chain drops
 var _string_next := 0           ## punch string position of the next punch (0 jab, 1 cross, 2 hook)
 var _cur_string := -1           ## string position of the punch in progress (-1: not a string punch)
+var _string_last := -INF        ## Round 9: real time of the last punch press (or the end of that punch)
 var _combat_target: Fighter
 # Counter window (enemy attacks)
 var _window_open := false
@@ -291,6 +324,7 @@ var _guard_stun := false        ## blockstun came from a real guard (stays block
 var _taken := 0                 ## hits taken in the current combo (from anyone)
 var _taken_last := -INF
 var _taken_stun := 0.0          ## Round 5: stun taken in the current combo (break-away at COMBO_ESCAPE_STUN)
+var _getup_extended := false    ## Round 9: a strike on this downed body already delayed its get-up
 var _escape_guard_until := 0.0  ## break-away auto-guard
 var _block_held := false
 var _slide_left := 0.0          ## guard push-back slide (own time s)
@@ -782,9 +816,10 @@ func freeze_until(real_time: float) -> void:
 # Starting moves
 # =============================================================================
 
-## Free to start a move: idle, able to act, not broken open (Round 8).
+## Free to start a move: idle, able to act (Round 9: a broken fighter acts;
+## with Tuning.R9_BROKEN_STUN it cannot, as in Round 8).
 func _can_start() -> bool:
-	return _phase == Phase.IDLE and fighter.can_act() and not is_broken()
+	return _phase == Phase.IDLE and fighter.can_act() and not (Tuning.R9_BROKEN_STUN and is_broken())
 
 ## A held strike press charges (Round 8) for the player's buttons (through
 ## PlayerController or press()/release() directly) and for tests and the lab
@@ -810,12 +845,25 @@ func _move_for(action: int) -> StringName:
 			return &"roundhouse"
 	return &""
 
-## The punch string position a punch started now plays: it continues while the
-## chain is alive, else the jab.
+## The punch string position a punch started now plays (Round 9): it holds
+## until Tuning.R9_STRING_RESET passes with no punch press (from the press, or
+## the end of that punch when later), then the jab.
 func _string_index_now() -> int:
-	if _phase == Phase.IDLE and not _chain_alive(TimeDirector.now()):
+	if _cur_string < 0 and TimeDirector.now() - _string_last > Tuning.R9_STRING_RESET:
 		return 0
 	return _string_next
+
+## A string punch starts at position `idx`: the string moves on, its clock restarts.
+func _begin_string_punch(idx: int) -> void:
+	_cur_string = idx
+	_string_next = graph.next_index(idx)
+	_string_last = TimeDirector.now()
+
+## The leg kick on a lifted target is the axe kick (Round 9).
+static func _axe_for(id: StringName, tgt: Fighter) -> StringName:
+	if id == &"leg_kick" and _alive(tgt) and tgt.is_lifted():
+		return MoveLibrary.AXE
+	return id
 
 ## A strike press that can start now: the move (the punch string), the
 ## freeflow target, then the tap (glide or startup) with the charge decision
@@ -824,10 +872,11 @@ func _string_index_now() -> int:
 ## fires the string punch charged to full.
 func _start_strike(action: int, press_t: float) -> void:
 	var now := TimeDirector.now()
-	_tick_chain(now)  # a chain past its grace drops first (the punch string back to the jab)
+	_tick_chain(now)  # a chain past its grace drops first
 	var punch := action == Action.LIGHT or action == Action.HEAVY
 	var idx := _string_index_now()
-	var id := _move_for(action)
+	var tgt := _pick_freeflow_target()
+	var id := _axe_for(_move_for(action), tgt)  # Round 9: the leg kick on a lifted target
 	var m := MoveLibrary.get_move(id)
 	if m == null:
 		return
@@ -836,11 +885,9 @@ func _start_strike(action: int, press_t: float) -> void:
 	_press_t = press_t
 	_hold_pending = hold
 	if punch:
-		_cur_string = idx
-		_string_next = graph.next_index(idx)
+		_begin_string_punch(idx)
 	else:
 		_cur_string = -1
-	var tgt := _pick_freeflow_target()
 	if action == Action.HEAVY and m.r8:
 		_hold_pending = false
 		_fire_charged(id, 1.0, tgt, true)
@@ -952,7 +999,7 @@ func play_move(id: StringName, target: Fighter = null) -> bool:
 	_hold_pending = false
 	_cur_string = graph.index_of(id)
 	if _cur_string >= 0:
-		_string_next = graph.next_index(_cur_string)
+		_begin_string_punch(_cur_string)
 	var tgt: Fighter = target if _alive(target) else _pick_freeflow_target()
 	_launch_move(m, tgt, Tuning.R7_COUNTER_GLIDE if id == &"counter" else INF)
 	return true
@@ -971,7 +1018,7 @@ func play_charged(id: StringName, c: float, target: Fighter = null) -> bool:
 	_hold_pending = false
 	_cur_string = graph.index_of(id)
 	if _cur_string >= 0:
-		_string_next = graph.next_index(_cur_string)
+		_begin_string_punch(_cur_string)
 	_fire_charged(id, clampf(c, 0.0, 1.0), target if _alive(target) else null, true)
 	return true
 
@@ -1223,7 +1270,7 @@ static func charge_at(t0: float, now: float) -> float:
 ## scaling: jab, roundhouse). The HUD goes orange at the first, red at the last.
 static func _steps_for(id: StringName) -> Array[float]:
 	var out: Array[float] = []
-	var row: Dictionary = Tuning.R8_MOVES.get(id, {})
+	var row: Dictionary = MoveLibrary.r8_row(id)
 	if row.is_empty():
 		return out
 	var ch: Dictionary = row["charged"]
@@ -1600,8 +1647,8 @@ func _enter_active() -> void:
 		_hit_any = true
 
 ## Recovery: the chain cut on a hit (the move ends after R7_CHAIN_CUT of it);
-## a whiff or a blocked hit plays it in full, resets the punch string and ends
-## the chain. The follow step spreads over it.
+## a whiff or a blocked hit plays it in full and ends the chain (Round 9: the
+## punch string holds). The follow step spreads over it.
 func _enter_recovery() -> void:
 	_close_window()
 	_end_sprint_exception()
@@ -1626,6 +1673,8 @@ func _finish() -> void:
 	_end_sprint_exception()
 	_press_action = -1
 	_hold_pending = false
+	if _cur_string >= 0:
+		_string_last = TimeDirector.now()  # the string's idle clock runs from the end of the punch
 	_cur_string = -1
 	_locked_target = null
 	_target = null
@@ -1667,6 +1716,8 @@ func cancel() -> void:
 	var was_r7 := was_busy and _move != null and _move.r7
 	if was_busy and _cur_string >= 0 and _phase in [Phase.GLIDE, Phase.STARTUP, Phase.HOLD, Phase.CHARGE]:
 		_string_next = _cur_string
+	if _cur_string >= 0:
+		_string_last = TimeDirector.now()
 	_close_window()
 	_phase = Phase.IDLE
 	_registry.clear()
@@ -1751,9 +1802,19 @@ func _update_block_state() -> void:
 func get_chain_count() -> int:
 	return _chain_count if _chain_alive(TimeDirector.now()) else 0
 
-## Punch string position the next punch press will use: 0 jab, 1 cross, 2 hook.
+## Punch string position the next punch press will use: 0 jab, 1 cross, 2 hook
+## (the HUD's pips read it).
 func get_string_index() -> int:
 	return _string_index_now()
+
+## Round 9: real seconds on the clock R9_STRING_RESET runs on: since the last
+## punch press (or the end of that punch when later); 0 while a string punch is
+## in progress; capped at Tuning.R9_STRING_RESET (also before any punch). The
+## HUD fades the lit pip with it.
+func get_string_idle_time() -> float:
+	if _cur_string >= 0:
+		return 0.0
+	return clampf(TimeDirector.now() - _string_last, 0.0, Tuning.R9_STRING_RESET)
 
 ## Kept for older callers: the chain count.
 func get_combo_count() -> int:
@@ -1772,9 +1833,9 @@ func _tick_chain(now: float) -> void:
 	get_combat_target()
 
 ## The chain is over (grace ran out, a whiff, a blocked hit, or this fighter
-## was hit): chain_ended, the punch string back to the jab.
+## was hit): chain_ended. Round 9: the punch string keeps its place
+## (_string_index_now: only R9_STRING_RESET idle sends it back to the jab).
 func _end_chain() -> void:
-	_string_next = 0
 	if _chain_count <= 0:
 		return
 	var n := _chain_count
@@ -1937,6 +1998,7 @@ func _check_interceptions() -> void:
 func _detect_hits() -> void:
 	var space := fighter.get_world_3d().direct_space_state
 	var found := {}  # Fighter -> [dist, bone, pos]
+	var ground := {}  # Round 9: lying bodies the limbs touch -> [dist, bone, pos]
 	var m := _move
 	var hs := fighter.get_height_scale()
 	# 1. Striking limbs (PoseLibrary.STRIKE_BONES), each swept from the previous tick.
@@ -1950,7 +2012,7 @@ func _detect_hits() -> void:
 		var n := clampi(int(ceil(seg.length() / maxf(m.limb_radius, 0.05))), 1, 8)
 		for i in n + 1:
 			var p := prev.lerp(limb, float(i) / float(n))
-			_query(space, _q_sphere, Transform3D(Basis(), p), p, found)
+			_query(space, _q_sphere, Transform3D(Basis(), p), p, found, ground)
 		_prev_limbs[bone] = limb
 	# 2. Fallback: capsule forward along facing to the move's reach.
 	var fwd := fighter.get_forward()
@@ -1984,6 +2046,9 @@ func _detect_hits() -> void:
 		if m.air:
 			near = tgt.global_position.distance_to(fighter.global_position) \
 				<= Tuning.R8_AIR_STRIKE_RANGE + Tuning.R7_CONNECT_MARGIN
+		elif m.id == MoveLibrary.AXE:
+			# Round 9: the ground axe kick reaches a lifted body up to reach_up above the feet.
+			near = near and tgt.global_position.y - fighter.global_position.y <= float(Tuning.R9_AXE["reach_up"])
 		if near:
 			found[tgt] = [0.0, m.target_bone, _bone_pos(tgt, m.target_bone), true]
 	for victim: Fighter in found:
@@ -1991,6 +2056,14 @@ func _detect_hits() -> void:
 			continue
 		var rec: Array = found[victim]
 		_deliver(victim, rec[1], rec[2], rec.size() > 3)
+		if _phase != Phase.ACTIVE:
+			return
+	# 5. Round 9: lying bodies the striking limbs touched (contact only).
+	for victim: Fighter in ground:
+		if not is_instance_valid(victim) or _registry.has(victim.get_instance_id()):
+			continue
+		var gr: Array = ground[victim]
+		_deliver_ground(victim, gr[1], gr[2])
 		if _phase != Phase.ACTIVE:
 			return
 	if found.is_empty() and not _hit_any:
@@ -2180,8 +2253,10 @@ func _try_debris_kick() -> void:
 		v = fighter.get_forward() * DEBRIS_KICK_SPEED + Vector3.UP * 3.0
 	ThrownChunk.launch_body(body, v, fighter, DEBRIS_KICK_DAMAGE, &"debris_kick")
 
+## Hurtboxes the shape touches: valid victims into `found`; with `ground`
+## (the limb sweep only, Round 9), lying opponents into `ground`.
 func _query(space: PhysicsDirectSpaceState3D, shape: Shape3D, xform: Transform3D,
-		ref: Vector3, found: Dictionary) -> void:
+		ref: Vector3, found: Dictionary, ground = null) -> void:
 	_q_params.shape = shape
 	_q_params.transform = xform
 	_q_params.collide_with_areas = true
@@ -2192,14 +2267,25 @@ func _query(space: PhysicsDirectSpaceState3D, shape: Shape3D, xform: Transform3D
 		if area == null or not area.has_meta(&"fighter"):
 			continue
 		var f := area.get_meta(&"fighter") as Fighter
+		var into: Dictionary = found
 		if not _valid_victim(f):
-			continue
+			if ground == null or not _ground_victim(f):
+				continue
+			into = ground
 		var p := area.global_position
 		if area.get_child_count() > 0 and area.get_child(0) is Node3D:
 			p = (area.get_child(0) as Node3D).global_position
 		var d := p.distance_to(ref)
-		if not found.has(f) or (found[f][0] as float) > d:
-			found[f] = [d, area.get_meta(&"bone"), p]
+		if not into.has(f) or (into[f][0] as float) > d:
+			into[f] = [d, area.get_meta(&"bone"), p]
+
+## Round 9: a lying opponent (knocked down, a launch at rest, getting up) a
+## player strike's limb may hit by contact (never a target).
+func _ground_victim(f: Fighter) -> bool:
+	if f == null or not is_instance_valid(f) or f == fighter or f.team == fighter.team or f.is_dead() \
+			or _registry.has(f.get_instance_id()):
+		return false
+	return _move != null and _move.r7 and f.is_down() and f.combat != null and f.combat.is_lying()
 
 ## Downed bodies (knocked down, launched, getting up) are never struck by the
 ## player's moves (doc: Freeflow targeting); a lifted body is.
@@ -2226,7 +2312,9 @@ func _deliver(victim: Fighter, bone: StringName, pos: Vector3, auto := false) ->
 	if info.pursuit and fighter.defence != null and fighter.defence.has_method(&"on_pursuit_hit"):
 		fighter.defence.call(&"on_pursuit_hit", victim)
 	if info.react == &"spike":
-		_spiked[victim.get_instance_id()] = [victim, TimeDirector.now()]  # its floor impact is a shockwave
+		# Its floor impact is a shockwave (the axe kick's blast radius, else Round 7's).
+		_spiked[victim.get_instance_id()] = [victim, TimeDirector.now(),
+			float(info.get_meta(&"spike_blast", Tuning.R7_SPIKE_BLAST_RADIUS))]
 	if _move.r7:
 		_on_r7_landed(victim, info)
 	if _move.air:
@@ -2237,6 +2325,66 @@ func _deliver(victim: Fighter, bone: StringName, pos: Vector3, auto := false) ->
 		_air_follow_body = victim
 		_air_follow_t = TimeDirector.now()
 		_air_hits = 0
+
+## Round 9: a strike's limb touched a lying body (_ground_victim): the ground
+## hit (_build_ground_hit). No chain, no target change; not a whiff.
+func _deliver_ground(victim: Fighter, bone: StringName, pos: Vector3) -> void:
+	_registry[victim.get_instance_id()] = true
+	var info := _build_ground_hit(victim, bone, pos)
+	victim.take_hit(info)
+	_hit_any = true
+	last_dealt = info
+	hit_dealt.emit(info)
+
+## The ground hit (Tuning.R9_GROUND_HIT; a tap's numbers, a charged strike's
+## lerped by its c): react &"ground", HitInfo.ground_strike, flinch tier,
+## damage (combo scaled), pressure, and meta "ground_dv": the shove along the
+## strike (flat) plus the lift, which the victim adds to its ragdoll.
+func _build_ground_hit(victim: Fighter, bone: StringName, pos: Vector3) -> HitInfo:
+	var c := _strike_c if _move.charged else 0.0
+	var g: Dictionary = Tuning.R9_GROUND_HIT
+	var info := HitInfo.new()
+	info.attacker = fighter
+	info.victim = victim
+	info.move_id = _move.id
+	info.kind = &"strike"
+	var sdir := _strike_dir(victim)
+	var flat := Vector3(sdir.x, 0.0, sdir.z)
+	if flat.length_squared() < 1e-4:
+		flat = fighter.get_forward()
+	flat = flat.normalized()
+	info.set_meta(&"strike_dir", flat)
+	info.hit_direction = flat
+	info.hit_position = pos
+	info.hit_bone = bone
+	info.zone = BodyZones.of_bone(bone)
+	info.level = HitInfo.Level.LOW
+	info.react = &"ground"
+	info.ground_strike = true
+	info.victim_state = victim.get_react_state()
+	info.charged = _move.charged
+	info.charge = c
+	info.air = _move.air
+	info.tier = HitInfo.Tier.FLINCH
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.hitstop = GROUND_HIT_HITSTOP
+	info.weight = lerpf(GROUND_HIT_WEIGHT.x, GROUND_HIT_WEIGHT.y, c) if _move.charged else GROUND_HIT_WEIGHT.x
+	info.pressure = float(g["pressure"]) * Tuning.debug_pressure_mult
+	info.set_meta(&"guard_break", false)
+	var dmg_v: Vector2 = g["dmg"]
+	var shove_v: Vector2 = g["shove"]
+	var shove := lerpf(shove_v.x, shove_v.y, c) if _move.charged else shove_v.x
+	info.set_meta(&"ground_dv", flat * shove + Vector3.UP * float(g["lift"]))
+	var vc := victim.combat
+	var scale := combo_scale(vc.next_taken_index() if vc != null else 1)
+	info.damage = (lerpf(dmg_v.x, dmg_v.y, c) if _move.charged else dmg_v.x) * scale * _damage_mult()
+	info.damage_scale = scale
+	info.chain_index = (_chain_count if _chain_alive(TimeDirector.now()) else 0) + 1
+	info.combo_index = info.chain_index
+	if fighter.is_player:
+		_apply_break_bonus(info, victim)
+	info.energy = _energy_of(info, victim.get_total_mass())
+	return info
 
 # --- The hit an attack deals -------------------------------------------------------
 ## Attacker side of the hit pipeline: a Round 7 move from R7_MOVES / R7_PAYOFFS
@@ -2263,7 +2411,9 @@ func _build_hit(victim: Fighter, bone: StringName, pos: Vector3) -> HitInfo:
 	info.zone = BodyZones.of_bone(info.hit_bone)
 	info.level = m.hit_level
 	info.unblockable = m.unblockable
-	if m.r8:
+	if m.id == MoveLibrary.AXE:
+		_fill_axe(info, victim)  # Round 9: ground and air
+	elif m.r8:
 		if m.air:
 			_fill_air(info, victim)
 		else:
@@ -2368,9 +2518,11 @@ func _fill_r7(info: HitInfo, victim: Fighter) -> void:
 ## (_r8_values). The R7_PAYOFFS row for the victim's react state replaces the
 ## result (taps by their id, charged strikes by payoff_id; payoffs never scale
 ## with c), except that a non-launch payoff never replaces a charged launch.
-## A sideways move (the hook) pushes, knocks down and launches across the
-## facing, toward the side its strike travels (MoveData.push_dir; meta
-## "push_dir"). Then Round 7's rules: sprint strikes (charged strikes launch
+## Round 9: a spinning move (the charged hook: "spin") pushes, knocks down and
+## launches along the hit (meta "push_dir") and, when it knocks down or
+## launches, spins the body (meta "spin_rate": R9_HOOK_SPIN lerped by c, the
+## sign of MoveData.push_dir.x: a left hook turns the victim to its left) and
+## hops a knockdown (meta "hop": R9_HOOK_HOP). Then Round 7's rules: sprint strikes (charged strikes launch
 ## like Round 7's heavies), heavy enemies, combo scaling, the pursuit hit,
 ## fleeing and crawling enemies, the sever on a killing launch. The hit's
 ## pressure is its entry's x Tuning.debug_pressure_mult (the victim applies its
@@ -2422,9 +2574,13 @@ func _fill_r8(info: HitInfo, victim: Fighter) -> void:
 		info.stun *= Tuning.R7_HEAVY_STUN_MULT
 		info.lift_height *= Tuning.R7_HEAVY_LIFT_MULT
 	var dir := info.hit_direction
-	if bool(e["sideways"]):
-		dir = _sideways_dir(victim)
-		info.set_meta(&"push_dir", dir)
+	if bool(e["spin"]):
+		info.set_meta(&"push_dir", dir)  # every push of it along the hit
+		if info.react in [&"knockdown", &"launch"]:
+			var side := 1.0 if _move.push_dir.x >= 0.0 else -1.0
+			info.set_meta(&"spin_rate", lerpf(Tuning.R9_HOOK_SPIN.x, Tuning.R9_HOOK_SPIN.y, _strike_c) * side)
+			if info.react == &"knockdown":
+				info.set_meta(&"hop", Tuning.R9_HOOK_HOP)
 	info.launch_velocity = Vector3.ZERO
 	if info.react == &"launch":
 		var speed := minf(launch_speed * (Tuning.HEAVY_LAUNCH_MULT if heavy else 1.0), Tuning.LAUNCH_SPEED_MAX)
@@ -2446,19 +2602,20 @@ func _fill_r8(info: HitInfo, victim: Fighter) -> void:
 	info.reaction = HitInfo.reaction_for_tier(info.tier)
 	info.energy = _energy_of(info, victim.get_total_mass())
 
-## The resolved Round 8 entry of strike `id`: its "tap" entry, or its
-## "charged" entry at c (Vector2 pairs lerped; "react" &"launch" from
-## min(launch_from, Tuning.debug_launch_step), "full_react" at c = 1). Adds
-## "base_react" (the entry's own react), "launched", "full_break" (c = 1),
-## "sideways" and "payoff_id" (the tap's own id, or the charged entry's).
+## The resolved Round 8 entry of strike `id` (MoveLibrary.r8_row: Round 9's axe
+## kick too): its "tap" entry, or its "charged" entry at c (Vector2 pairs
+## lerped; "react" &"launch" from min(launch_from, Tuning.debug_launch_step),
+## "full_react" at c = 1). Adds "base_react" (the entry's own react),
+## "launched", "full_break" (c = 1), "spin" (Round 9: the charged hook) and
+## "payoff_id" (the tap's own id, or the charged entry's).
 static func _r8_values(id: StringName, charged: bool, c: float) -> Dictionary:
-	var row: Dictionary = Tuning.R8_MOVES[id]
+	var row: Dictionary = MoveLibrary.r8_row(id)
 	if not charged:
 		var t: Dictionary = (row["tap"] as Dictionary).duplicate()
 		t["base_react"] = t["react"]
 		t["launched"] = false
 		t["full_break"] = false
-		t["sideways"] = false
+		t["spin"] = false
 		t["payoff_id"] = id
 		return t
 	var ch: Dictionary = row["charged"]
@@ -2475,18 +2632,51 @@ static func _r8_values(id: StringName, charged: bool, c: float) -> Dictionary:
 	elif full and ch.has("full_react"):
 		out["react"] = ch["full_react"]
 	out["full_break"] = full and bool(ch.get("full_break", false))
-	out["sideways"] = bool(ch.get("sideways", false))
+	out["spin"] = bool(ch.get("spin", false))
 	out["payoff_id"] = ch.get("payoff_id", id)
 	return out
 
-## Across the attacker's facing, toward the side the strike travels
-## (MoveData.push_dir.x: the left hook sweeps to the attacker's right).
-func _sideways_dir(victim: Fighter) -> Vector3:
-	var base := victim.get_ground_position() - fighter.get_ground_position()
-	base.y = 0.0
-	base = base.normalized() if base.length() > 0.05 else fighter.get_forward()
-	var side := 1.0 if _move == null or _move.push_dir.x >= 0.0 else -1.0
-	return base.cross(Vector3.UP).normalized() * side
+## Round 9: the axe kick (ground or air; docs/Round 9: Axe kick): a spike
+## straight down (SPIKE_DRIFT degrees along the hit) at its "speed", with
+## its damage, hitstop, weight and pressure: the tap's, or the charged entry's
+## lerped by c (an air axe kick is never charged); meta "spike_blast" is the
+## floor shockwave's radius. Never a payoff. A charged one breaks guards.
+## HitInfo.move_id: &"axe_kick", or &"air_axe" for the air combo's.
+func _fill_axe(info: HitInfo, victim: Fighter) -> void:
+	var charged := _move.charged
+	var e := _r8_values(MoveLibrary.AXE, charged, _strike_c)
+	info.move_id = MoveLibrary.AIR_ANIM_AXE if _move.air else MoveLibrary.AXE  # &"air_axe" / &"axe_kick" (F)
+	info.air = _move.air
+	info.charged = charged
+	info.charge = _strike_c if charged else 0.0
+	info.charge_level = (1 + _steps_passed(_steps_for(MoveLibrary.AXE), _strike_c)) if charged else 0
+	info.victim_state = victim.get_react_state()
+	info.payoff = false
+	info.react = &"spike"
+	info.push = 0.0
+	info.stun = 0.0
+	info.lift_height = 0.0
+	info.weight = float(e["weight"])
+	info.hitstop = float(e["hitstop"])
+	info.pressure = float(e["pressure"]) * Tuning.debug_pressure_mult
+	info.counter = false
+	info.chain_index = (_chain_count if _chain_alive(TimeDirector.now()) else 0) + 1
+	info.combo_index = info.chain_index
+	info.set_meta(&"guard_break", charged)
+	info.set_meta(&"spike_blast", float(e["blast"]))
+	var d := deg_to_rad(SPIKE_DRIFT)
+	info.launch_velocity = (info.hit_direction * sin(d) + Vector3.DOWN * cos(d)) \
+		* minf(float(e["speed"]), Tuning.LAUNCH_SPEED_MAX)
+	info.tier = HitInfo.Tier.LAUNCH
+	var vc := victim.combat
+	var scale := combo_scale(vc.next_taken_index() if vc != null else 1)
+	info.damage = float(e["dmg"]) * scale * _damage_mult()
+	info.damage_scale = scale
+	if victim.is_fleeing() or Targeting.is_crawling(victim):
+		info.damage = maxf(info.damage, victim.hp)
+	_sever_on_kill(info, victim)
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.energy = _energy_of(info, victim.get_total_mass())
 
 ## An air strike (docs/Round 8: Air combo): the tap's damage, weight, hitstop
 ## and pressure. A kick launches the body away at R8_AIR_KICK_LAUNCH
@@ -2497,7 +2687,7 @@ func _sideways_dir(victim: Fighter) -> Vector3:
 ## hang holds it, no re-pop cap). Never a payoff, never charged.
 func _fill_air(info: HitInfo, victim: Fighter) -> void:
 	var id := _move.id
-	var t: Dictionary = Tuning.R8_MOVES[id]["tap"]
+	var t: Dictionary = MoveLibrary.r8_row(id)["tap"]
 	info.air = true
 	info.charged = false
 	info.victim_state = victim.get_react_state()
@@ -2628,7 +2818,8 @@ func _intent_back() -> bool:
 	return stick.length() >= INTENT_DEADZONE and stick.normalized().dot(_camera_forward()) <= -INTENT_DOT
 
 ## A spiked body's floor impact: the shockwave (GameEvents.shockwave; WorldDamage
-## and FX listen) and a stagger on every enemy within R7_SPIKE_BLAST_RADIUS.
+## and FX listen) and a stagger on every enemy within R7_SPIKE_BLAST_RADIUS
+## (Round 9: the axe kick's own "blast" radius).
 func _on_body_impact(body: Node3D, pos: Vector3, normal: Vector3, _energy: float, _surface: StringName) -> void:
 	if _spiked.is_empty() or body == null or not is_instance_valid(body):
 		return
@@ -2640,15 +2831,16 @@ func _on_body_impact(body: Node3D, pos: Vector3, normal: Vector3, _energy: float
 		return
 	if normal.y <= FLOOR_NORMAL_Y:
 		return  # a wall on the way down: wait for the floor
+	var radius := float(_spiked[key][2])
 	_spiked.erase(key)
-	GameEvents.shockwave.emit(fighter, pos, Tuning.R7_SPIKE_BLAST_RADIUS, 0.0)
+	GameEvents.shockwave.emit(fighter, pos, radius, 0.0)
 	for f in Targeting.opponents_of(fighter):
 		if f == body or f.is_down():
 			continue
 		var to := f.get_ground_position() - pos
 		to.y = 0.0
 		var d := to.length()
-		if d > Tuning.R7_SPIKE_BLAST_RADIUS:
+		if d > radius:
 			continue
 		f.take_hit(_shockwave_hit(f, to / d if d > 0.01 else fighter.get_forward()))
 
@@ -2917,6 +3109,8 @@ func _apply_hit(info: HitInfo) -> int:
 	info.result = HitInfo.Result.HIT
 	last_result = info.result
 	_end_chain()  # this fighter was hit: its own chain drops
+	if info.react == &"ground":
+		return _apply_ground_hit(info)
 	if info.react != &"":
 		return _apply_r7_hit(info)
 	var att := info.attacker as Fighter
@@ -2988,23 +3182,53 @@ func _apply_r7_hit(info: HitInfo) -> int:
 	hit_received.emit(info)
 	return info.result
 
+## Round 9: a player strike's limb touched this lying body (react &"ground"):
+## the shove (meta "ground_dv") on every simulating bone of the ragdoll, the
+## first such hit of a knockdown delays the get-up GROUND_HIT_HOLD, pressure,
+## damage, hit_landed. Only the attacker freezes (the body's timers run on).
+func _apply_ground_hit(info: HitInfo) -> int:
+	_register_taken()
+	cancel()
+	drop_debris()
+	var rd := fighter.ragdoll
+	if rd != null:
+		rd.add_velocity(info.get_meta(&"ground_dv", Vector3.ZERO))
+		if not _getup_extended and fighter.is_down():
+			_getup_extended = true
+			rd.delay_getup(GROUND_HIT_HOLD)
+	if info.damage < fighter.hp:
+		_add_pressure(info, false)
+	_freeze_pair(info.attacker as Fighter, info.hitstop, false)
+	fighter.apply_damage(info.damage, info.move_id, info)
+	GameEvents.hit_landed.emit(info)
+	hit_received.emit(info)
+	return info.result
+
 ## The Round 7 reaction: Fighter.react for the on-feet states (snap, spin,
 ## fold, lift, buckle, push, repop), Fighter.knockdown, or a launch at the
-## payoff's velocity (a launch sets the flight).
+## payoff's velocity (a launch sets the flight). Round 9: meta "push_dir" (the
+## charged hook: along the hit), "hop" (m/s up on a knockdown) and
+## "spin_rate" (Fighter.add_spin right after the knockdown or launch).
 func _react_r7(info: HitInfo) -> void:
 	if fighter.is_dead():
 		if info.react == &"launch" or info.react == &"spike":
 			_launch_body(info)
+			_add_spin(info)
 		return
 	cancel()
 	drop_debris()
-	var pdir: Vector3 = info.get_meta(&"push_dir", info.hit_direction)  # a sideways move: across the facing
+	var pdir: Vector3 = info.get_meta(&"push_dir", info.hit_direction)
 	match info.react:
 		&"knockdown":
 			fighter.knockdown(pdir, info.hit_bone)
+			var hop := float(info.get_meta(&"hop", 0.0))
+			if hop > 0.0 and fighter.ragdoll != null:
+				fighter.ragdoll.add_velocity(Vector3.UP * hop)  # the feet leave the floor: the spin carries
+			_add_spin(info)
 			_set_getup(Tuning.REACT_KNOCKDOWN["ground"])
 		&"launch", &"spike":
 			_launch_body(info)
+			_add_spin(info)
 			_set_getup(Tuning.REACT_LAUNCH["ground"])
 		&"sweep":
 			# Round 8: the legs taken out (H's sweep), else a knockdown.
@@ -3021,6 +3245,13 @@ func _react_r7(info: HitInfo) -> void:
 			if not _react_kind_ok(fighter, kind):
 				kind = R8_REACT_FALLBACK.get(kind, kind)  # flinch -> snap until H's react knows it
 			fighter.react(kind, flat, info.push, info.stun, info)
+
+## Round 9: the charged hook's spin (meta "spin_rate", rad/s) on the body
+## just knocked down or launched (agent H's Fighter.add_spin).
+func _add_spin(info: HitInfo) -> void:
+	var rate := float(info.get_meta(&"spin_rate", 0.0))
+	if rate != 0.0:
+		_fighter_call(&"add_spin", [rate])
 
 ## Mesh jitter for a tier (Tuning.HITSTOP_JITTER_RANGE, flinch to sever).
 static func _jitter_for(tier: int) -> float:
@@ -3267,11 +3498,14 @@ func _fighter_call(method: StringName, args: Array) -> void:
 	if fighter.has_method(method):
 		fighter.callv(method, args)
 
-## Per tick: the victim's combo count expires after Tuning.COMBO_DROP.
+## Per tick: the victim's combo count expires after Tuning.COMBO_DROP; back on
+## its feet, the next knockdown's get-up may be delayed again (Round 9).
 func _tick_victim(now: float) -> void:
 	if _taken > 0 and now - _taken_last > Tuning.COMBO_DROP:
 		_taken = 0
 		_taken_stun = 0.0
+	if _getup_extended and not fighter.is_down():
+		_getup_extended = false
 
 ## Damage multiplier of the n-th hit of a combo (1-based).
 static func combo_scale(n: int) -> float:
@@ -3297,7 +3531,7 @@ func is_stumbling() -> bool:
 func start_counter(target: Fighter, tell_time: float) -> bool:
 	if fighter == null or fighter.is_dead() or fighter.is_down() or _held() or _holding_body():
 		return false
-	if not _alive(target) or target.is_down() or is_broken():
+	if not _alive(target) or target.is_down() or (Tuning.R9_BROKEN_STUN and is_broken()):
 		return false
 	if not (_phase == Phase.IDLE or _phase == Phase.RECOVERY) or is_hit_stunned() or fighter.is_reacting():
 		return false
@@ -3577,7 +3811,8 @@ func get_pressure_fraction() -> float:
 		return 1.0
 	return clampf(_pressure / maxf(get_pressure_max(), 1e-3), 0.0, 1.0)
 
-## Broken open: dazed, can't block or attack.
+## Broken open: can't block or guard, takes the break bonus (Round 9: guard
+## broken; it still moves and attacks unless Tuning.R9_BROKEN_STUN, the Round 8 daze).
 func is_broken() -> bool:
 	return _broken_left > 0.0
 
@@ -3628,10 +3863,11 @@ func _add_pressure(info: HitInfo, blocked: bool) -> void:
 		var d := info.hit_direction
 		_break_open(att, Vector3(d.x, 0.0, d.z))
 
-## Broken open for R8_BREAK_TIME: the guard drops, no attacks, the daze
+## Broken open for R8_BREAK_TIME: the guard drops. Round 9: no daze and it
+## keeps acting (guard broken); with Tuning.R9_BROKEN_STUN the Round 8 daze
 ## (Fighter.react &"broken": H's Fighter shows it once a reaction, a lift or a
 ## knockdown from the breaking hit is over, and again after later hits while
-## is_broken() holds).
+## is_broken() holds) and no attacks.
 func _break_open(att: Fighter, dir: Vector3) -> void:
 	_pressure = get_pressure_max()
 	_broken_left = Tuning.R8_BREAK_TIME
@@ -3639,12 +3875,13 @@ func _break_open(att: Fighter, dir: Vector3) -> void:
 	_break_dir = dir
 	_block_held = false
 	if _stun_left > 0.0 and _stun_kind == Stun.BLOCK:
-		_stun_left = 0.0  # out of blockstun into the daze
+		_stun_left = 0.0  # out of blockstun (into the daze with R9_BROKEN_STUN)
 		_stun_kind = Stun.NONE
 		_slide_plant = false
 	_update_block_state()
 	GameEvents.pressure_broken.emit(fighter, att)
-	_show_broken()
+	if Tuning.R9_BROKEN_STUN:
+		_show_broken()
 
 ## The daze for the rest of the break: H's react &"broken" (it waits for the
 ## body to be free), else the dazed stun once the body is free. Cancels any wind-up.
@@ -3670,7 +3907,8 @@ func _tick_pressure(delta: float) -> void:
 		_broken_left -= delta
 		if _broken_left <= 0.0:
 			_recover_pressure()
-		elif _broken_left > BROKEN_SHOW_MIN and not _react_kind_ok(fighter, &"broken") and not fighter.is_reacting() \
+		elif Tuning.R9_BROKEN_STUN and _broken_left > BROKEN_SHOW_MIN and not _react_kind_ok(fighter, &"broken") \
+				and not fighter.is_reacting() \
 				and not is_dazed() and not fighter.is_down() and not fighter.is_held():
 			apply_daze(_broken_left)
 		return
@@ -3732,18 +3970,19 @@ func _air_strike_target(action: int) -> Fighter:
 
 ## An air strike at `tgt`: the button's move (the punch string counts on) on
 ## R8_AIR_FRAMES, never charged; a punch with the stick pulled back spikes.
+## Round 9: the leg kick is the air axe kick (R9_AXE "air_frames", a spike).
 func _start_air(action: int, press_t: float, tgt: Fighter) -> void:
 	_tick_chain(TimeDirector.now())
 	var idx := _string_index_now()
-	var m := MoveLibrary.air_move(_move_for(action))
+	var id := _move_for(action)
+	var m := MoveLibrary.air_move(MoveLibrary.AXE if id == &"leg_kick" else id)
 	if m == null:
 		return
 	_press_action = action
 	_press_t = press_t
 	_hold_pending = false
 	if action == Action.LIGHT or action == Action.HEAVY:
-		_cur_string = idx
-		_string_next = graph.next_index(idx)
+		_begin_string_punch(idx)
 	else:
 		_cur_string = -1
 	var spike := not m.is_kick and _intent_back()

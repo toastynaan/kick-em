@@ -326,3 +326,27 @@ static func head_of(f: Node3D) -> Vector3:
 	if rig is Node3D and is_instance_valid(rig) and (rig as Node3D).has_method(&"get_bone_global_position"):
 		return rig.call(&"get_bone_global_position", Bones.HEAD)
 	return f.global_position + Vector3.UP * 1.72
+
+
+# =============================================================================
+# Round 9: Playtest fixes (docs/Round 9 — Playtest Fixes.md).
+# =============================================================================
+
+## The axe kick (B's leg kick on a lifted body: move_id &"axe_kick" on the
+## ground, &"air_axe" in the air combo). It lands as a spike (react &"spike").
+static func is_axe_kick(info: HitInfo) -> bool:
+	return info != null and String(info.move_id).contains("axe")
+
+## The guard of a fighter: between the two forearms, pulled a little toward
+## the chest (the guard break's burst and the cracked-guard look sit here).
+static func guard_point(f: Node3D) -> Vector3:
+	if f == null or not is_instance_valid(f):
+		return Vector3.ZERO
+	var arms := (limb_point(f, Bones.L_LOWER_ARM) + limb_point(f, Bones.R_LOWER_ARM)) * 0.5
+	return arms.lerp(upper_body(f), 0.35)
+
+## How heavy a spike's floor impact is: its blast radius over the pursuit
+## spike's (Tuning.R7_SPIKE_BLAST_RADIUS), clamped. A charged axe kick blasts
+## wider (Tuning.R9_AXE "blast"), so its floor boom is heavier.
+static func spike_heft(blast_radius: float) -> float:
+	return clampf(blast_radius / maxf(Tuning.R7_SPIKE_BLAST_RADIUS, 0.1), 0.7, 1.5)

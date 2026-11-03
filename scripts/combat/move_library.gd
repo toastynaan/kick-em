@@ -18,11 +18,20 @@ class_name MoveLibrary
 ## push direction; their own frames). The Round 7 heavy ids, the counter and
 ## the dropping strike stay Round 7 moves (Tuning.R7_MOVES): payoffs, the lab
 ## and scripted bots still use them.
+##
+## Round 9 (docs/Round 9 — Playtest Fixes.md: Axe kick): the leg kick on a
+## lifted target is the axe kick (AXE, row r8_row(AXE) built from Tuning.R9_AXE):
+## a Round 8 strike (tap, charged_move, air_move with R9_AXE "air_frames") whose
+## hit is a spike. It is not a button's own move, so it is not in PLAYER_MOVES.
+## Poses: P's axe_kick / air_axe, else the leg kick's.
 
 ## Round 8 air strike poses (agent P): every air kick, left-hand punches, right-hand punches.
 const AIR_ANIM_KICK := &"air_kick"
 const AIR_ANIM_LEFT := &"air_jab"
 const AIR_ANIM_RIGHT := &"air_cross"
+## Round 9: the axe kick (the leg kick on a lifted body) and its poses (agent P).
+const AXE := &"axe_kick"
+const AIR_ANIM_AXE := &"air_axe"
 const PLAYER_MOVES: Array[StringName] = [&"jab", &"cross", &"hook", &"heavy_jab", &"heavy_cross",
 	&"heavy_hook", &"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse", &"counter",
 	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse", &"drop_strike"]
@@ -66,7 +75,7 @@ const ANIM_FALLBACK := {
 	&"gut_punch": &"crouch_punch", &"leg_kick": &"sweep", &"front_kick": &"kick",
 	&"roundhouse": &"sparta_kick", &"counter": &"cross", &"heavy_leg_kick": &"leg_kick",
 	&"heavy_front_kick": &"front_kick", &"heavy_roundhouse": &"roundhouse", &"drop_strike": &"hammer_fist",
-	&"back_kick": &"e_kick",
+	&"back_kick": &"e_kick", &"axe_kick": &"leg_kick",
 	&"e_jab": &"e_hook", &"e_stick_swing": &"e_heavy", &"e_stick_thrust": &"e_hook",
 	&"e_grab_slam": &"e_grab", &"e_sweep": &"leg_sweep",
 }
@@ -84,7 +93,7 @@ const LIMB_FALLBACK := {
 	&"roundhouse": [&"RightFoot", &"RightLowerLeg"], &"counter": [&"RightHand"],
 	&"heavy_leg_kick": [&"RightFoot", &"RightLowerLeg"], &"heavy_front_kick": [&"RightFoot", &"RightLowerLeg"],
 	&"heavy_roundhouse": [&"RightFoot", &"RightLowerLeg"], &"drop_strike": [&"RightHand"],
-	&"back_kick": [&"RightFoot", &"RightLowerLeg"],
+	&"back_kick": [&"RightFoot", &"RightLowerLeg"], &"axe_kick": [&"RightFoot", &"RightLowerLeg"],
 	&"e_sweep": [&"RightFoot", &"RightLowerLeg"], &"e_jab": [&"LeftHand"], &"e_stick_swing": [&"RightHand"],
 	&"e_stick_thrust": [&"RightHand"], &"e_grab_slam": [&"LeftHand", &"RightHand"],
 }
@@ -103,6 +112,19 @@ static func has_move(id: StringName) -> bool:
 		_build()
 	return _moves.has(id)
 
+## The Round 8 row ({"tap", "charged"}) of strike `id`: Tuning.R8_MOVES[id], or
+## for the axe kick (Round 9) one built from Tuning.R9_AXE: react &"spike", tier
+## &"launch", no push or stun, plus "speed" (m/s down) and "blast" (m: the floor
+## shockwave). {} for other moves.
+static func r8_row(id: StringName) -> Dictionary:
+	if id == AXE:
+		var t: Dictionary = (Tuning.R9_AXE["tap"] as Dictionary).duplicate()
+		t.merge({"react": &"spike", "push": 0.0, "stun": 0.0, "tier": &"launch"})
+		var ch: Dictionary = (Tuning.R9_AXE["charged"] as Dictionary).duplicate()
+		ch.merge({"react": &"spike", "push": Vector2.ZERO, "stun": Vector2.ZERO, "tier": &"launch"})
+		return {"tap": t, "charged": ch}
+	return Tuning.R8_MOVES.get(id, {})
+
 ## Round 8: the charged version of strike `id` (null for moves outside
 ## Tuning.R8_MOVES): the tap's landing, limbs and active frames, startup
 ## R8_RELEASE_STARTUP (from the release, after any glide), recovery the tap's +
@@ -119,7 +141,7 @@ static func charged_move(id: StringName) -> MoveData:
 	m.guard_break = true
 	m.startup = Tuning.R8_RELEASE_STARTUP
 	m.recovery = tap.recovery + Tuning.R8_CHARGED_EXTRA_RECOVERY
-	var ch: Dictionary = Tuning.R8_MOVES[id]["charged"]
+	var ch: Dictionary = r8_row(id)["charged"]
 	m.damage = (ch["dmg"] as Vector2).y
 	var heavy_anim := StringName("heavy_" + String(id))
 	if PoseLibrary.has_move(heavy_anim):
@@ -131,7 +153,8 @@ static func charged_move(id: StringName) -> MoveData:
 ## the tap with Tuning.R8_AIR_FRAMES, never charged. It plays P's air pose:
 ## AIR_ANIM_KICK for a kick, AIR_ANIM_LEFT for a left-hand punch, else
 ## AIR_ANIM_RIGHT (striking with that pose's limbs), or the tap's own pose when
-## P has none.
+## P has none. Round 9: the air axe kick (AXE) has R9_AXE "air_frames" and
+## plays AIR_ANIM_AXE, else the air leg kick's pose (AIR_ANIM_KICK).
 static func air_move(id: StringName) -> MoveData:
 	if _air.has(id):
 		return _air[id]
@@ -140,10 +163,13 @@ static func air_move(id: StringName) -> MoveData:
 		return null
 	var m: MoveData = tap.duplicate()
 	m.air = true
-	m.startup = Tuning.R8_AIR_FRAMES.x
-	m.active = Tuning.R8_AIR_FRAMES.y
-	m.recovery = Tuning.R8_AIR_FRAMES.z
+	var frames: Vector3 = Tuning.R9_AXE["air_frames"] if id == AXE else Tuning.R8_AIR_FRAMES
+	m.startup = frames.x
+	m.active = frames.y
+	m.recovery = frames.z
 	var air_anim := AIR_ANIM_KICK if tap.is_kick else (AIR_ANIM_LEFT if tap.limb == &"LeftHand" else AIR_ANIM_RIGHT)
+	if id == AXE and PoseLibrary.has_move(AIR_ANIM_AXE):
+		air_anim = AIR_ANIM_AXE
 	if PoseLibrary.has_move(air_anim):
 		m.anim = air_anim
 		var src: Array = PoseLibrary.STRIKE_BONES.get(air_anim, [])
@@ -190,7 +216,7 @@ static func anim_for(id: StringName, depth := 0) -> StringName:
 static func _r8(id: StringName, level: int, reach: float, height: float, target: StringName,
 		push := Vector3(0.0, 0.0, 1.0)) -> MoveData:
 	var m := _r7(id, level, reach, height, target, push)
-	var t: Dictionary = Tuning.R8_MOVES[id]["tap"]
+	var t: Dictionary = r8_row(id)["tap"]
 	var f: Vector3 = t["f"]
 	m.r8 = true
 	m.startup = f.x
@@ -206,7 +232,7 @@ static func _r8(id: StringName, level: int, reach: float, height: float, target:
 ## punches, the waist for the gut punch, the leg for the leg kick).
 static func _r7(id: StringName, level: int, reach: float, height: float, target: StringName,
 		push := Vector3(0.0, 0.0, 1.0)) -> MoveData:
-	var e: Dictionary = Tuning.R7_MOVES.get(id, LOCAL_R7.get(id, {}))
+	var e: Dictionary = Tuning.R7_MOVES.get(id, LOCAL_R7.get(id, r8_row(id).get("tap", {})))
 	var f: Vector3 = e["f"]
 	var m := MoveData.new()
 	m.id = id
@@ -275,6 +301,17 @@ static func _build() -> void:
 		hk.limb_radius = 0.26
 		hk.reach_radius = 0.45
 		_add(hk)
+	# Round 9: the axe kick (the leg kick button on a lifted body): the heel
+	# chops down onto the body (CombatController: a spike; from the ground it
+	# connects up to R9_AXE "reach_up" above the feet). Charges in the leg
+	# kick's load when P has no axe load.
+	var axe := _r8(AXE, hi, 1.25, 1.6, Bones.CHEST, Vector3(0.0, -0.9, 0.45))
+	axe.is_kick = true
+	axe.limb_radius = 0.28
+	axe.reach_radius = 0.45
+	if axe.charge_hold == &"":
+		axe.charge_hold = PoseLibrary.charge_load_of(&"leg_kick")
+	_add(axe)
 	# Dropping strike: any strike in the air (a jump) or late in a vault, down
 	# and forward onto the target; active until the fighter lands.
 	var ds := _r7(&"drop_strike", mid, 1.3, 0.7, Bones.CHEST, Vector3(0.0, -0.35, 0.95))

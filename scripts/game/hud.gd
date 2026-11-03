@@ -24,6 +24,14 @@ extends CanvasLayer
 ##   over each enemy that is engaged (the player's target, close, under
 ##   pressure) or damaged. While is_broken() the bar is full and flashes, then
 ##   it empties. A break pops "BROKEN" over the enemy.
+## Round 9 (docs/Round 9 — Playtest Fixes.md):
+## - Three string pips (J, C, H) right of the charge meter, shown in play: the
+##   pip of the next punch (CombatController.get_string_index()) is lit, the
+##   others dim. While a punch charges, its pip is lit in the meter's colour.
+##   If combat exposes get_string_idle_time() (s since the last punch press),
+##   the lit cross / hook pip fades as Tuning.R9_STRING_RESET runs out.
+## - A break no longer dazes, so the popup and the bar's label read
+##   GUARD_BROKEN_TEXT ("GUARD BROKEN").
 ## The layer sits above ScreenFX's, so screen effects never dim it.
 ## Title, pause and results panels live in GameMenus. Built entirely in code.
 ## OWNER: agent J (HUD, flow & menus).
@@ -92,6 +100,11 @@ const ENEMY_BAR_ABOVE_BODY := 0.9 ## m above a ragdolling body's centre of mass
 const ENEMY_BAR_ENGAGE := 6.0   ## m: an enemy this close to the player is engaged
 const ENEMY_BAR_FADE := 0.2     ## real s to fade in or out
 const ENEMY_BAR_MAX_DIST := 30.0 ## m from the camera: farther bars are not drawn
+## Round 9.
+const GUARD_BROKEN_TEXT := "GUARD BROKEN" ## the break popup and the bar label (no daze any more)
+const STRING_PIP_LETTERS := ["J", "C", "H"]
+const STRING_PIP_MOVES: Array[StringName] = [&"jab", &"cross", &"hook"]
+const STRING_PIP_FADE_MIN := 0.35 ## brightness the lit pip fades to as the string reset nears
 
 var player: Fighter
 var mode: StringName = &"duel"
@@ -168,6 +181,9 @@ var _charge_polled := false                 ## is_charging() reported this charg
 var _charge_passed := 0                     ## steps passed (pops on each new one)
 var _charge_step_at := -INF
 var _charge_info := {}                      ## the meter as last drawn (tests)
+## Round 9 string pips (right of the charge meter).
+var _pips: _StringPips
+var _pips_info := {}                        ## the pips as last drawn (tests)
 ## Round 8 enemy bars (Waves): instance id -> {fighter, shown, alpha}.
 var _enemy_bar_state := {}
 var _enemy_bars_draw: _EnemyBars
@@ -343,6 +359,8 @@ func set_round_over() -> void:
 	_prompts_draw.queue_redraw()
 	_charge_state = &""
 	_charge.visible = false
+	_pips.visible = false
+	_pips_info = {"visible": false, "index": -1, "lit": -1, "charging": false}
 	_enemy_bar_state.clear()
 	_enemy_bar_items = []
 	_enemy_bars_draw.items = []
@@ -391,14 +409,22 @@ func get_pursuit_cue() -> Dictionary:
 func get_charge_meter() -> Dictionary:
 	return _charge_info
 
+## Round 9: the string pips as drawn this frame: {visible, index (the next
+## punch, get_string_index()), lit (the pip lit, the charging punch's while one
+## charges), charging, color (the lit pip's), fade (1 bright .. STRING_PIP_FADE_MIN)}.
+func get_string_pips() -> Dictionary:
+	return _pips_info
+
 ## Waves: the health + pressure pairs drawn this frame over enemies:
-## [{fighter, pos (screen px), hp, pressure (shown fraction), broken, alpha}].
+## [{fighter, pos (screen px), hp, pressure (shown fraction), broken, label, alpha}].
 func get_enemy_bars() -> Array:
 	return _enemy_bar_items
 
-## Duel: the Duelist's pressure bar under its health bar {visible, fill, broken}.
+## Duel: the Duelist's pressure bar under its health bar {visible, fill,
+## broken, label (GUARD_BROKEN_TEXT while broken, else "")}.
 func get_opponent_pressure() -> Dictionary:
-	return {"visible": _opp_root.visible, "fill": _opp_pressure.fill, "broken": _opp_pressure.broken}
+	return {"visible": _opp_root.visible, "fill": _opp_pressure.fill, "broken": _opp_pressure.broken,
+		"label": GUARD_BROKEN_TEXT if _opp_pressure.broken else ""}
 
 ## Attackers with an open counter window on the player (drawn or not).
 func get_prompt_attackers() -> Array:
@@ -585,6 +611,16 @@ func _build() -> void:
 	_charge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_charge.visible = false
 	_root.add_child(_charge)
+	# Round 9: the string pips, right of the meter's bar.
+	_pips = _StringPips.new()
+	_pips.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_pips.offset_left = _Charge.W * 0.5 + 18.0
+	_pips.offset_right = _pips.offset_left + _StringPips.W
+	_pips.offset_top = -190
+	_pips.offset_bottom = -140
+	_pips.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pips.visible = false
+	_root.add_child(_pips)
 
 	# Debug overlay, top-right.
 	_debug_panel = PanelContainer.new()
@@ -661,6 +697,7 @@ func _process(_delta: float) -> void:
 	_update_prompts(t)
 	_update_pursuit_cue(t)
 	_update_charge(t)
+	_update_string_pips(t)
 	_update_enemy_bars(t, dt)
 	_prompts_draw.items = _prompt_items + ([_cue] if not _cue.is_empty() else [])
 	_prompts_draw.queue_redraw()
@@ -1248,6 +1285,47 @@ func _update_charge(t: float) -> void:
 		"draw_color": draw_col, "full": _charge_full, "flashing": flashing, "shake": shake, "alpha": alpha,
 		"scale": _charge.bar_scale, "move": _charge_move}
 
+# --- Round 9: string pips ---------------------------------------------------------------
+## The pip a charging move lights (-1: not a string punch).
+static func string_pip_of(move_id: StringName) -> int:
+	var id := String(move_id).trim_prefix("heavy_")
+	return STRING_PIP_MOVES.find(StringName(id))
+
+## Brightness of the lit pip `idle` s after the last punch press: 1 for the jab
+## (the string's rest), else fading from 1 to STRING_PIP_FADE_MIN as
+## Tuning.R9_STRING_RESET runs out.
+static func string_pip_fade(index: int, idle: float) -> float:
+	if index <= 0 or idle < 0.0:
+		return 1.0
+	var k := clampf(idle / maxf(Tuning.R9_STRING_RESET, 0.01), 0.0, 1.0)
+	return lerpf(1.0, STRING_PIP_FADE_MIN, k)
+
+func _update_string_pips(t: float) -> void:
+	var cc := _combat(player) if _player_ok() else null
+	var shown := cc != null and not _round_over
+	var info := {"visible": shown, "index": -1, "lit": -1, "charging": false, "color": UIKit.TEXT, "fade": 1.0}
+	_pips.visible = shown
+	if shown:
+		var index := clampi(cc.get_string_index(), 0, 2)
+		var lit := index
+		var col := Color.WHITE
+		var charging := false
+		var fade := 1.0
+		var cpip := string_pip_of(_charge_move) if _charge_state == &"charging" else -1
+		if cpip >= 0:
+			lit = cpip
+			charging = true
+			col = _charge_info.get("draw_color", charge_color(0))
+		elif cc.has_method(&"get_string_idle_time"):
+			fade = string_pip_fade(index, float(cc.call(&"get_string_idle_time")))
+		_pips.lit = lit
+		_pips.color = col
+		_pips.fade = fade
+		_pips.pop = 0.5 + 0.5 * sin(t * CHARGE_PULSE) if charging and bool(_charge_info.get("flashing", false)) else 0.0
+		_pips.queue_redraw()
+		info = {"visible": true, "index": index, "lit": lit, "charging": charging, "color": col, "fade": fade}
+	_pips_info = info
+
 # --- Round 8: pressure bars -------------------------------------------------------------
 ## The bar's share: 1 while broken open, else pressure / capacity (0..1).
 static func pressure_fraction(pressure: float, pressure_max: float, broken: bool) -> float:
@@ -1303,7 +1381,7 @@ func _update_enemy_bars(t: float, dt: float) -> void:
 		if not vp.has_point(sp):
 			continue
 		items.append({"fighter": f, "pos": sp, "hp": clampf(f.hp / maxf(f.max_hp, 1.0), 0.0, 1.0),
-			"pressure": shown_p, "broken": broken, "alpha": a, "pulse": t})
+			"pressure": shown_p, "broken": broken, "label": GUARD_BROKEN_TEXT if broken else "", "alpha": a, "pulse": t})
 	for id in _enemy_bar_state.keys():
 		if not seen.has(id):
 			_enemy_bar_state.erase(id)
@@ -1311,11 +1389,12 @@ func _update_enemy_bars(t: float, dt: float) -> void:
 	_enemy_bars_draw.items = items
 	_enemy_bars_draw.queue_redraw()
 
-## A break pops "BROKEN" over the enemy (its bar flashes until it recovers).
+## A break pops GUARD_BROKEN_TEXT over the enemy (its bar flashes and is
+## labelled until it recovers). Round 9: the break no longer dazes.
 func _on_pressure_broken(fighter: Node3D, _attacker: Node3D) -> void:
 	if _round_over or not is_instance_valid(fighter) or not (fighter is Fighter) or _is_player(fighter):
 		return
-	popup_at((fighter as Fighter).get_aim_point() + Vector3.UP * 0.6, "BROKEN", UIKit.PRESSURE_COLOR, 34, 0.9)
+	popup_at((fighter as Fighter).get_aim_point() + Vector3.UP * 0.6, GUARD_BROKEN_TEXT, UIKit.PRESSURE_COLOR, 34, 0.9)
 
 ## A pressure bar in `r`: dark back, gold fill that brightens toward full;
 ## while broken it is full and flashes white with an outline.
@@ -1331,6 +1410,16 @@ static func draw_pressure(ci: CanvasItem, r: Rect2, fill: float, broken: bool, p
 	ci.draw_rect(Rect2(r.position, Vector2(r.size.x * clampf(fill, 0.0, 1.0), r.size.y)), col)
 	if broken:
 		ci.draw_rect(r.grow(3.0), Color(UIKit.PRESSURE_BROKEN, (0.4 + 0.6 * flash) * alpha), false, 2.0)
+
+## Round 9: GUARD_BROKEN_TEXT centred under a broken pressure bar `r`.
+static func draw_guard_broken(ci: CanvasItem, r: Rect2, font_size: int, pulse: float, alpha: float) -> void:
+	var font := UIKit.heavy_font()
+	var w := font.get_string_size(GUARD_BROKEN_TEXT, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	var pos := Vector2(r.get_center().x - w * 0.5, r.end.y + 4.0 + font_size)
+	var flash := 0.5 + 0.5 * sin(pulse * PRESSURE_PULSE)
+	var col := UIKit.PRESSURE_COLOR.lerp(UIKit.PRESSURE_BROKEN, flash)
+	ci.draw_string_outline(font, pos, GUARD_BROKEN_TEXT, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, 4, Color(0, 0, 0, 0.85 * alpha))
+	ci.draw_string(font, pos, GUARD_BROKEN_TEXT, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(col, alpha))
 
 # --- Off-screen arrows -------------------------------------------------------------
 ## Off-screen attack arrows (Feel Reference: Off-screen attackers): from a
@@ -1759,6 +1848,37 @@ class _Charge extends Control:
 			draw_rect(r.grow(5.0 + 4.0 * full_pop), Color(1, 1, 1, glow * alpha), false, 2.0)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
+## Round 9: the punch string's pips (J, C, H), right of the charge meter's bar.
+## The lit pip is bright (scaled by fade) in `color`; the others are dim.
+class _StringPips extends Control:
+	const R := 11.0      ## px pip radius
+	const GAP := 6.0     ## px between pips
+	const W := 3.0 * 2.0 * R + 2.0 * GAP
+	var lit := 0
+	var color := Color.WHITE
+	var fade := 1.0
+	var pop := 0.0       ## 0..1 extra glow while the charging punch is full
+
+	func _draw() -> void:
+		var font := UIKit.heavy_font()
+		var cy := _Charge.BAR_Y + _Charge.H * 0.5
+		for i in 3:
+			var c := Vector2(R + i * (2.0 * R + GAP), cy)
+			var on := i == lit
+			var col := Color(color, fade) if on else Color(1, 1, 1, 0.22)
+			var rad := R + (2.0 * pop if on else 0.0)
+			draw_circle(c, rad + 2.0, Color(0, 0, 0, 0.75))
+			draw_circle(c, rad, Color(0.12, 0.1, 0.08, 0.9))
+			if on:
+				draw_circle(c, rad - 1.5, col)
+			else:
+				draw_arc(c, rad - 1.5, 0.0, TAU, 20, col, 1.5)
+			var letter: String = HUD.STRING_PIP_LETTERS[i]
+			var fs := 13
+			var sz := font.get_string_size(letter, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+			var text_col := Color(0.08, 0.06, 0.05, maxf(fade, 0.6)) if on else Color(1, 1, 1, 0.45)
+			draw_string(font, c + Vector2(-sz.x * 0.5, fs * 0.36), letter, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, text_col)
+
 ## Round 8: the Duelist's pressure under its health bar.
 class _PressureBar extends Control:
 	var bar_w := 360.0
@@ -1767,7 +1887,10 @@ class _PressureBar extends Control:
 	var pulse := 0.0
 
 	func _draw() -> void:
-		HUD.draw_pressure(self, Rect2(Vector2.ZERO, Vector2(bar_w, HUD.OPP_PRESSURE_H)), fill, broken, pulse, 1.0)
+		var r := Rect2(Vector2.ZERO, Vector2(bar_w, HUD.OPP_PRESSURE_H))
+		HUD.draw_pressure(self, r, fill, broken, pulse, 1.0)
+		if broken:
+			HUD.draw_guard_broken(self, r, 16, pulse, 1.0)
 
 ## Round 8 (Waves): a compact health + pressure pair over each shown enemy.
 class _EnemyBars extends Control:
@@ -1785,6 +1908,8 @@ class _EnemyBars extends Control:
 			draw_rect(Rect2(hp_r.position, Vector2(w * float(it["hp"]), hp_r.size.y)), Color(UIKit.HP_COLOR, a))
 			var p_r := Rect2(hp_r.position + Vector2(0.0, HUD.ENEMY_BAR_HP_H + HUD.ENEMY_BAR_GAP), Vector2(w, HUD.ENEMY_BAR_P_H))
 			HUD.draw_pressure(self, p_r, float(it["pressure"]), bool(it["broken"]), float(it["pulse"]), a)
+			if bool(it["broken"]):
+				HUD.draw_guard_broken(self, p_r, 12, float(it["pulse"]), a)
 
 ## Counter prompts: a key badge (circle for one-letter keys, a pill otherwise)
 ## in the tell colour, the caption above it, a pointer to the attacker's head

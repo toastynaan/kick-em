@@ -119,11 +119,12 @@ func r7_entry() -> Dictionary:
 		return {}
 	return Tuning.R7_MOVES.get(id, MoveLibrary.LOCAL_R7.get(id, {}))
 
-## The Round 8 row of a strike (Tuning.R8_MOVES: "tap" and "charged"); {} for other moves.
+## The Round 8 row of a strike (Tuning.R8_MOVES: "tap" and "charged"; Round 9:
+## the axe kick's from Tuning.R9_AXE, MoveLibrary.r8_row); {} for other moves.
 func r8_row() -> Dictionary:
 	if not r8:
 		return {}
-	return Tuning.R8_MOVES.get(id, {})
+	return MoveLibrary.r8_row(id)
 
 func strike_limbs() -> Array[StringName]:
 	if limbs.is_empty():

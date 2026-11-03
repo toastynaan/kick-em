@@ -99,15 +99,19 @@ func _run() -> void:
 		if not (dk.contains("tap") and dk.contains("hold to charge")):
 			charge_rows.append(k)
 	_check(charge_rows.is_empty(), "every strike row: tap, and hold to charge (missing: %s)" % ", ".join(charge_rows))
-	_check(desc.call("Leg kick").contains("sweep") and desc.call("Gut punch").contains("breaks them open")
+	_check(desc.call("Leg kick").contains("sweep") and desc.call("Gut punch").contains("breaks their guard")
 		and desc.call("Front kick").contains("launches") and desc.call("Uppercut").contains("lifts")
 		and desc.call("Uppercut").contains("jump"), "charged results: leg kick sweeps, gut punch breaks, front kick launches, uppercut lifts then Jump")
 	_check(desc.call("Jump").contains("charged uppercut"), "Jump: follows a charged uppercut (%s)" % desc.call("Jump"))
 	var ji := order.find("Jump")
 	_check(ji >= 0 and order.slice(ji + 1, ji + 2) == PackedStringArray(["Air combo"]), "the Air combo row follows Jump")
 	var air: String = desc.call("Air combo")
-	_check(air.contains("hangs") and air.contains("kick sends them flying") and air.contains("pull back + punch")
+	_check(air.contains("hangs") and air.contains("send them flying") and air.contains("pull back + punch")
 		and air.contains("spike"), "Air combo: hits hang, a kick sends them away, pull back + punch spikes (%s)" % air)
+	# Round 9: the axe kick, guard broken, only the gut punch stuns, hits on downed bodies.
+	_check(desc.call("Leg kick").contains("lifted") and desc.call("Leg kick").contains("axe kick")
+		and air.contains("axe kick chops them down") and desc.call("Gut punch").contains("only strike that stuns"),
+		"Round 9: the axe kick (leg kick on a lifted enemy, ground or air); only the gut punch stuns")
 	var di := order.find("Dash / sprint")
 	_check(di >= 0 and order.slice(di + 1, di + 3) == PackedStringArray(["Pursuit", "Pursuit hit"]), "the pursuit rows follow Dash")
 
@@ -144,8 +148,8 @@ func _run() -> void:
 		"F1 panel explains the orange / blue counter icons with their keys")
 	_check(all.contains(UIKit.CHARGE_HELP) and all.contains("white, orange, then red") and all.contains("flashes at full"),
 		"F1 panel: tap or hold to charge every strike, the meter's colours and the flash at full")
-	_check(all.contains(UIKit.PRESSURE_HELP) and all.to_lower().contains("breaks them open"),
-		"F1 panel: pressure fills from every hit and breaks them open")
+	_check(all.contains(UIKit.PRESSURE_HELP) and all.contains("GUARD BROKEN") and all.contains("Only the gut punch stuns")
+		and all.contains("downed"), "F1 panel: pressure breaks the guard, only the gut punch stuns, hits on downed bodies")
 	var sz := panel.get_combined_minimum_size()
 	print("    F1 panel minimum size %s" % sz)
 	_check(sz.x <= 1600.0 and sz.y <= 900.0, "F1 panel fits 1600x900 (%.0f x %.0f)" % [sz.x, sz.y])
@@ -167,7 +171,8 @@ func _run() -> void:
 	var tips := GameMenus.title_tips().to_lower()
 	_check(tips.contains("teleport") and tips.contains("pursue") and tips.contains("spike") and tips.contains("wall run")
 		and tips.contains("v to counter"), "title tips: counter on V, teleport, pursue, spike, wall run")
-	_check(tips.contains("hold it to charge") and tips.contains("pressure") and tips.contains("breaks them open")
+	_check(tips.contains("hold it to charge") and tips.contains("pressure") and tips.contains("breaks their guard")
+		and tips.contains("only the gut punch stuns") and tips.contains("downed") and tips.contains("axe kick")
 		and tips.contains("charged uppercut, then space") and tips.contains("a kick sends them away") and tips.contains("s + punch spikes"),
 		"title tips: tap or hold to charge, pressure breaks, the air combo (charged uppercut, Space, kick away, S + punch spike)")
 	var menus := GameMenus.new()

@@ -41,6 +41,9 @@ extends Node
 ## just starts again once the flinch is over. Broken open by pressure
 ## (is_enemy_broken) counts as impaired: no token, out of the line. A brain
 ## that backs off under pressure (AIBrain.is_backing_off) leaves the line.
+## Round 9: a break only breaks the guard (Tuning.R9_BROKEN_STUN false): the
+## enemy keeps its token and its place; only is_enemy_broken_stunned (flag
+## true, the Round 8 daze) impairs it. Back-offs only with R9_PRESSURE_PASSIVE.
 ## Clocks: world_now() (scaled game time, the enemies' own time) for token
 ## timeouts, grant gaps, pacing and swing spacing; now() = TimeDirector.now()
 ## (real time, physics ticks) for the on-screen rule. B reports time to the
@@ -609,13 +612,13 @@ func _is_fleeing(enemy: Fighter) -> bool:
 ## States that keep an enemy out of the rotation: held by a grab, a Round 7
 ## reaction (snap, spin, fold, buckle, push, or popped up by a lift), the
 ## Upgrade 2 daze and stumble (tripped enemies are down), and Round 8's
-## pressure break (is_enemy_broken).
+## pressure break (is_enemy_broken_stunned: Round 9, only with R9_BROKEN_STUN).
 func is_enemy_impaired(enemy: Fighter) -> bool:
 	if enemy.carry != null and enemy.carry.is_held():
 		return true
 	if enemy.is_reacting() or enemy.is_lifted():
 		return true
-	if is_enemy_broken(enemy):
+	if is_enemy_broken_stunned(enemy):
 		return true
 	var c := enemy.combat
 	if c == null:
@@ -625,12 +628,19 @@ func is_enemy_impaired(enemy: Fighter) -> bool:
 	return c.has_method(&"is_stumbling") and c.is_stumbling()
 
 ## Round 8: broken open by pressure (B's CombatController.is_broken(), H's
-## &"broken" reaction): dazed for Tuning.R8_BREAK_TIME, no attack, no guard,
-## no token. A hit's reaction may play over it; the break still counts.
+## &"broken" reaction): its guard is broken for Tuning.R8_BREAK_TIME (no guard,
+## no read). Round 8 also dazed it (no attack, no token): Round 9 keeps that
+## only with Tuning.R9_BROKEN_STUN (is_enemy_broken_stunned). A hit's reaction
+## may play over it; the break still counts.
 static func is_enemy_broken(enemy: Fighter) -> bool:
 	if enemy.get_react_state() == &"broken":
 		return true
 	return enemy.combat != null and enemy.combat.is_broken()
+
+## Round 9: a break that also stuns (the Round 8 daze: no attack, no token),
+## only with Tuning.R9_BROKEN_STUN. Otherwise a broken enemy just can't block.
+static func is_enemy_broken_stunned(enemy: Fighter) -> bool:
+	return Tuning.R9_BROKEN_STUN and is_enemy_broken(enemy)
 
 ## Round 8: in a tap's flinch (react &"flinch", about 0.2 s), or the
 ## ragdoll's own flinch tier with no other reaction (it can outlast the
@@ -651,7 +661,7 @@ func keeps_turn(enemy: Fighter) -> bool:
 		return false
 	if enemy.carry != null and enemy.carry.is_held():
 		return false
-	if is_enemy_broken(enemy):
+	if is_enemy_broken_stunned(enemy):
 		return false
 	var c := enemy.combat
 	if c != null and ((c.has_method(&"is_dazed") and c.is_dazed()) or (c.has_method(&"is_stumbling") and c.is_stumbling())):

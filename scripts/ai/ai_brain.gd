@@ -64,7 +64,15 @@ extends Node
 ##   instead of trading, and re-engages as its pressure drains (_update_back_off).
 ## Broken open (is_broken: B's is_broken, H's &"broken" reaction) it does
 ## nothing: no attack, no guard, no token; after GameEvents.pressure_recovered
-## it fights on normally. A tap's flinch (react &"flinch", about 0.2 s) is
+## it fights on normally.
+## Round 9 (docs/Round 9 — Playtest Fixes.md: pressure is a guard breaker).
+## With Tuning.R9_PRESSURE_PASSIVE false pressure only scales its guards and
+## reads (block_mult); the attack and tell slow-down and the back-off above are
+## off (_pressure_slow, _update_back_off). With Tuning.R9_BROKEN_STUN false a
+## broken enemy is GUARD BROKEN: it keeps moving, asking for tokens and
+## attacking at its normal pace, but never guards or reads (block_mult 0,
+## _can_guard_now, _apply_guard); only AttackDirector.is_enemy_broken_stunned
+## (the Round 8 daze, flag true) takes it out of the rotation. A tap's flinch (react &"flinch", about 0.2 s) is
 ## shrugged off: it keeps its token and its move, and walks in and swings
 ## again the tick it can act (_while_flinching).
 
@@ -653,9 +661,16 @@ func get_pressure() -> float:
 		return 0.0
 	return clampf(fighter.combat.get_pressure_fraction(), 0.0, 1.0)
 
-## Broken open by pressure (AttackDirector.is_enemy_broken): it does nothing.
+## Broken open by pressure (AttackDirector.is_enemy_broken): it can't guard or
+## read. Round 9: it still moves and attacks unless Tuning.R9_BROKEN_STUN.
 func is_broken() -> bool:
 	return fighter != null and AttackDirector.is_enemy_broken(fighter)
+
+## Round 8 pressure on its pace: p while Tuning.R9_PRESSURE_PASSIVE (the
+## interval runs 1 / (1 + p) as fast, tells R8_PRESSURE_TELL_SLOW x p longer);
+## Round 9 default: 0, pressure only weakens the guard.
+func _pressure_slow() -> float:
+	return get_pressure() if Tuning.R9_PRESSURE_PASSIVE else 0.0
 
 ## Backing off under pressure (_update_back_off): it asks for no token.
 func is_backing_off() -> bool:
@@ -674,10 +689,12 @@ func block_mult() -> float:
 func get_guard_chance() -> float:
 	return clampf(float(fighter.config.get("guard_chance", 0.0)) * block_mult(), 0.0, 1.0)
 
-## B: our pressure broke (dazed and open for Tuning.R8_BREAK_TIME). The guard
-## drops, a pending answer, punish, move or string goes, and the token goes
-## back (the director sees is_enemy_broken too). It does nothing until it
-## can act again; pressure_recovered then clears what pressure left.
+## B: our pressure broke (guard broken for Tuning.R8_BREAK_TIME). The guard
+## drops. Round 9 (Tuning.R9_BROKEN_STUN false): that is all; it keeps its
+## token, move and string and fights on. Round 8 (flag true, dazed): a pending
+## answer, punish, move or string goes, and the token goes back (the director
+## sees is_enemy_broken_stunned too); pressure_recovered then clears what
+## pressure left.
 func _on_pressure_broken(f: Node3D, _attacker: Node3D) -> void:
 	if f != fighter or fighter.is_dead():
 		return
@@ -686,6 +703,8 @@ func _on_pressure_broken(f: Node3D, _attacker: Node3D) -> void:
 	_guard_until = 0.0
 	_tap_guard_until = -INF
 	_apply_guard()
+	if not Tuning.R9_BROKEN_STUN:
+		return
 	_answer_pending = false
 	_punish_until = 0.0
 	_has_move = false
@@ -712,6 +731,9 @@ func _on_pressure_recovered(f: Node3D) -> void:
 ## drains below the line, or after BACK_OFF_MAX_TIME (then not again until a
 ## new hit raises its pressure). True while it backs off this tick.
 func _update_back_off(player: Fighter) -> bool:
+	if not Tuning.R9_PRESSURE_PASSIVE:
+		_backing_off = false  # Round 9: pressure never backs it off
+		return false
 	var p := get_pressure()
 	var line := Tuning.R8_PRESSURE_BACK_OFF
 	if _backing_off and (p < line or _time - _backoff_since > BACK_OFF_MAX_TIME):
@@ -1213,7 +1235,8 @@ func _tick_request(delta: float, player: Fighter) -> void:
 	_was_near = near
 	if near or engaged:
 		# Round 8: under pressure the interval runs 1 / (1 + p) as fast (time between attacks x (1 + p)).
-		_interval_left -= delta / (1.0 + get_pressure())
+		# Round 9: only with Tuning.R9_PRESSURE_PASSIVE (_pressure_slow is 0 otherwise).
+		_interval_left -= delta / (1.0 + _pressure_slow())
 	var urgent := _answer_pending or _time < _punish_until or _brawler_wants_grab()
 	if not urgent and (_interval_left > 0.0 or not (near or engaged)):
 		return
@@ -1379,7 +1402,7 @@ func _startup_for(move: StringName) -> float:
 	var s := AttackDirector.enemy_startup_s(move)
 	if Tuning.difficulty == Tuning.Difficulty.EASY:
 		s += EASY_TELL_BONUS
-	s += Tuning.R8_PRESSURE_TELL_SLOW * get_pressure()
+	s += Tuning.R8_PRESSURE_TELL_SLOW * _pressure_slow()  # Round 9: 0 unless R9_PRESSURE_PASSIVE
 	return maxf(s, Tuning.frames(AttackDirector.tell_min_frames()))
 
 ## Expected first active frames of the string's later hits, in s after the
@@ -1418,7 +1441,7 @@ func _on_attack_ended(_move_id_ended: StringName) -> void:
 		_start_failures = 0
 		return
 	_string_rest.clear()
-	_interval_left = maxf(_new_interval() - (_time - _attack_started_at) / (1.0 + get_pressure()), REQUEST_RETRY)
+	_interval_left = maxf(_new_interval() - (_time - _attack_started_at) / (1.0 + _pressure_slow()), REQUEST_RETRY)
 
 func _new_interval() -> float:
 	if AttackDirector.live_enemy_count() <= 1:
@@ -1662,7 +1685,7 @@ func _guard_wanted(dist: float, with_token: bool) -> bool:
 
 ## Press / release BLOCK on changes of the wanted guard state only.
 func _apply_guard() -> void:
-	var want := _want_guard
+	var want := _want_guard and not is_broken()  # Round 9: a broken guard never comes up
 	if want == _block_down:
 		return
 	_block_down = want

@@ -17,14 +17,23 @@ extends Node
 ##   a heavy accent (a bright break-coloured flash and sparks); a hit (landed or
 ##   blocked) that adds pressure (HitInfo.pressure > 0) leaves a small
 ##   break-coloured tick spark, bigger as the victim's pressure fills.
-## - pressure_broken: the break burst around the enemy's upper body: a big
-##   break-coloured flash with a shock ring, two shatter rings (jagged ring and
-##   crack spokes) expanding through the body, glass-like shards, sparks all
-##   round, a white body flash and a shudder; ScreenFX flashes the screen.
-## - Dazed loop while broken: small sparks orbiting above the head and a woozy
-##   shimmer on it, from pressure_broken until pressure_recovered (or death,
+## - pressure_broken: the break burst centred on the guard (forearms and
+##   chest, FXRules.guard_point): a big break-coloured flash with a shock ring,
+##   two shatter rings (jagged ring and crack spokes) expanding through the
+##   guard, glass-like shards, sparks all round and off each forearm, a white
+##   body flash and a shudder; ScreenFX flashes the screen.
+## - The broken loop, from pressure_broken until pressure_recovered (or death,
 ##   or CombatController.is_broken() going false after it was seen true, or
-##   R8_BREAK_TIME + DAZE_SLACK at the latest).
+##   R8_BREAK_TIME + DAZE_SLACK at the latest). Round 9 (guard broken, not
+##   stunned; `broken_stun` = Tuning.R9_BROKEN_STUN false): the cracked guard,
+##   crackling break-coloured sparks jumping on both forearms, a spark spat off
+##   one now and then, and a faint flicker on the arms (limb glows). With
+##   broken_stun true: the Round 8 dazed loop (small sparks orbiting above the
+##   head and a woozy shimmer on it).
+## - Round 9 axe kick (FXRules.is_axe_kick): a sharp heel-impact crack at the
+##   contact, a hot white flash, a chop streak and sparks fanning down and out,
+##   heavier when charged (by HitInfo.charge). The floor shockwave that
+##   follows is FreeflowFX's spike impact.
 ## - air_follow_started: a dust pop at the jumper's feet. air_hit: a small
 ##   cool flash on the body, a little bigger with the count.
 ## OWNER: agent F (FX & audio).
@@ -72,7 +81,7 @@ const BREAK_RING_SIZE := [Vector2(0.5, 3.0), Vector2(0.4, 2.1)]  ## m: start .. 
 const BREAK_RING_DELAY := [0.0, 0.06]       ## s the inner ring follows the outer one
 const BREAK_RING_BRIGHT := 2.6
 const BREAK_RING_POOL := 2          ## bursts at once (each has two rings)
-const BREAK_SPARKS := 6
+const BREAK_SPARKS := 4          ## round the guard, plus one off each forearm (BloodFX has 6 spark emitters)
 const BREAK_SHARDS := 1.0           ## WorldFX.glass size
 const BREAK_JITTER := 0.18          ## s of shudder
 ## The dazed loop.
@@ -85,6 +94,21 @@ const DAZE_STAR := 0.13             ## m
 const DAZE_SHIMMER := 0.55          ## m: the woozy halo on the head
 const DAZE_SLACK := 1.0             ## s past R8_BREAK_TIME before a loop with no pressure_recovered stops
 const DAZE_FADE := 0.15             ## s fade in and out
+## The cracked guard (Round 9).
+const CRACK_SPARKS := 3             ## arcs jumping on each forearm
+const CRACK_STAR := 0.1             ## m
+const CRACK_JUMP := 0.09            ## m: how far an arc jumps off the forearm
+const CRACK_HZ := 18.0              ## arc re-strikes per s
+const CRACK_SPIT_GAP := Vector2(0.14, 0.32)  ## s between sparks spat off a forearm
+const CRACK_SPIT := 0.35            ## BloodFX.spark size
+const CRACK_GLOW := 0.32            ## the arms' faint flicker (limb glow intensity)...
+const CRACK_GLOW_FLICKER := 0.6     ## ...drops by up to this share at random
+const BREAK_ARM_SPARK := 0.7        ## the break burst's spark off each forearm
+## The axe kick's heel crack (Round 9): tap, charged at c = 0 .. 1.
+const AXE_COLOR := Color(1.0, 0.95, 0.85)
+const AXE_FLASH := Vector3(0.45, 0.6, 0.85)
+const AXE_BRIGHT := Vector3(3.6, 4.2, 5.2)
+const AXE_SPARK := Vector3(0.6, 0.8, 1.0)
 ## Air.
 const AIR_DUST := 1200.0
 const AIR_COLOR := Color(0.85, 0.93, 1.0)
@@ -112,6 +136,13 @@ var _daze_fighter: Array = []
 var _daze_age := PackedFloat32Array()    ## world s since the break; < 0 idle
 var _daze_out := PackedFloat32Array()    ## s of fade-out left; < 0 = not stopping
 var _daze_seen: Array[bool] = []         ## is_broken() was seen true
+var _daze_stun: Array[bool] = []         ## this slot shows the dazed loop (else the cracked guard)
+var _cracks: Array[Node3D] = []          ## the cracked-guard arcs, per slot
+var _crack_glows: Array = []             ## per slot: [left, right] arm glows
+var _crack_spit := PackedFloat32Array()  ## s to the next spat spark, per slot
+## Round 9: the break dazes (the Round 8 loop) instead of cracking the guard.
+## Tuning.R9_BROKEN_STUN; tests may flip it.
+var broken_stun: bool = Tuning.R9_BROKEN_STUN
 
 func setup(fx: Node, world: Node, holder: Node3D) -> void:
 	_fx = fx
@@ -156,6 +187,8 @@ func reset() -> void:
 		_daze_age[i] = -1.0
 		_daze_out[i] = -1.0
 		_dazes[i].visible = false
+		_cracks[i].visible = false
+		_drop_crack_glows(i)
 
 func _record(event: StringName, what: Variant, size: float) -> void:
 	counts[event] = int(counts.get(event, 0)) + 1
@@ -353,6 +386,30 @@ func _on_hit_landed(info: HitInfo) -> void:
 		_record(&"broken_hit", info.move_id, BROKEN_FLASH)
 	if info.pressure > 0.0:
 		_pressure_tick(info, at)
+	if FXRules.is_axe_kick(info):
+		_axe_crack(info, at)
+
+## Round 9: the axe kick's heel crack at the contact (see the header). The
+## sizes step from a tap (x) to a charged one at c = 0 (y) and c = 1 (z).
+func _axe_crack(info: HitInfo, at: Vector3) -> void:
+	var k := axe_heft(info)
+	var size := _axe_lerp(AXE_FLASH, k)
+	var sp := _axe_lerp(AXE_SPARK, k)
+	_fx.call(&"impact_flash", at, size, true, false, _axe_lerp(AXE_BRIGHT, k), -1.0, AXE_COLOR)
+	_world.call(&"streak", at + Vector3.DOWN * 0.6)
+	_fx.call(&"spark", at, Vector3.DOWN, sp)
+	var flat := Vector3(info.hit_direction.x, 0.0, info.hit_direction.z)
+	var side := flat.cross(Vector3.UP).normalized() if flat.length_squared() > 1e-4 else Vector3.RIGHT
+	_fx.call(&"spark", at, (side + Vector3.DOWN * 0.7).normalized(), sp * 0.7)
+	_fx.call(&"spark", at, (-side + Vector3.DOWN * 0.7).normalized(), sp * 0.7)
+	_record(&"axe_crack", info.move_id, size)
+
+## 0 for a tap axe kick; 1 .. 2 for a charged one at c = 0 .. 1.
+static func axe_heft(info: HitInfo) -> float:
+	return 1.0 + clampf(info.charge, 0.0, 1.0) if FXRules.is_charged(info) else 0.0
+
+static func _axe_lerp(v: Vector3, k: float) -> float:
+	return lerpf(v.x, v.y, k) if k <= 1.0 else lerpf(v.y, v.z, k - 1.0)
 
 ## A blocked hit still adds pressure (that is how guards break).
 func _on_hit_blocked(info: HitInfo) -> void:
@@ -373,11 +430,11 @@ static func _hit_point(info: HitInfo) -> Vector3:
 		return info.hit_position
 	return FXRules.upper_body(info.victim)
 
-## The break burst (see the header), then the dazed loop.
+## The break burst on the guard (see the header), then the broken loop.
 func _on_pressure_broken(fighter: Node3D, _attacker: Node3D) -> void:
 	if not is_instance_valid(fighter):
 		return
-	var at := FXRules.upper_body(fighter)
+	var at := FXRules.guard_point(fighter)
 	_fx.call(&"_ring_allowed")  # spend the ring budget: the break's ring is never refused
 	_fx.call(&"impact_flash", at, BREAK_FLASH, false, true, BREAK_BRIGHT, 1.0, BREAK_COLOR)
 	_start_rings(at)
@@ -385,6 +442,9 @@ func _on_pressure_broken(fighter: Node3D, _attacker: Node3D) -> void:
 	for k in BREAK_SPARKS:
 		var a := TAU * k / BREAK_SPARKS
 		_fx.call(&"spark", at, Vector3(cos(a), 0.35, sin(a)).normalized(), 1.0)
+	for bone: StringName in [Bones.L_LOWER_ARM, Bones.R_LOWER_ARM]:
+		var arm := FXRules.limb_point(fighter, bone)
+		_fx.call(&"spark", arm, (arm - FXRules.upper_body(fighter) + Vector3.UP * 0.1).normalized(), BREAK_ARM_SPARK)
 	_fx.call(&"_flash", fighter)
 	_fx.call(&"_jitter_start", fighter, HitInfo.Tier.STAGGER, 1.0, BREAK_JITTER)
 	_start_daze(fighter)
@@ -442,25 +502,50 @@ func _update_ring(i: int, age: float) -> void:
 
 
 # =============================================================================
-# The dazed loop
+# The broken loop: the cracked guard (Round 9) or the dazed head (Round 8)
 # =============================================================================
 
 ## True while `fighter` shows the dazed loop (tests).
 func is_dazed(fighter: Node3D) -> bool:
-	return _daze_slot(fighter) >= 0
+	var i := _daze_slot(fighter)
+	return i >= 0 and _daze_stun[i]
 
-## Dazed loops showing (tests, debug).
-func active_dazes() -> int:
+## True while `fighter` shows the cracked guard (tests).
+func is_guard_cracked(fighter: Node3D) -> bool:
+	var i := _daze_slot(fighter)
+	return i >= 0 and not _daze_stun[i]
+
+## Broken loops showing, either kind (tests, debug).
+func active_broken_loops() -> int:
 	var n := 0
 	for i in DAZE_POOL:
 		if _daze_fighter[i] != null:
 			n += 1
 	return n
 
-## The loop's node for a fighter (tests), or null.
+## Dazed loops showing (tests, debug).
+func active_dazes() -> int:
+	var n := 0
+	for i in DAZE_POOL:
+		if _daze_fighter[i] != null and _daze_stun[i]:
+			n += 1
+	return n
+
+## The dazed loop's node for a fighter (tests), or null.
 func get_daze_node(fighter: Node3D) -> Node3D:
 	var i := _daze_slot(fighter)
-	return _dazes[i] if i >= 0 else null
+	return _dazes[i] if i >= 0 and _daze_stun[i] else null
+
+## The cracked guard's node for a fighter (tests), or null: it sits on the
+## guard; its children are the arcs (CRACK_SPARKS per forearm, left first).
+func get_crack_node(fighter: Node3D) -> Node3D:
+	var i := _daze_slot(fighter)
+	return _cracks[i] if i >= 0 and not _daze_stun[i] else null
+
+## The arm glows of a fighter's cracked guard (tests): [left, right], or [].
+func get_crack_glows(fighter: Node3D) -> Array:
+	var i := _daze_slot(fighter)
+	return _crack_glows[i] if i >= 0 and not _daze_stun[i] else []
 
 func _daze_slot(fighter: Node3D) -> int:
 	if not is_instance_valid(fighter):
@@ -485,13 +570,27 @@ func _start_daze(fighter: Node3D) -> void:
 				oldest = i
 		if slot < 0:
 			slot = oldest
+	_drop_crack_glows(slot)
 	_daze_fighter[slot] = fighter
 	_daze_age[slot] = 0.0
 	_daze_out[slot] = -1.0
 	_daze_seen[slot] = false
-	_dazes[slot].visible = true
-	_place_daze(slot)
-	_record(&"daze_start", fighter.name, 0.0)
+	_daze_stun[slot] = broken_stun
+	_dazes[slot].visible = broken_stun
+	_cracks[slot].visible = not broken_stun
+	if broken_stun:
+		_place_daze(slot)
+		_record(&"daze_start", fighter.name, 0.0)
+		return
+	_crack_spit[slot] = 0.0
+	var glows: Array = []
+	for bone: StringName in [Bones.L_LOWER_ARM, Bones.R_LOWER_ARM]:
+		var g: Node3D = _fx.call(&"limb_glow", fighter, bone, BREAK_COLOR, 0.0, CRACK_GLOW)
+		if g != null:
+			glows.append(g)
+	_crack_glows[slot] = glows
+	_place_crack(slot, 0.0)
+	_record(&"guard_crack_start", fighter.name, 0.0)
 
 func _stop_daze(fighter: Node3D, at_once: bool) -> void:
 	if not is_instance_valid(fighter):
@@ -502,13 +601,21 @@ func _stop_daze(fighter: Node3D, at_once: bool) -> void:
 				_free_daze(i)
 			elif _daze_out[i] < 0.0:
 				_daze_out[i] = DAZE_FADE
-			_record(&"daze_stop", fighter.name, 0.0)
+			_record(&"daze_stop" if _daze_stun[i] else &"guard_crack_stop", fighter.name, 0.0)
 
 func _free_daze(i: int) -> void:
 	_daze_fighter[i] = null
 	_daze_age[i] = -1.0
 	_daze_out[i] = -1.0
 	_dazes[i].visible = false
+	_cracks[i].visible = false
+	_drop_crack_glows(i)
+
+func _drop_crack_glows(i: int) -> void:
+	for g in _crack_glows[i]:
+		if is_instance_valid(g):
+			(g as Node).call(&"stop")
+	_crack_glows[i] = []
 
 func _update_dazes(delta: float) -> void:
 	for i in DAZE_POOL:
@@ -531,7 +638,49 @@ func _update_dazes(delta: float) -> void:
 				_daze_seen[i] = true
 			if _daze_age[i] > Tuning.R8_BREAK_TIME + DAZE_SLACK or (broken == 0 and _daze_seen[i]):
 				_daze_out[i] = DAZE_FADE
-		_place_daze(i)
+		if _daze_stun[i]:
+			_place_daze(i)
+		else:
+			_place_crack(i, delta)
+
+## The cracked guard: arcs re-strike at random on both forearms (a hashed
+## flicker, CRACK_HZ times a second), a spark spits off one forearm now and
+## then, and the arm glows flicker faintly.
+func _place_crack(i: int, delta: float) -> void:
+	var f: Node3D = _daze_fighter[i]
+	var node := _cracks[i]
+	var age := maxf(_daze_age[i], 0.0)
+	var fade := clampf(age / DAZE_FADE, 0.0, 1.0) * (1.0 - float(_fx.call(&"get_fighter_fade", f)))
+	if _daze_out[i] >= 0.0:
+		fade *= clampf(_daze_out[i] / DAZE_FADE, 0.0, 1.0)
+	node.global_position = FXRules.guard_point(f)
+	var step := floorf(age * CRACK_HZ)
+	var arms: Array[Vector3] = [FXRules.limb_point(f, Bones.L_LOWER_ARM), FXRules.limb_point(f, Bones.R_LOWER_ARM)]
+	for a in 2:
+		for k in CRACK_SPARKS:
+			var j := a * CRACK_SPARKS + k
+			var arc := node.get_child(j) as MeshInstance3D
+			var h := Vector3(_hash01(step, j, 1.0), _hash01(step, j, 2.0), _hash01(step, j, 3.0)) * 2.0 - Vector3.ONE
+			arc.global_position = arms[a] + h * CRACK_JUMP
+			var on := 1.0 if _hash01(step, j, 4.0) > 0.45 else 0.15
+			arc.set_instance_shader_parameter(&"spin", step * 1.7 + j)
+			arc.set_instance_shader_parameter(&"tint", Color(BREAK_COLOR.r, BREAK_COLOR.g, BREAK_COLOR.b,
+					2.2 * on * fade))
+	var flick := 1.0 - CRACK_GLOW_FLICKER * _hash01(step, 7.0, 5.0)
+	for g in _crack_glows[i]:
+		if is_instance_valid(g):
+			(g as Node).call(&"set_intensity", CRACK_GLOW * flick * fade)
+	_crack_spit[i] -= delta
+	if _crack_spit[i] <= 0.0 and _daze_out[i] < 0.0 and fade > 0.5:
+		_crack_spit[i] = randf_range(CRACK_SPIT_GAP.x, CRACK_SPIT_GAP.y)
+		var at: Vector3 = arms[randi() % 2]
+		var dir := Vector3(randf_range(-1.0, 1.0), randf_range(0.2, 1.0), randf_range(-1.0, 1.0)).normalized()
+		_fx.call(&"spark", at, dir, CRACK_SPIT)
+		_record(&"guard_crack_spark", f.name, CRACK_SPIT)
+
+## A stable pseudo-random 0..1 for (step, index, salt).
+static func _hash01(step: float, index: float, salt: float) -> float:
+	return fposmod(sin(step * 12.9898 + index * 78.233 + salt * 37.719) * 43758.5453, 1.0)
 
 func _place_daze(i: int) -> void:
 	var f: Node3D = _daze_fighter[i]
@@ -626,6 +775,20 @@ func _build() -> void:
 		_dazes.append(n)
 		_daze_fighter.append(null)
 		_daze_seen.append(false)
+		_daze_stun.append(false)
+		var cn := Node3D.new()
+		cn.name = "CrackedGuard%d" % i
+		cn.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		cn.visible = false
+		_holder.add_child(cn)
+		for k in CRACK_SPARKS * 2:
+			var arc: MeshInstance3D = _fx.call(&"_fx_quad", star_mat, "Arc%d" % k, cn)
+			arc.scale = Vector3.ONE * CRACK_STAR
+			arc.visible = true
+		_cracks.append(cn)
+		_crack_glows.append([])
+	_crack_spit.resize(DAZE_POOL)
+	_crack_spit.fill(0.0)
 
 ## A shatter ring: a jagged broken ring with crack spokes running in and out.
 func _make_shatter_tex(r: RandomNumberGenerator) -> ImageTexture:

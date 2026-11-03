@@ -12,6 +12,8 @@ extends Node
 ##    it backs off (within BACKOFF_START s, at least BACKOFF_MIN m), attacks
 ##    nothing while backing off, and once B's meter drains under the line it
 ##    re-engages and attacks within REENGAGE_LIMIT s.
+## Round 9: with Tuning.R9_BROKEN_STUN false A only checks no block through
+## the break; B runs only with Tuning.R9_PRESSURE_PASSIVE.
 ## Measured numbers are printed. OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
@@ -51,7 +53,10 @@ func _run() -> void:
 	GameEvents.pressure_broken.connect(func(f: Node3D, _a: Node3D) -> void: broke_at[f] = Util.game_now())
 	await _wait(0.3)
 	await _part_break()
-	await _part_back_off()
+	if Tuning.R9_PRESSURE_PASSIVE:
+		await _part_back_off()
+	else:
+		print("[ai] info: Tuning.R9_PRESSURE_PASSIVE false: Round 8 back-off part B skipped")
 	_finish()
 
 func _grunt(level: int, pos: Vector3) -> Fighter:
@@ -143,8 +148,12 @@ func _part_break() -> void:
 	check(recovered[0] and absf((t_rec - t0) - Tuning.R8_BREAK_TIME) <= 0.15, "the break lasts %.2f s (%.1f s)" % [t_rec - t0, Tuning.R8_BREAK_TIME])
 	check(aware == ticks and gb.pressure_breaks == 1, "the brain knows it is broken every tick (%d / %d) and saw pressure_broken (%d)" % [
 		aware, ticks, gb.pressure_breaks])
-	check(starts == 0 and token_ticks == 0 and block_ticks == 0 and walk_ticks == 0,
-		"broken: no attack (%d), no token (%d), no block (%d), no walking (%d)" % [starts, token_ticks, block_ticks, walk_ticks])
+	if Tuning.R9_BROKEN_STUN:
+		check(starts == 0 and token_ticks == 0 and block_ticks == 0 and walk_ticks == 0,
+			"broken: no attack (%d), no token (%d), no block (%d), no walking (%d)" % [starts, token_ticks, block_ticks, walk_ticks])
+	else:
+		check(block_ticks == 0, "broken (Round 9: guard broken): no block (%d ticks); it may act (starts %d, walking %d)" % [
+			block_ticks, starts, walk_ticks])
 	GameEvents.pressure_recovered.disconnect(on_rec)
 	var back := await _until(func() -> bool: return gb.attacks_started > a0, RESUME_LIMIT)
 	check(back, "after the break it attacks again (%.2f s after pressure_recovered)" % (Util.game_now() - t_rec))

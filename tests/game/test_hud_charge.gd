@@ -13,7 +13,10 @@ extends Node
 ##   is_broken() it is full and flashing, then it empties. Waves enemies get a
 ##   health + pressure pair when engaged (close, the target, under pressure) or
 ##   damaged; none over a far untouched enemy or the Duelist; it lifts above a
-##   counter prompt and fades out on death. pressure_broken pops "BROKEN".
+##   counter prompt and fades out on death. pressure_broken pops "GUARD BROKEN"
+##   (Round 9: no daze) and the broken bar is labelled the same.
+## - Round 9 string pips: shown in play, the pip of get_string_index() lit (J,
+##   C, H), the charging punch's pip lit in the meter's colour.
 ## - F3 overlay: the charge c and steps, the target's pressure, max, broken
 ##   time and level, the air hits.
 ## A test double (_FakeCombat) stands in for CombatController's Round 8
@@ -85,6 +88,7 @@ func _run() -> void:
 	hud.set_opponent(duelist)
 	await _frames(3)
 
+	await _pips(hud, fp)
 	await _meter(hud, fp, player, duelist)
 	await _pressure(hud, fd, fn, ff, duelist, near, far, player)
 	await _overlay(hud, fp, fn, player, near)
@@ -94,6 +98,36 @@ func _run() -> void:
 	await _frames(2)
 	for f: _FakeCombat in [fp, fd, fn, ff]:
 		f.free()
+
+# --- Round 9: string pips -----------------------------------------------------------------
+func _pips(hud: HUD, fp: _FakeCombat) -> void:
+	var lit := []
+	for i in [0, 1, 2, 0]:
+		fp.string_index = i
+		await _frames(1)
+		var p := hud.get_string_pips()
+		lit.append(p.get("lit", -1))
+		_check(p.get("visible", false) and hud._pips.visible and p["index"] == i and p["lit"] == i and not p["charging"],
+			"pips: get_string_index() %d lights %s (%s)" % [i, HUD.STRING_PIP_LETTERS[i], p])
+	print("    pips lit for string index 0, 1, 2, 0: %s" % [lit])
+	fp.string_index = 0
+	fp.move = &"hook"
+	fp.c = 0.5
+	fp.steps = [0.4, 0.8]
+	fp.charging = true
+	await _frames(2)
+	var p := hud.get_string_pips()
+	_check(p["charging"] and p["lit"] == 2 and p["color"] == hud.get_charge_meter()["draw_color"],
+		"pips: a charging hook lights H in the meter's colour (%s)" % p)
+	fp.charging = false
+	await _time_until(func() -> bool: return not hud.get_charge_meter().get("visible", false), 2.0)
+	await _frames(1)
+	_check(hud.get_string_pips()["lit"] == 0, "pips: back to the string index after the charge")
+	_check(is_equal_approx(HUD.string_pip_fade(2, 0.0), 1.0) and HUD.string_pip_fade(2, Tuning.R9_STRING_RESET) < 0.5
+		and is_equal_approx(HUD.string_pip_fade(0, 5.0), 1.0), "pips: the lit cross / hook fades over R9_STRING_RESET")
+	fp.move = &""
+	fp.c = 0.0
+	fp.steps = []
 
 # --- Charge meter ------------------------------------------------------------------------
 func _meter(hud: HUD, fp: _FakeCombat, player: Fighter, duelist: Fighter) -> void:
@@ -276,7 +310,9 @@ func _pressure(hud: HUD, fd: _FakeCombat, fn: _FakeCombat, ff: _FakeCombat, duel
 		if not o["broken"] or not is_equal_approx(float(o["fill"]), 1.0):
 			full_all = false
 	_check(full_all, "while is_broken(): full and flashing for 0.5 s (even with get_pressure() at 0)")
-	_check(hud.get_popup_texts().has("BROKEN"), "pressure_broken pops BROKEN over the enemy")
+	_check(hud.get_popup_texts().has("GUARD BROKEN") and not hud.get_popup_texts().has("BROKEN"),
+		"pressure_broken pops GUARD BROKEN over the enemy (%s)" % ", ".join(hud.get_popup_texts()))
+	_check(hud.get_opponent_pressure()["label"] == "GUARD BROKEN", "the broken bar reads GUARD BROKEN")
 	fd.broken = false
 	await _frames(1)
 	_check(not hud.get_opponent_pressure()["broken"], "the flash ends with the break")
@@ -566,6 +602,10 @@ class _FakeCombat extends CombatController:
 	var broken := false
 	var broken_left := 0.0
 	var air_hits := 0
+	var string_index := 0
+
+	func get_string_index() -> int:
+		return string_index
 
 	func is_charging() -> bool:
 		return charging

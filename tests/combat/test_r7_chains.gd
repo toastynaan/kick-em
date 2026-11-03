@@ -6,7 +6,7 @@ extends "res://tests/combat/combat_test_base.gd"
 ##   active frame on (hitstop and recovery included) the latest press is
 ##   buffered (one press only); still held when it starts, it charges (Round 8);
 ## - on a hit the buffered press starts after R7_CHAIN_CUT of the recovery; on a
-##   whiff only after the full recovery, and the punch string resets;
+##   whiff only after the full recovery (Round 9: the punch string holds);
 ## - mashing LMB at 20 Hz never makes a 3-hit string faster than pressing once
 ##   per move at the right moment (nor faster than its frame data);
 ## - the chain: chain_hit counts 1, 2, 3 (get_chain_count matches), it survives
@@ -125,7 +125,7 @@ func run() -> void:
 	var full := Tuning.frames(Tuning.R8_MOVES[&"jab"]["tap"]["f"].z)
 	print("  jab whiff: the next press started %.3f s into the recovery (full %.3f) as a %s" % [next_after, full, _starts[1][0]])
 	check(absf(next_after - full) <= SLACK * 2.0, "on a whiff it waits for the full recovery")
-	check(_starts[1][0] == &"jab", "and the string reset: the press after the whiffed jab is a jab, not a cross")
+	check(_starts[1][0] == &"cross", "and the string holds (Round 9): the press after the whiffed jab is the cross")
 
 	print("the chain: chain_hit 1, 2, 3, grace, chain_ended")
 	await _idle()
@@ -187,10 +187,11 @@ func _start_of(id: StringName) -> float:
 func _idle() -> void:
 	await wait_until(func() -> bool: return not _p.combat.is_attacking() and _p.can_act(), 3.0)
 
-## Idle, and the chain dropped (a fresh string).
+## Idle, the chain dropped and the string back at the jab (Round 9: R9_STRING_RESET idle).
 func _fresh() -> void:
 	await _idle()
 	await wait_until(func() -> bool: return _p.combat.get_chain_count() == 0, 2.0)
+	await wait_until(func() -> bool: return _p.combat.get_string_index() == 0, Tuning.R9_STRING_RESET + 0.5)
 	await ticks(2)
 
 ## A grunt dummy `dist` m in front of the player, the player moved to fresh ground.

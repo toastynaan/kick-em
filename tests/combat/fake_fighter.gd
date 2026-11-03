@@ -24,6 +24,13 @@ func launch(velocity_change: Vector3, hit_point: Vector3, hit_bone: StringName =
 	reacts.append([&"launch", velocity_change, 0.0, 0.0, null])
 	super(velocity_change, hit_point, hit_bone)
 
+## Round 9: every add_spin(rate) call, in order (rad/s).
+var spins: Array[float] = []
+
+func add_spin(rate: float) -> void:
+	spins.append(rate)
+	super(rate)
+
 ## The last recorded reaction ([] when none).
 func last_react() -> Array:
 	return reacts[-1] if not reacts.is_empty() else []

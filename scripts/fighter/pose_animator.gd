@@ -54,6 +54,9 @@ extends Node
 ##     ragdoll), react_broken (R8_BREAK_TIME; also a hold), air_follow (the
 ##     launcher jump; also a hold); react_fold under 0.45 s is the quick
 ##     half-keel. play_move(air_jab | air_cross | air_kick, R8_AIR_FRAMES).
+## Round 9: play_move(axe_kick, R9_AXE "f") and play_move(air_axe, R9_AXE
+##   "air_frames"). The axe kick charges on heavy_leg_kick_load; released
+##   from it, the load runs through the knee chamber into the upswing.
 ##
 ## Layers, bottom to top: locomotion (legs by IK to procedural foot targets, so
 ## feet stay planted) -> upper overlay -> held pose -> one-shot move ->

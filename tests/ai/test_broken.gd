@@ -16,12 +16,28 @@ extends Node
 ##    and nothing starts until it recovers.
 ## D. The Duelist (reads forced on) with his read guard up breaks: the guard
 ##    drops, no read and no answer through the break; he fights after it.
+## Round 9 (docs/Round 9 — Playtest Fixes.md: pressure is a guard breaker):
+## with Tuning.R9_BROKEN_STUN false A, B and C are Round 8 only; instead
+## E. A grunt mid-turn (token, tap guard up) breaks with p = 1: the guard
+##    drops, it keeps its token, and through BROKEN_RUN s of broken it walks,
+##    attacks at its normal pace (first start within PACE_FIRST s, no gap
+##    between starts over PACE_GAP s, at least PACE_MIN starts) and never
+##    guards (no tap guard against the taps, no block held, guard chance 0).
+## D keeps its read and block checks; the answer may go ahead.
 ## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 const FakeCombat := preload("res://tests/ai/fake_combat.gd")
 const RESUME_LIMIT := 4.0   ## s after pressure_recovered in which it must attack again
 const TAP_EVERY := 0.1      ## s between the tapped punches aimed at it while broken
+## Round 9 E: held broken this long (longer than a real break, to see its pace).
+const BROKEN_RUN := 6.0
+## s to its first attack: a lone grunt's interval at most (AIBrain.LONE_INTERVAL.y)
+## plus a walk-in and a tell.
+const PACE_FIRST := AIBrain.LONE_INTERVAL.y + 1.0
+## s between attack starts at most: the interval, a string and its recovery.
+const PACE_GAP := AIBrain.LONE_INTERVAL.y + 2.0
+const PACE_MIN := 3
 
 var failures := 0
 var player: Fighter
@@ -44,9 +60,13 @@ func _run() -> void:
 	Util.ensure_wired(player)
 	AttackDirector.set_player(player)
 	await _wait(0.3)
-	await _part_turn(&"is_broken")
-	await _part_turn(&"react")
-	await _part_windup()
+	if Tuning.R9_BROKEN_STUN:
+		await _part_turn(&"is_broken")
+		await _part_turn(&"react")
+		await _part_windup()
+	else:
+		print("[ai] info: Tuning.R9_BROKEN_STUN false: Round 8 daze parts A-C skipped")
+		await _part_guard_broken()
 	await _part_duelist()
 	_finish()
 
@@ -160,6 +180,70 @@ func _part_windup() -> void:
 	g.queue_free()
 	await _wait(0.2)
 
+# --- E. Round 9: broken = guard broken, it keeps attacking -------------------------------------
+
+func _part_guard_broken() -> void:
+	var g := Util.spawn_pressure_enemy(self, &"grunt", Vector3(0, 0.05, -2.5), Vector3.BACK)
+	var gb := g.brain as AIBrain
+	var fc := g.combat as FakeCombat
+	await _wait(0.3)
+	var turn := await _until(func() -> bool: return AttackDirector.has_token(g) and not g.combat.is_attacking(), 6.0)
+	check(turn, "E: grunt mid-turn (token, not yet swinging)")
+	gb._tap_guard(player)
+	await _ticks(1)
+	var guard_before := g.combat.is_blocking()
+	fc.fake_pressure = 1.0  # B: p reads 1 while broken
+	fc.fake_broken = true
+	GameEvents.pressure_broken.emit(g, player)
+	await _ticks(1)
+	var token_kept := AttackDirector.has_token(g)
+	var a0 := gb.attacks_started
+	var g0 := gb.tap_guards
+	var starts: Array[float] = []
+	var on_start := func(_m: StringName) -> void: starts.append(Util.game_now())
+	gb.attack_launched.connect(on_start)
+	var t0 := Util.game_now()
+	var next_tap := t0
+	var taps := 0
+	var block_ticks := 0
+	var walk_ticks := 0
+	var guard_chance := 0.0
+	var read_chance := 0.0
+	while Util.game_now() - t0 < BROKEN_RUN:
+		if Util.game_now() >= next_tap:
+			next_tap += TAP_EVERY
+			taps += 1
+			GameEvents.strike_started.emit(player, g, &"jab", false, 0)
+		_keep_player()
+		await get_tree().physics_frame
+		block_ticks += 1 if g.combat.is_blocking() else 0
+		walk_ticks += 1 if Vector2(g.move_input.x, g.move_input.z).length() > 0.01 else 0
+		guard_chance = maxf(guard_chance, gb.get_guard_chance())
+		read_chance = maxf(read_chance, gb.block_mult())
+	gb.attack_launched.disconnect(on_start)
+	var n := gb.attacks_started - a0
+	var first := starts[0] - t0 if not starts.is_empty() else INF
+	var max_gap := 0.0
+	for i in range(1, starts.size()):
+		max_gap = maxf(max_gap, starts[i] - starts[i - 1])
+	var guards := gb.tap_guards - g0
+	print("[ai] info: E: broken %.1f s at p 1: %d attack starts, first %.2f s in, longest gap %.2f s; token kept %s; tap guards %d of %d taps, block ticks %d, walking ticks %d, guard chance %.2f, block mult %.2f" % [
+		BROKEN_RUN, n, first, max_gap, token_kept, guards, taps, block_ticks, walk_ticks, guard_chance, read_chance])
+	check(guard_before and token_kept, "E: the break drops the raised guard but keeps the token (guard up before %s, token %s)" % [
+		guard_before, token_kept])
+	check(n >= PACE_MIN and first <= PACE_FIRST and max_gap <= PACE_GAP,
+		"E: broken, it still attacks at its normal pace (%d starts >= %d, first %.2f s <= %.1f, longest gap %.2f s <= %.1f)" % [
+			n, PACE_MIN, first, PACE_FIRST, max_gap, PACE_GAP])
+	check(guards == 0 and block_ticks == 0 and guard_chance == 0.0 and read_chance == 0.0,
+		"E: never guards while broken (%d tap guards of %d taps, %d block ticks, guard chance %.2f, block mult %.2f)" % [
+			guards, taps, block_ticks, guard_chance, read_chance])
+	check(walk_ticks > 0, "E: it keeps moving (%d walking ticks)" % walk_ticks)
+	_set_broken(g, false, &"is_broken")
+	fc.fake_pressure = -1.0
+	AttackDirector.unregister_enemy(g)
+	g.queue_free()
+	await _wait(0.2)
+
 # --- D. The Duelist --------------------------------------------------------------------------------
 
 func _part_duelist() -> void:
@@ -196,7 +280,8 @@ func _part_duelist() -> void:
 		up, reads, blocked, answer, starts])
 	check(up and blocked == 0 and reads == 0, "Duelist: the read guard drops at the break; no read, no block through it (%d reads, %d ticks)" % [
 		reads, blocked])
-	check(answer == 0 and starts == 0, "Duelist: no answer and no attack while broken (%d, %d)" % [answer, starts])
+	if Tuning.R9_BROKEN_STUN:
+		check(answer == 0 and starts == 0, "Duelist: no answer and no attack while broken (%d, %d)" % [answer, starts])
 	_set_broken(d, false, &"is_broken")
 	db.read_chance_override = -1.0
 	check(await _until(func() -> bool: return db.attacks_started > a0, RESUME_LIMIT + 2.0), "Duelist: fights again after it recovers")

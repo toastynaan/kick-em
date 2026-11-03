@@ -140,8 +140,8 @@ const ACTION_HELP := {
 	&"move": "Move (camera-relative)",
 	&"camera": "Turn the camera. It only turns itself to keep your target in view",
 	&"punch": "Tap: jab, cross, hook. Hold to charge: a full jab shoves, cross launches, hook knocks down",
-	&"leg_kick": "Tap: a quick leg flinch. Hold to charge: buckles the knee. A full charge sweeps the legs",
-	&"gut_punch": "Tap: a quick fold. Hold to charge: a deep fold, lots of pressure. Full: breaks them open",
+	&"leg_kick": "Tap: a leg flinch. Hold to charge: buckles the knee; full sweeps the legs. Lifted enemy: axe kick",
+	&"gut_punch": "Tap: a fold, the only strike that stuns. Hold to charge: a deep fold. Full: breaks their guard",
 	&"uppercut": "Tap: snaps the head back. Hold to charge: lifts them (higher with charge). Then Jump to follow",
 	&"front_kick": "Tap: a shove that makes space. Hold to charge: a long push. A full charge launches",
 	&"roundhouse": "Tap: knockdown. Hold to charge: a launch, faster the longer you hold",
@@ -149,7 +149,7 @@ const ACTION_HELP := {
 	&"grab": "Grab the enemy you face (or a prop). Press again to let go",
 	&"counter": "Orange icon over an enemy: counter its attack. Blue icon: dodge instead",
 	&"jump": "Jump. After a charged uppercut: leap to the lifted body. Sprint + jump at a wall: wall run. Attack in the air: dropping strike",
-	&"air_combo": "Each air hit hangs you both. A kick sends them flying. Pull back + punch: spike them down",
+	&"air_combo": "Each air hit hangs. Leg kick: axe kick chops them down. Other kicks send them flying. Pull back + punch: spike",
 	&"dash": "Tap: dodge, teleport just before a hit, pursue right after a launch. Hold: sprint",
 	&"pursuit": "Right after you launch someone: Dash to the flying body",
 	&"pursuit_hit": "Attack: launch it further. Pull back + attack: spike it into the ground",
@@ -183,9 +183,10 @@ const PURSUIT_AFTER := &"dash"
 ## Round 8: the air combo row follows the Jump row.
 const AIR_COMBO_AFTER := &"jump"
 ## Round 8: how every strike works (tap or hold to charge, the meter) and
-## pressure, under the F1 grid and in the title tips.
+## pressure, under the F1 grid and in the title tips. Round 9: a break is
+## GUARD BROKEN (no stun), only the gut punch stuns, hits on downed bodies.
 const CHARGE_HELP := "Every strike: tap for a quick hit, or hold to charge. The meter at the bottom fills white, orange, then red at the strike's steps, flashes at full, then fires on its own."
-const PRESSURE_HELP := "Pressure: the bar under an enemy's health. Every hit fills it, even into a guard. Full breaks them open for a moment: no guard, no attacks, extra damage."
+const PRESSURE_HELP := "Pressure: every hit fills the bar under an enemy's health. Full: GUARD BROKEN, extra damage, but they still fight. Only the gut punch stuns. Strikes hit downed enemies your kick reaches."
 
 ## Rows of [title, keyboard+mouse, gamepad, description], one per action, built
 ## from Controls.ACTIONS (move_* and cam_* are merged into one row each). The

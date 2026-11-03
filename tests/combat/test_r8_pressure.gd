@@ -7,8 +7,9 @@ extends "res://tests/combat/combat_test_base.gd"
 ##   Tuning.debug_pressure_mult 2 doubles a jab's pressure;
 ## - blocked hits add pressure (x R8_BLOCKED_PRESSURE_MULT) and the guard
 ##   breaks that way;
-## - the break lasts R8_BREAK_TIME with no attack and no block (the AI still
-##   holding Block), the react state &"broken", then pressure_recovered;
+## - the break lasts R8_BREAK_TIME with no block (the AI still holding Block),
+##   then pressure_recovered; Round 9 (R9_BROKEN_STUN false): guard broken, no
+##   daze (react state never &"broken") and it can still attack;
 ## - hits on a broken grunt: x R8_BREAK_DAMAGE_MULT damage, x R8_BREAK_PUSH_MULT
 ##   push, HitInfo.broken_bonus;
 ## - the meter drains after R8_PRESSURE_DECAY_DELAY idle at R8_PRESSURE_DECAY
@@ -54,7 +55,7 @@ func run() -> void:
 	check(not be.is_empty() and be[1] == g and be[2] == p and g.combat.is_broken()
 		and is_equal_approx(g.combat.get_pressure_fraction(), 1.0), "pressure_broken(grunt, player); is_broken, fraction 1")
 
-	print("the break: no attack, no block, the daze; R8_BREAK_TIME")
+	print("the break (Round 9: guard broken): no block, no daze, it still attacks; R8_BREAK_TIME")
 	g.combat.press(A.BLOCK)  # the AI holding Block the whole time
 	await wait_until(func() -> bool: return not g.is_frozen(), 0.5)
 	var t0 := TimeDirector.now()
@@ -77,8 +78,8 @@ func run() -> void:
 	print("DATA the break lasted %.3f s (want %.2f) after the hitstop; attacked %s, blocked %s, dazed %s; pressure_recovered %s, pressure %.2f, attacks again %s" % [
 		lasted, Tuning.R8_BREAK_TIME, attacked, blocked, dazed, rec_ev, g.combat.get_pressure(), can_after])
 	check(absf(lasted - Tuning.R8_BREAK_TIME) <= 1.5 / 120.0, "the break lasts %.1f s" % Tuning.R8_BREAK_TIME)
-	check(not attacked and not blocked, "no attack and no block during the break")
-	check(dazed, "the react state is &\"broken\" (H's daze)")
+	check(attacked and not blocked, "no block during the break, but it still attacks (guard broken)")
+	check(not dazed, "no daze: the react state is never &\"broken\" (R9_BROKEN_STUN false)")
 	check(rec_ev and is_equal_approx(g.combat.get_pressure(), 0.0) and can_after, "pressure_recovered, the meter empty, it attacks again")
 
 	print("half-rate refill for R8_BREAK_IMMUNE after a break")
@@ -111,7 +112,7 @@ func run() -> void:
 	var normal: HitInfo = hits_on(g)[-1]
 	g.combat.set(&"_pressure", g.combat.get_pressure_max() - 0.5)
 	await _jab(p, g)  # breaks it
-	await wait_until(func() -> bool: return g.get_react_state() == &"broken" and not g.is_frozen(), 1.0)
+	await wait_until(func() -> bool: return g.combat.is_broken() and not g.is_reacting() and not g.is_frozen(), 1.0)
 	await _jab(p, g)
 	var bonus: HitInfo = hits_on(g)[-1]
 	var dmg_ratio := (bonus.damage / bonus.damage_scale) / (normal.damage / normal.damage_scale)
@@ -220,7 +221,7 @@ func _charged_on_broken(id: StringName) -> HitInfo:
 	var g: Fighter = r[1]
 	g.combat.set(&"_pressure", g.combat.get_pressure_max() - 0.5)
 	await _jab(p, g)
-	await wait_until(func() -> bool: return g.get_react_state() == &"broken" and not g.is_frozen(), 1.0)
+	await wait_until(func() -> bool: return g.combat.is_broken() and not g.is_reacting() and not g.is_frozen(), 1.0)
 	await wait_until(func() -> bool: return not p.combat.is_attacking(), 1.0)
 	var n := hits_on(g).size()
 	p.combat.play_charged(id, 1.0, g)

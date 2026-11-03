@@ -19,6 +19,8 @@ extends Node
 ##    when p reaches 0.7 keeps its token, swings its turn, then backs off.
 ## D. No drain (pressure stuck at 0.7): the back-off still ends after
 ##    AIBrain.BACK_OFF_MAX_TIME and it attacks; a new hit (p up) backs it off again.
+## Round 9: A-D run only with Tuning.R9_PRESSURE_PASSIVE; otherwise _part_r9
+## checks there is no tell slow-down and no back-off.
 ## Measured numbers are printed. OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
@@ -32,6 +34,7 @@ const START_DIST := 1.5          ## m from the player each run starts at
 const BACKOFF_MIN := 1.5         ## m it must back off (the doc: "a couple of metres")
 const REENGAGE_LIMIT := 5.0      ## s from the back-off's end to its next attack
 const TICK := 1.0 / 120.0
+const R9_RUN := 10.0             ## s of the Round 9 run at p 0.9
 
 var failures := 0
 var player: Fighter
@@ -71,11 +74,42 @@ func _run() -> void:
 	GameEvents.attack_tell.connect(func(a: Node3D, _k: StringName, d: float) -> void:
 		if a == g: tells.append([Util.game_now(), d, gb.get_tell_move()]))
 	await _wait(0.5)
+	if not Tuning.R9_PRESSURE_PASSIVE:
+		await _part_r9()
+		_finish()
+		return
 	await _part_rates()
 	await _part_backoff()
 	await _part_about_to_swing()
 	await _part_no_drain()
 	_finish()
+
+# --- Round 9: pressure only weakens the guard --------------------------------------------------
+
+## With Tuning.R9_PRESSURE_PASSIVE false: tells are the wave's at any p, and a
+## grunt held at p 0.9 for R9_RUN s never backs off and keeps attacking.
+func _part_r9() -> void:
+	var tells_ok := true
+	for m: StringName in [&"e_jab", &"e_hook", &"e_kick", &"e_grab"]:
+		fc.fake_pressure = 0.0
+		var s0 := gb._startup_for(m)
+		fc.fake_pressure = 1.0
+		tells_ok = tells_ok and absf(gb._startup_for(m) - s0) < 1e-5
+	check(tells_ok, "Round 9: tells do not slow under pressure (p 0 vs 1, every grunt move)")
+	await _reset_enemy(START_DIST, 0.9)
+	var t0 := Util.game_now()
+	var a0 := gb.attacks_started
+	var backing_ticks := 0
+	while Util.game_now() - t0 < R9_RUN:
+		_keep_player()
+		backing_ticks += 1 if gb.is_backing_off() else 0
+		await get_tree().physics_frame
+	var attacks := gb.attacks_started - a0
+	print("[ai] info: Round 9: p 0.9 for %.0f s: %d attacks (%.1f / min), backing off %d ticks, guard chance %.3f" % [
+		R9_RUN, attacks, attacks * 60.0 / R9_RUN, backing_ticks, gb.get_guard_chance()])
+	check(backing_ticks == 0 and gb.backoffs == 0, "Round 9: never backs off at p 0.9 (%d ticks, %d back-offs)" % [backing_ticks, gb.backoffs])
+	check(attacks >= 4, "Round 9: keeps attacking at p 0.9 (%d in %.0f s)" % [attacks, R9_RUN])
+	fc.fake_pressure = 0.0
 
 # --- A. Attack rate and tells by pressure ---------------------------------------------------
 

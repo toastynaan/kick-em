@@ -14,6 +14,8 @@ extends Node
 ##    walks on and swings.
 ## C. At p 0.7 (FakeCombat pressure double) the same tap ends its turn: the
 ##    token goes back, it backs off, and it starts nothing for HIGH_P_QUIET s.
+##    Round 9 (Tuning.R9_PRESSURE_PASSIVE false): it keeps its turn and swings
+##    again as at p 0.
 ## D. Real pipeline: the player's real jab taps (B's CombatController
 ##    press / release) on a real level-1 grunt winding up. When B's tap
 ##    reaction is a flinch, it attacks again within FLINCH_RESUME s of the hit
@@ -191,9 +193,14 @@ func _part_high_pressure(h_flinch: bool) -> void:
 		var stun := _tap(g, h_flinch)
 		var r := await _after_tap(g, t_tap, stun, h_flinch, stun + HIGH_P_QUIET)
 		print("[ai] info: tapped at p 0.7: flinch %.2f s, backed off %s, attacked again %.2f s after (none = -1)" % [r.busy, r.backing, r.resume])
-		check(r.backing and r.resume < 0.0 and not AttackDirector.has_token(g),
-			"p 0.7: after the flinch it gives its turn up and backs off (backing %s, token %s, no attack for %.1f s: %s)" % [
-				r.backing, AttackDirector.has_token(g), stun + HIGH_P_QUIET, r.resume < 0.0])
+		if Tuning.R9_PRESSURE_PASSIVE:
+			check(r.backing and r.resume < 0.0 and not AttackDirector.has_token(g),
+				"p 0.7: after the flinch it gives its turn up and backs off (backing %s, token %s, no attack for %.1f s: %s)" % [
+					r.backing, AttackDirector.has_token(g), stun + HIGH_P_QUIET, r.resume < 0.0])
+		else:
+			check(not r.backing and r.lost == 0 and r.resume >= 0.0,
+				"p 0.7 (Round 9: pressure only weakens the guard): keeps its turn, no back-off, swings again (backing %s, lost %d ticks, %.2f s after)" % [
+					r.backing, r.lost, r.resume])
 	fc.fake_pressure = -1.0
 	AttackDirector.unregister_enemy(g)
 	g.queue_free()

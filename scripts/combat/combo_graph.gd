@@ -6,9 +6,8 @@ extends Resource
 ## Round 7 (docs/Round 7 — Freeflow Combat.md: Moves; amendment): one button,
 ## one move. The only string is the punch button's: it counts 1, 2, 3 (jab,
 ## cross, hook) and wraps back to the jab. Combos come from states, not strings
-## (Tuning.R7_PAYOFFS). CombatController keeps the string position: it
-## continues while the chain is alive and resets to the jab on a whiff or a
-## dropped chain.
+## (Tuning.R7_PAYOFFS). CombatController keeps the string position (Round 9:
+## it goes back to the jab only after Tuning.R9_STRING_RESET with no punch press).
 ## Round 8 (docs/Round 8 — Charge and Pressure.md: Charge): a held press no
 ## longer switches to a heavy; CombatController charges the position's punch
 ## (or any strike) continuously. The heavy ids (Tuning.R7_HEAVY_OF) stay: they

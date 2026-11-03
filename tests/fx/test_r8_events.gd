@@ -8,7 +8,7 @@ extends Node3D
 ##   charge_cancelled (fizzle), a hit adding pressure (tick spark and sound,
 ##   landed or blocked), a charged hit (layers scaled by c, the charged crunch),
 ##   a broken-bonus hit (heavy accent), pressure_broken (break burst, shatter
-##   rings, screen flash, guard break sound, dazed loop), pressure_recovered
+##   rings, screen flash, guard break sound, broken loop), pressure_recovered
 ##   (the loop stops), air_follow_started (whoosh, dust, blur), air_hit (pop
 ##   rising in pitch with the count, flash);
 ## - the charge glow (strength and heat) and the hum pitch are monotonic in c;
@@ -16,8 +16,10 @@ extends Node3D
 ## - taps play the quick crack alone (weight under the smack threshold);
 ## - the guard break sound differs from every strike sound (spectrum, envelope,
 ##   length: measured and logged);
-## - the dazed loop starts on the break and stops on pressure_recovered, when
-##   is_broken() goes false, on death, and by itself at the latest.
+## - the broken loop (Round 9: the cracked guard and its crackle; the Round 8
+##   dazed loop when Tuning.R9_BROKEN_STUN) starts on the break and stops on
+##   pressure_recovered, when is_broken() goes false, on death, and by itself
+##   at the latest.
 ## OWNER: agent F.
 
 const U := preload("res://tests/fx/fx_test_util.gd")
@@ -316,7 +318,9 @@ func _check_break(player: Node3D, enemy: Node3D, ec: Node, cfx: Node) -> void:
 	var flashes := ScreenFX.flash_log.size()
 	var f := Engine.get_physics_frames()
 	GameEvents.pressure_broken.emit(enemy, player)
-	_on_frame("pressure_broken", f, [&"guard_break", &"dazed"], cfx, [&"break_burst", &"daze_start"])
+	var stun := Tuning.R9_BROKEN_STUN
+	_on_frame("pressure_broken", f, [&"guard_break", &"dazed" if stun else &"guard_crackle"], cfx,
+			[&"break_burst", &"daze_start" if stun else &"guard_crack_start"])
 	var lb: Dictionary = cfx.get(&"last_break")
 	var ring: MeshInstance3D = cfx.call(&"last_ring_node")
 	var screen_ok: bool = ScreenFX.flash_log.size() > flashes and int(ScreenFX.flash_log.back()["frame"]) == f
@@ -329,20 +333,19 @@ func _check_break(player: Node3D, enemy: Node3D, ec: Node, cfx: Node) -> void:
 	if ring.scale.x < 1.5:
 		fails.append("the shatter ring did not expand (%.2f m)" % ring.scale.x)
 	await get_tree().create_timer(0.5).timeout
-	var node: Node3D = cfx.call(&"get_daze_node", enemy)
-	var above := node.global_position.y - FXRules.head_of(enemy).y if node != null else -1.0
-	print("DAZED LOOP 0.7 s into the break: visual %s (%.2f m above the head), sound %s" % [cfx.call(&"is_dazed", enemy),
-		above, AudioFX.is_dazed_playing(enemy)])
-	if not cfx.call(&"is_dazed", enemy) or not AudioFX.is_dazed_playing(enemy) or above <= 0.0:
-		fails.append("dazed loop missing while broken")
+	var showing: bool = cfx.call(&"is_dazed" if stun else &"is_guard_cracked", enemy)
+	print("BROKEN LOOP 0.7 s into the break (%s): visual %s, sound %s" % ["dazed" if stun else "cracked guard",
+		showing, AudioFX.broken_loop_id(enemy)])
+	if not showing or not AudioFX.is_broken_loop_playing(enemy):
+		fails.append("broken loop missing while broken")
 	ec.broken = false
 	played.clear()
 	f = Engine.get_physics_frames()
 	GameEvents.pressure_recovered.emit(enemy)
-	_on_frame("pressure_recovered", f, [], cfx, [&"daze_stop"])
+	_on_frame("pressure_recovered", f, [], cfx, [&"daze_stop" if stun else &"guard_crack_stop"])
 	await get_tree().create_timer(0.4).timeout
-	print("after pressure_recovered: visual %d, sound %d" % [cfx.call(&"active_dazes"), AudioFX.active_dazed()])
-	if int(cfx.call(&"active_dazes")) != 0 or AudioFX.active_dazed() != 0:
+	print("after pressure_recovered: visual %d, sound %d" % [cfx.call(&"active_broken_loops"), AudioFX.active_dazed()])
+	if int(cfx.call(&"active_broken_loops")) != 0 or AudioFX.active_dazed() != 0:
 		fails.append("dazed loop outlived pressure_recovered")
 
 	# is_broken() going false (after it was seen true) ends it without the event.
@@ -351,7 +354,7 @@ func _check_break(player: Node3D, enemy: Node3D, ec: Node, cfx: Node) -> void:
 	await U.physics_frames(get_tree(), 12)
 	ec.broken = false
 	await get_tree().create_timer(0.4).timeout
-	if int(cfx.call(&"active_dazes")) != 0 or AudioFX.active_dazed() != 0:
+	if int(cfx.call(&"active_broken_loops")) != 0 or AudioFX.active_dazed() != 0:
 		fails.append("dazed loop outlived is_broken()")
 	# Death ends it at once.
 	ec.broken = true
@@ -359,18 +362,18 @@ func _check_break(player: Node3D, enemy: Node3D, ec: Node, cfx: Node) -> void:
 	await U.physics_frames(get_tree(), 6)
 	GameEvents.fighter_died.emit(enemy, null)
 	await U.physics_frames(get_tree(), 2)
-	if int(cfx.call(&"active_dazes")) != 0 or AudioFX.active_dazed() != 0:
+	if int(cfx.call(&"active_broken_loops")) != 0 or AudioFX.active_dazed() != 0:
 		fails.append("dazed loop outlived death")
 	# No report and no event: it stops by itself after R8_BREAK_TIME + slack.
 	ec.broken = false
 	GameEvents.pressure_broken.emit(enemy, player)
 	await get_tree().create_timer(Tuning.R8_BREAK_TIME - 0.1).timeout
-	var mid: bool = cfx.call(&"is_dazed", enemy) and AudioFX.is_dazed_playing(enemy)
+	var mid: bool = int(cfx.call(&"active_broken_loops")) > 0 and AudioFX.is_broken_loop_playing(enemy)
 	await get_tree().create_timer(ChargeFX.DAZE_SLACK + 0.6).timeout
-	print("orphan dazed loop: on at %.1f s %s, off by %.1f s %s" % [Tuning.R8_BREAK_TIME - 0.1, mid,
-		Tuning.R8_BREAK_TIME + ChargeFX.DAZE_SLACK + 0.5, int(cfx.call(&"active_dazes")) == 0 and AudioFX.active_dazed() == 0])
-	if not mid or int(cfx.call(&"active_dazes")) != 0 or AudioFX.active_dazed() != 0:
-		fails.append("orphan dazed loop wrong (on mid-break %s)" % mid)
+	print("orphan broken loop: on at %.1f s %s, off by %.1f s %s" % [Tuning.R8_BREAK_TIME - 0.1, mid,
+		Tuning.R8_BREAK_TIME + ChargeFX.DAZE_SLACK + 0.5, int(cfx.call(&"active_broken_loops")) == 0 and AudioFX.active_dazed() == 0])
+	if not mid or int(cfx.call(&"active_broken_loops")) != 0 or AudioFX.active_dazed() != 0:
+		fails.append("orphan broken loop wrong (on mid-break %s)" % mid)
 
 ## The guard break against every strike sound: spectrum (5 bands), envelope
 ## (12 x 0.1 s) and length, as one distance; logged with the closest strike.

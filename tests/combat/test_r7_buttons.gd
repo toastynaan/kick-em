@@ -10,7 +10,8 @@ extends "res://tests/combat/combat_test_base.gd"
 ##   charges that position's punch; every one of the eight strikes charges when
 ##   held (input and press()/release()); a tap fires on its own frame data; a
 ##   charged strike goes active R8_RELEASE_STARTUP frames after its release;
-## - the string resets to the jab on a whiff and on a dropped chain.
+## - the string resets to the jab after R9_STRING_RESET with no punch press
+##   (Round 9: a whiff and a dropped chain no longer reset it).
 
 const PRESS := 0.05   ## s a tap holds the button
 const HOLD := 0.35    ## s a hold holds it (past Tuning.R8_TAP_MAX: a charge)
@@ -117,7 +118,7 @@ func run() -> void:
 	check(absf(charged_su - Tuning.frames(Tuning.R8_RELEASE_STARTUP)) <= 0.011,
 		"the charged jab goes active R8_RELEASE_STARTUP after its release (no target: no glide)")
 
-	print("the string resets on a whiff and on a dropped chain")
+	print("the string wraps after a whiffed hook; R9_STRING_RESET idle resets it")
 	await _idle()
 	var g2 := spawn(&"grunt", _p.global_position + _p.get_forward() * 1.2, -_p.get_forward())
 	await ticks(15)
@@ -137,7 +138,7 @@ func run() -> void:
 	await _press_in_chain(false)   # jab after the whiff
 	check(_moves.size() == 4 and _moves[3] == &"jab", "the press after the whiff is a jab (%s)" % [_moves])
 	await _idle()
-	var wait := Tuning.R7_CHAIN_GRACE + 0.15
+	var wait := maxf(Tuning.R7_CHAIN_GRACE, Tuning.R9_STRING_RESET) + 0.15
 	await wait_real(wait)
 	check(_p.combat.get_chain_count() == 0 and _p.combat.get_string_index() == 0,
 		"%.2f s after the recovery the chain has dropped, the string is back at the jab" % wait)
@@ -156,10 +157,12 @@ func spawn_dummy_player() -> Fighter:
 func _idle() -> void:
 	await wait_until(func() -> bool: return not _p.combat.is_attacking() and _p.can_act(), 3.0)
 
-## Wait until the player is free and its chain has dropped.
+## Wait until the player is free, its chain has dropped and the string is back
+## at the jab (Round 9: R9_STRING_RESET idle).
 func _fresh_chain() -> void:
 	await _idle()
 	await wait_until(func() -> bool: return _p.combat.get_chain_count() == 0, 2.0)
+	await wait_until(func() -> bool: return _p.combat.get_string_index() == 0, Tuning.R9_STRING_RESET + 0.5)
 	await ticks(2)
 
 ## One LMB press at the next moment it counts: during the current move's

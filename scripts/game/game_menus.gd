@@ -312,7 +312,8 @@ static func title_key_lines() -> Array:
 	]
 
 ## The title's short lesson on the Round 8 strikes (tap or hold to charge,
-## pressure, the air combo) and the Round 7 god path.
+## pressure, the air combo) and the Round 7 god path. Round 9: pressure breaks
+## the guard, only the gut punch stuns, hits on downed bodies, the axe kick.
 static func title_tips() -> String:
 	var k := func(action: StringName) -> String: return UIKit.key_label(action, false)
 	var back := "S"
@@ -320,8 +321,9 @@ static func title_tips() -> String:
 		if spec[0] == &"key":
 			back = OS.get_keycode_string(int(spec[1]))
 	return ("Tap %s: jab, cross, hook. Tap any strike for a quick hit;\nhold it to charge (the meter at the bottom), release to strike.\n" % k.call(&"punch")
-		+ "Every hit fills the enemy's pressure bar: full breaks them open.\n"
+		+ "Every hit fills the enemy's pressure bar: full breaks their guard.\nOnly the gut punch stuns. Strikes hit downed enemies they reach.\n"
 		+ "Hit a lifted, folded or kneeling enemy for a bigger result.\n"
+		+ "Leg kick (%s) a lifted enemy, ground or air: the axe kick chops them down.\n" % k.call(&"leg_kick")
 		+ "Charged uppercut, then %s: follow them up. Air hits hang;\na kick sends them away, %s + punch spikes them down.\n" % [k.call(&"jump"), back]
 		+ "Orange icon over an enemy: %s to counter. Blue icon: %s to dodge.\n" % [k.call(&"counter"), k.call(&"dash")]
 		+ "%s just before a hit lands: teleport behind them.\n" % k.call(&"dash")

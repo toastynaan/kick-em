@@ -655,3 +655,30 @@ Same rules as Round 7 (own files only, private copies under `<scratchpad>/agent_
 - **Full suite** on the integrated tree: 201 of 202. The one failure, `ai/test_roster`, was a duplicate-variable error that C fixed after the copy was taken; C's later fresh-copy run is 29 of 29.
 - **Soaks** were not rerun this round: the user stopped the run to playtest.
 - **Open for the playtest:** the full-charge time, tap stun lengths, pressure caps (any charged hit breaks a level-1 grunt), the full gut punch's fold (1.8 s) outlasting the break (1.5 s), and the air-combo timing. Many agents' local constants are Tuning candidates and have not been moved yet.
+
+## Round 9: Playtest fixes (docs/Round 9 — Playtest Fixes.md)
+
+Five fixes from the Round 8 playtest; numbers in the `Tuning` Round 9 block (the hook's charged entry now has `"spin": true` instead of `"sideways"`). **Light testing**: each owner writes at most one focused test per change and runs its module once.
+
+| Owner | Work |
+| --- | --- |
+| B — combat | hook forward + `victim.add_spin(rate)`; the string resets only on `R9_STRING_RESET` idle; the axe kick (leg kick on a lifted target, ground and air; spike react, shockwave; `R9_AXE`); break = guard broken (no `react(&"broken")` when `R9_BROKEN_STUN` is false; the victim can't block but acts); physical hits on downed bodies (`R9_GROUND_HIT`, never targeted or auto-connected) |
+| H — fighter | `Fighter.add_spin(rate)` (stub in the tree): a yaw spin of the ragdoll around its centre of mass, on a launch or knockdown already started |
+| C — AI | with `R9_PRESSURE_PASSIVE` false: pressure only scales block chance (no attack or tell slow-down, no back-off); a broken enemy keeps acting and only can't block |
+| P — poses | `axe_kick` (ground: knee chamber, leg straight up above the head, heel chops down) and `air_axe` (air-combo version) |
+| F — FX | the break looks like a cracked guard (forearm and guard sparks, a shatter at the guard) instead of a dazed head loop; the axe kick impact (the spike's floor boom, heavier for charged) |
+| J — HUD | three string pips (J, C, H) by the charge meter, the next one lit; "GUARD BROKEN" instead of "BROKEN"; help text for the axe kick and downed-body hits |
+
+### Round 9 status
+
+- **Built**:
+  - The hook goes forward and spins (`add_spin`, `R9_HOOK_SPIN` 12–20 rad/s, `R9_HOOK_HOP`).
+  - The punch string resets only after `R9_STRING_RESET` idle (`get_string_idle_time()`), with J / C / H pips by the meter.
+  - The axe kick (`axe_kick` / `air_axe`, spike with an `R9_AXE` blast).
+  - Pressure only weakens the guard, and a break is GUARD BROKEN with no daze. Both behaviours sit behind `R9_PRESSURE_PASSIVE` / `R9_BROKEN_STUN`.
+  - Physical strikes hit downed bodies (`R9_GROUND_HIT`, once-per-knockdown get-up delay).
+- **Light testing** by request:
+  - Module runs: combat 23/23, input + defence 18/18, ai 28/29 (`test_flinch` fixed, rerun passes), anim 7/7, fx 27/28 (`test_real_destruction` flaky, fails without these changes too), game 23/23.
+  - The combined build imports and boots with 0 errors.
+  - No full suite or soaks.
+- **Known**: the axe kick's heel apex is about head height (the hip joint limits); it still connects up to `reach_up` 2.6 m.

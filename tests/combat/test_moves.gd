@@ -89,6 +89,9 @@ func run() -> void:
 	for spec: Array in [[A.LIGHT, &"jab"], [A.HEAVY, &"jab"], [A.UPPERCUT, &"uppercut"],
 			[A.GUT_PUNCH, &"gut_punch"], [A.LEG_KICK, &"leg_kick"], [A.FRONT_KICK, &"front_kick"],
 			[A.ROUNDHOUSE, &"roundhouse"]]:
+		if spec[0] == A.HEAVY:
+			# Round 9: the string holds through the jab's whiff; it is back at the jab after R9_STRING_RESET.
+			await wait_until(func() -> bool: return p.combat.get_string_index() == 0, Tuning.R9_STRING_RESET + 0.5)
 		var r: Dictionary = await _measure(p, spec[0])
 		var f: Vector3 = Tuning.R8_MOVES[spec[1]]["tap"]["f"]
 		var label: String = String(spec[1])

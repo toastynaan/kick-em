@@ -25,7 +25,9 @@ extends Node
 ## - shockwave of a pursuit spike (God path amendment; FXRules.is_spike_shockwave):
 ##   the body hit the floor. A big flash with a shock ring, a dust ring over the
 ##   blast radius, a dust burst with chips, debris chunks and a vertical streak
-##   (water: rings and a splash). WorldDamage draws the crater.
+##   (water: rings and a splash). WorldDamage draws the crater. Round 9: the
+##   axe kick lands the same way; the dust, chips and debris grow with the
+##   blast radius (FXRules.spike_heft), so a charged axe kick's is heavier.
 ## OWNER: agent F (FX & audio).
 
 # --- Local tuning (candidates for Tuning) ---------------------------------------
@@ -78,6 +80,8 @@ var effect_log: Array[Dictionary] = []
 var counts: Dictionary = {}
 ## The last counter flash: {position, bone, fighter} (tests).
 var last_counter: Dictionary = {}
+## Heft of the last spike floor impact (FXRules.spike_heft; tests).
+var last_spike_heft := 0.0
 
 var _fx: Node          ## BloodFX
 var _world: Node       ## WorldFX
@@ -308,14 +312,16 @@ func _on_shockwave(_fighter: Node3D, position: Vector3, stumble_radius: float, k
 	var surface := _floor(position)
 	var c: Color = _world.call(&"surface_color", surface)
 	var ring: bool = _fx.call(&"_ring_allowed")
-	_fx.call(&"impact_flash", position + Vector3.UP * 0.3, SPIKE_FLASH, false, ring, SPIKE_BRIGHT)
+	var heft := FXRules.spike_heft(stumble_radius)
+	_fx.call(&"impact_flash", position + Vector3.UP * 0.3, SPIKE_FLASH, false, ring, SPIKE_BRIGHT * sqrt(heft))
 	if surface == &"water":
-		_world.call(&"water_impact", position, SPIKE_DUST_ENERGY)
+		_world.call(&"water_impact", position, SPIKE_DUST_ENERGY * heft)
 	else:
 		_world.call(&"dust_ring", position, maxf(stumble_radius, SPIKE_RING_MIN), c)
-		_fx.call(&"dust", position + Vector3.UP * 0.1, c, SPIKE_DUST_ENERGY, Vector3.UP, true, SPIKE_CHIPS)
-		_world.call(&"debris", position, randi_range(SPIKE_DEBRIS.x, SPIKE_DEBRIS.y), c.darkened(0.1))
+		_fx.call(&"dust", position + Vector3.UP * 0.1, c, SPIKE_DUST_ENERGY * heft, Vector3.UP, true, SPIKE_CHIPS * heft)
+		_world.call(&"debris", position, roundi(randi_range(SPIKE_DEBRIS.x, SPIKE_DEBRIS.y) * heft), c.darkened(0.1))
 	_world.call(&"streak", position)
+	last_spike_heft = heft
 	_record(&"spike", surface, maxf(stumble_radius, SPIKE_RING_MIN))
 
 ## Throw wind-up: the arm glow follows the amount; 0 ends it.

@@ -919,6 +919,7 @@ func heal(amount: float) -> void:
 func _physics_process(delta: float) -> void:
 	if _freeze_until > 0.0 and TimeDirector.now() >= _freeze_until:
 		_end_freeze()  # backstop for the real-time timer
+	_tick_pending_spin()
 	if combat:
 		combat.physics_tick(delta)  # B applies player time to combat timers
 	var frozen := is_frozen()
@@ -1710,3 +1711,71 @@ func air_hang(seconds: float) -> void:
 ## Own seconds the lifted body still hangs (0 when not hanging). Tests, debug.
 func get_air_hang_left() -> float:
 	return _air_hang_left if is_lifted() else 0.0
+
+# =============================================================================
+# Round 9 contract stub (lead). Owner H implements; B calls it on a charged hook.
+# =============================================================================
+
+## Spin this fighter's ragdoll around the vertical axis through its centre of
+## mass at `rate` rad/s (positive = counter-clockwise seen from above), on top of
+## a launch or knockdown that has just started. No effect while animated.
+## Every simulated bone gets w x r (r from the centre of mass) on its linear
+## velocity and w on its angular velocity. A body in a hitstop hold gets it
+## when the hold ends (the hold would drop it); one not yet fully simulating
+## gets it next tick if it is by then, else never.
+func add_spin(rate: float) -> void:
+	if ragdoll == null or rig == null or is_dead() or absf(rate) < 1e-4:
+		return
+	if ragdoll.is_full_ragdoll() and not ragdoll.is_in_hitstop():
+		_apply_spin(rate)
+		return
+	_spin_pending += rate
+	_spin_frame = Engine.get_physics_frames()
+
+var _spin_pending := 0.0   ## rad/s of add_spin() waiting for the bodies (hitstop, or not simulating yet)
+var _spin_frame := -1      ## physics frame of that call
+
+## Called each physics tick: a pending spin lands once the hold is over; on a
+## body not fully simulating it waits one tick only.
+func _tick_pending_spin() -> void:
+	if _spin_pending == 0.0 or Engine.get_physics_frames() == _spin_frame:
+		return
+	if ragdoll == null or is_dead() or not ragdoll.is_full_ragdoll():
+		_spin_pending = 0.0
+		return
+	if ragdoll.is_in_hitstop():
+		return
+	var rate := _spin_pending
+	_spin_pending = 0.0
+	_apply_spin(rate)
+
+func _apply_spin(rate: float) -> void:
+	var rids: Array[RID] = []
+	var pos := PackedVector3Array()
+	var com := Vector3.ZERO
+	var m := 0.0
+	for b: StringName in Bones.PHYSICAL:
+		if rig.is_bone_severed(b):
+			continue
+		var pb := rig.get_physical_bone(b)
+		if pb == null:
+			continue
+		var rid := pb.get_rid()
+		var xf: Transform3D = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_TRANSFORM)
+		rids.append(rid)
+		pos.append(xf.origin)
+		com += xf.origin * pb.mass
+		m += pb.mass
+	if m <= 0.0:
+		return
+	com /= m
+	var w := Vector3(0.0, rate, 0.0)
+	for k in rids.size():
+		var rid := rids[k]
+		var r := pos[k] - com
+		r.y = 0.0
+		var lv: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, lv + w.cross(r))
+		var av: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY, av + w)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_SLEEPING, false)

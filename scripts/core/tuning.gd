@@ -909,9 +909,10 @@ const R8_MOVES := {
 	&"hook": {
 		"tap": {"f": Vector3(11, 4, 18), "dmg": 6.0, "react": &"spin", "push": 0.3, "stun": 0.25,
 			"hitstop": 0.08, "weight": 0.3, "pressure": 1.0, "tier": &"flinch"},
+		# Round 9: forward (along the hit), spinning (R9_HOOK_SPIN), not sideways.
 		"charged": {"dmg": Vector2(12, 18), "react": &"knockdown", "push": Vector2(1.0, 1.5), "stun": Vector2(0, 0),
 			"hitstop": Vector2(0.12, 0.15), "weight": Vector2(0.6, 0.85), "pressure": Vector2(3, 4),
-			"launch_from": 1.0, "launch_speed": Vector2(10, 13), "launch_angle": 20.0, "sideways": true,
+			"launch_from": 1.0, "launch_speed": Vector2(10, 13), "launch_angle": 20.0, "spin": true,
 			"tier": &"knockdown", "payoff_id": &"heavy_hook"}},
 	&"leg_kick": {
 		"tap": {"f": Vector3(10, 4, 18), "dmg": 4.0, "react": &"flinch", "push": 0.1, "stun": 0.15,
@@ -985,3 +986,52 @@ const R8_AIR_FRAMES := Vector3(4, 3, 8)  ## air strike startup, active, recovery
 const R8_AIR_HANG := 0.35             ## s both hang per landed air hit (up to debug_air_hits)
 const R8_AIR_KICK_LAUNCH := 14.0      ## m/s: any kick in the air sends the body away
 const R8_AIR_KICK_ANGLE := 10.0       ## degrees up
+
+# =============================================================================
+# Round 9: fixes from the Round 8 playtest (docs/Round 9 — Playtest Fixes.md).
+# Wins over Round 8 where they disagree. Contract: docs/ARCHITECTURE.md "Round 9".
+# =============================================================================
+
+# --- Hook: forward and spinning ------------------------------------------------------------
+## A charged hook's knockdown and launch go along the hit (away from the attacker)
+## and spin the body around the vertical axis at this rate (rad/s, lerped by c;
+## the sign follows the hook's swing). The tap hook keeps its &"spin" head turn.
+## Planted feet brake a spin fast (H measured ~80 degrees from 10 rad/s on a
+## knockdown), so the charged hook's knockdown also hops the body (R9_HOOK_HOP).
+const R9_HOOK_SPIN := Vector2(12.0, 20.0)
+const R9_HOOK_HOP := 2.5  ## m/s up added to a charged hook's knockdown so the feet leave the floor and it spins
+
+# --- The punch string -----------------------------------------------------------------------
+## The string (jab, cross, hook) goes back to the jab only after this long with no
+## punch press. Whiffs, blocked hits, being hit and the chain ending no longer reset it.
+const R9_STRING_RESET := 1.2
+
+# --- Pressure: a guard breaker, not a stun ----------------------------------------------------
+## Pressure only weakens the guard: block chance x (1 - p). It no longer slows
+## attacks or tells, and enemies don't back off. Broken = GUARD BROKEN for
+## R8_BREAK_TIME: they can't block, take x R8_BREAK_DAMAGE_MULT / PUSH_MULT, but
+## keep moving and attacking (no daze). Only the gut punch stuns.
+const R9_PRESSURE_PASSIVE := false   ## true = the Round 8 attack/tell slow-down and back-off
+const R9_BROKEN_STUN := false        ## true = the Round 8 daze on a break
+
+# --- Axe kick (the leg kick on a lifted body) ---------------------------------------------------
+## The leg kick button on a lifted target (on the ground or in the air combo) is
+## the axe kick: the leg rises above the head and the heel chops the body straight
+## down (a spike: react &"spike", the floor shockwave). Charged like any strike.
+const R9_AXE := {
+	"tap": {"f": Vector3(12, 4, 18), "dmg": 10.0, "speed": 12.0, "hitstop": 0.12, "weight": 0.75,
+		"pressure": 2.0, "blast": 2.0},
+	"charged": {"dmg": Vector2(14, 20), "speed": Vector2(14, 18), "hitstop": Vector2(0.13, 0.16),
+		"weight": Vector2(0.8, 1.0), "pressure": Vector2(3, 4), "blast": Vector2(2.5, 3.5)},
+	"air_frames": Vector3(5, 3, 10),  ## the air-combo version
+	"reach_up": 2.6,                  ## m above the attacker's feet a ground axe kick still connects
+}
+
+# --- Strikes on downed bodies (physical contact only) -------------------------------------------
+## A strike whose limb physically touches a body that is down (knocked down,
+## launched and lying) hits it: never targeted, glided to or auto-connected.
+## The body is shoved along the floor; it may extend the get-up once per knockdown.
+const R9_GROUND_HIT := {"dmg": Vector2(4.0, 8.0),  ## tap, charged at c = 1
+	"shove": Vector2(3.0, 7.0),                        ## m/s along the strike (tap, charged at c = 1)
+	"lift": 1.5,                                       ## m/s up
+	"pressure": 1.0}
