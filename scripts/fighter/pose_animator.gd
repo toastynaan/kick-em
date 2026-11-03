@@ -45,6 +45,15 @@ extends Node
 ##     hold_pose() again with the same id keeps its clock (no restart).
 ##   set_upper_overlay(id) also takes throw_windup (growing), drive_hold and
 ##     clinch_hold over the running legs.
+## Round 8 (docs/Round 8 — Charge and Pressure.md):
+##   hold_pose(PoseLibrary.charge_load_of(move)) + set_charge_amount(c) every
+##     tick: the load deepens smoothly with c (light at 0, full wind-up and a
+##     slight tremble at 1). play_move(strike, ...) from a held load skips the
+##     strike's own wind-up keys (load -> contact on the first active frame).
+##   play_timed: react_flinch (the tap's stun), react_sweep (before the
+##     ragdoll), react_broken (R8_BREAK_TIME; also a hold), air_follow (the
+##     launcher jump; also a hold); react_fold under 0.45 s is the quick
+##     half-keel. play_move(air_jab | air_cross | air_kick, R8_AIR_FRAMES).
 ##
 ## Layers, bottom to top: locomotion (legs by IK to procedural foot targets, so
 ## feet stay planted) -> upper overlay -> held pose -> one-shot move ->
@@ -132,6 +141,17 @@ const HOLD_XFADE_MIN := 0.04
 const LIFT_VY_RISE := 2.0
 const LIFT_VY_FALL := -3.0
 const LIFT_VY_SMOOTH := 10.0
+## Round 8 charge loads ("by_charge" holds): the share of the full wind-up
+## shown at c = 0, the spring (1/s; critically damped, ~0.2 s to settle) the
+## pose follows c with, and the tremble below full ("tremble" x FLOOR, rising
+## to the full "tremble" from c = FROM to 1).
+const LOAD_LIGHT_W := 0.45
+const LOAD_SPRING := 22.0
+const LOAD_TREMBLE_FLOOR := 0.15
+const LOAD_TREMBLE_FROM := 0.7
+## A strike played while its load is held at least this much skips its own
+## wind-up keys (the load is the wind-up).
+const LOAD_SKIP_STARTUP_W := 0.5
 ## "flail" holds: wobble frequencies (rad/s) of the loose limbs; arms swing
 ## FLAIL_ARM_MULT x the hold's amplitude, hinges FLAIL_HINGE_MULT x.
 const FLAIL_FREQ := Vector2(13.0, 17.0)
@@ -221,6 +241,10 @@ var _hold_w_target := 0.0
 var _hold_blend := 0.08
 var _hold_t := 0.0
 var _vy_k := 0.0              # "by_vy" holds: 0 rising .. 1 falling (smoothed)
+# Round 8 charge loads: set_charge_amount's target, the spring's value and speed.
+var _charge_target := 0.0
+var _charge_k := 0.0
+var _charge_v := 0.0
 var _overlay_t := 0.0         # s since the overlay was set ("ramp" holds as overlays)
 # Move layer
 var _move_id: StringName = &""
@@ -539,6 +563,11 @@ func _play(move_id: StringName, startup: float, active: float, recovery: float, 
 	recovery = maxf(recovery, 0.0)
 	_snap_rot = pose_rot.duplicate()
 	_snap_pos = hips_offset
+	# Round 8: a strike released from a held charge load goes straight from
+	# the load to its contact key (its own wind-up would un-load it first).
+	var from_load := _hold_id != &"" and bool(_hold_def.get("by_charge", false)) \
+			and _hold_w >= LOAD_SKIP_STARTUP_W and PoseLibrary.STRIKE_BONES.has(move_id)
+	var load_pose: StringName = (_hold_def["poses"] as Array)[0] if from_load else &""
 	if not def.get("keep_hold", false) and move_id != &"block_hit":
 		_hold_id = &""
 		_hold_w = 0.0
@@ -558,6 +587,19 @@ func _play(move_id: StringName, startup: float, active: float, recovery: float, 
 	var seg_dur := [startup, active, recovery]
 	_keys.clear()
 	var key_defs: Array = def["keys"]
+	if from_load:
+		# Drop the wind-up keys up to the last one on the load's own pose (a
+		# kick keeps its chamber after it); with no such key, all of them.
+		var last := -1
+		for j in key_defs.size():
+			if int(key_defs[j][0]) == 0 and key_defs[j][2] == load_pose:
+				last = j
+		var kept: Array = []
+		for j in key_defs.size():
+			if int(key_defs[j][0]) != 0 or (last >= 0 and j > last):
+				kept.append(key_defs[j])
+		if not kept.is_empty():
+			key_defs = kept
 	var first: Array = key_defs[0]
 	if not (int(first[0]) == 0 and typeof(first[1]) == TYPE_FLOAT and float(first[1]) == 0.0):
 		_keys.append([0.0, 1, null, &"linear", 1.0, null, &""])
@@ -603,11 +645,16 @@ func _play_timed(pose_id: StringName, duration: float) -> void:
 	duration = maxf(duration, 0.0)
 	if PoseLibrary.MOVES.has(pose_id):
 		var def: Dictionary = PoseLibrary.MOVES[pose_id]
+		# Round 8: a short play of a move with a "quick" variant plays the
+		# variant's keys under the same id (react_fold -> the half-keel).
+		var quick: Array = def.get("quick", [])
+		if not quick.is_empty() and duration < float(quick[0]) and PoseLibrary.MOVES.has(quick[1]):
+			def = PoseLibrary.MOVES[quick[1]]
 		var sp: Vector3 = def.get("timed", PoseLibrary.TIMED_SPLIT)
 		var sum := maxf(sp.x + sp.y + sp.z, 0.0001)
 		var st := duration * sp.x / sum
 		var ac := duration * sp.y / sum
-		_play(pose_id, st, ac, maxf(duration - st - ac, 0.0))
+		_play(pose_id, st, ac, maxf(duration - st - ac, 0.0), def)
 		return
 	var pname := pose_id
 	if PoseLibrary.HOLDS.has(pose_id):
@@ -649,6 +696,11 @@ func _hold(pose_id: StringName, blend_time: float) -> void:
 	if fresh:
 		_hold_t = 0.0
 		_vy_k = 0.0
+		if def.get("by_charge", false):
+			# A new charge starts light (set_charge_amount moves it on).
+			_charge_target = 0.0
+			_charge_k = 0.0
+			_charge_v = 0.0
 	if _hold_blend <= 0.0:
 		_hold_w = 1.0
 
@@ -716,6 +768,11 @@ func _evaluate(dt: float) -> void:
 	var hold_pose_now: PoseLibrary.Pose = null
 	var charge_amp := 0.0
 	var hold_leg_w := 0.0
+	# Round 8 charge amount: a critically damped spring toward the target.
+	if dt > 0.0:
+		var acc := LOAD_SPRING * LOAD_SPRING * (_charge_target - _charge_k) - 2.0 * LOAD_SPRING * _charge_v
+		_charge_v += acc * dt
+		_charge_k += _charge_v * dt
 	# Hold layer.
 	if _hold_id != &"":
 		_hold_t += dt * loop_speed
@@ -729,6 +786,11 @@ func _evaluate(dt: float) -> void:
 		hold_pose_now = _hold_pose_eval()
 		var w := _hold_w * _hold_w * (3.0 - 2.0 * _hold_w)
 		var is_charge: bool = _hold_def.get("charge", false)
+		var by_charge: bool = _hold_def.get("by_charge", false)
+		var ck := clampf(_charge_k, 0.0, 1.0)
+		if by_charge:
+			# Round 8 load: a light share of the wind-up at c = 0, all of it at 1.
+			w *= lerpf(LOAD_LIGHT_W, 1.0, ck)
 		# Charging while walking or sprinting keeps the feet running.
 		var free_k := _legs_free_k() if (is_charge or _hold_def.get("legs", &"") == &"free") else 0.0
 		hold_leg_w = w * (1.0 - free_k)
@@ -743,6 +805,8 @@ func _evaluate(dt: float) -> void:
 		legs_held[0] = bool(hold_pose_now.defines_legs[0])
 		legs_held[1] = bool(hold_pose_now.defines_legs[1])
 		var tremble := float(_hold_def.get("tremble", 0.0))
+		if by_charge:
+			tremble *= lerpf(LOAD_TREMBLE_FLOOR, 1.0, smoothstep(LOAD_TREMBLE_FROM, 1.0, ck))
 		if is_charge:
 			# Charge: the wind-up coils further and trembles harder per level.
 			tremble = CHARGE_TREMBLE_BASE + CHARGE_TREMBLE_PER_LEVEL * charge_level
@@ -754,7 +818,7 @@ func _evaluate(dt: float) -> void:
 			_layer_pos.y -= CHARGE_SINK_PER_LEVEL * charge_level * hold_leg_w
 		if tremble > 0.0:
 			_apply_tremble(_layer_rot, deg_to_rad(tremble) * w)
-			if is_charge:
+			if is_charge or by_charge:
 				charge_amp = deg_to_rad(tremble) * hold_leg_w
 		if is_charge or tremble > 0.0:
 			for i in [1, 2, 4, 5, 7, 8]:
@@ -1466,3 +1530,26 @@ func _aimed_pose(pname: StringName, limbs: Array[String], dyaw: float, dh: float
 		_aim_cache.clear()
 	_aim_cache[ck] = p
 	return p
+
+
+# =============================================================================
+# Round 8 (agent P). B calls set_charge_amount every tick while charging.
+# =============================================================================
+
+## Charge amount c (0..1) of the held strike: the held charge load
+## (PoseLibrary.ROUND8_LOAD_IDS, hold key "by_charge") deepens with it, from
+## LOAD_LIGHT_W of the full wind-up at c = 0 to all of it at c = 1, with a
+## slight tremble near full. The pose follows c through a critically damped
+## spring (LOAD_SPRING), so a jump in c never pops. A fresh load hold starts
+## at c = 0 (it clears an earlier c), so call this after hold_pose() or
+## every tick.
+func set_charge_amount(c: float) -> void:
+	_charge_target = clampf(c, 0.0, 1.0)
+
+## The charge amount the load pose shows now (the spring's value, 0..1).
+func get_charge_amount() -> float:
+	return clampf(_charge_k, 0.0, 1.0)
+
+## True while the held pose is a charge load ("by_charge").
+func is_charge_load_held() -> bool:
+	return _hold_id != &"" and _hold_w_target > 0.0 and bool(_hold_def.get("by_charge", false))

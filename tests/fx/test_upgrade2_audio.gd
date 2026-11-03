@@ -1,6 +1,6 @@
 extends Node3D
 ## Upgrade 2 AudioFX (Round 5 rules): the impact follows the tier, not the
-## move; the charge hum (seamless loop, pitch rising with the level, stopped
+## move; the charge hum (seamless loop, pitch rising with c (Round 8), stopped
 ## by the release, which whooshes and suppresses the move's own whoosh;
 ## auto-stop without a release), jump / land / crouch, arm break, wall slam,
 ## stumble and trip, and slow-motion pitch: the player's own sounds stay at
@@ -43,7 +43,8 @@ func _ready() -> void:
 	if not played.is_empty():
 		fails.append("a grab hit played %s (grab_started covers it)" % [played])
 
-	# Charge hum: loop, level pitch, release.
+	# Charge hum: loop; Round 8: the pitch follows c, a tick per step, the release
+	# whooshes at once and covers the move's own whoosh.
 	var hum_stream: AudioStreamWAV = AudioFX.generate(&"charge_hum", 0)
 	@warning_ignore("integer_division")
 	if hum_stream.loop_mode != AudioStreamWAV.LOOP_FORWARD or hum_stream.loop_end != hum_stream.data.size() / 2:
@@ -52,20 +53,23 @@ func _ready() -> void:
 	GameEvents.charge_started.emit(player, &"power_punch")
 	if AudioFX.active_hums() != 1:
 		fails.append("charge_started gave %d hums" % AudioFX.active_hums())
+	var p0 := AudioFX.hum_pitch_for(0.0)
 	for lvl in [1, 2, 3]:
 		await U.physics_frames(get_tree(), 8)
 		GameEvents.charge_level_changed.emit(player, lvl)
 	await U.physics_frames(get_tree(), 4)
+	var c3 := AudioFX.hum_charge(player)
 	var pitch3 := AudioFX.hum_pitch(player)
-	print("hum pitch at level 3: %.2f (want ~%.2f); level pings %d" % [pitch3, AudioFX.HUM_PITCH[3], played.count(&"charge_level")])
-	if absf(pitch3 - AudioFX.HUM_PITCH[3]) > 0.06:
-		fails.append("hum pitch did not rise with the level")
-	if played.count(&"charge_level") != 3:
-		fails.append("level pings: %d, want 3" % played.count(&"charge_level"))
+	print("hum after 3 steps: c %.2f, pitch %.2f (want ~%.2f, start %.2f); step ticks %d" % [c3, pitch3,
+		AudioFX.hum_pitch_for(c3), p0, played.count(&"charge_tick")])
+	if c3 < 0.1 or absf(pitch3 - AudioFX.hum_pitch_for(c3)) > 0.06 or pitch3 <= p0 * 1.05:
+		fails.append("hum pitch did not rise with c")
+	if played.count(&"charge_tick") != 3:
+		fails.append("step ticks: %d, want 3" % played.count(&"charge_tick"))
 	played.clear()
 	GameEvents.charge_released.emit(player, &"power_punch", 3)
 	GameEvents.attack_active.emit(player, &"power_punch")
-	await get_tree().process_frame  # the release pop waits a frame for a strike_started whoosh
+	await get_tree().process_frame
 	if AudioFX.active_hums() != 0:
 		fails.append("release did not stop the hum")
 	if not played.has(&"charge_release"):

@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/input/test_react_r8.gd" id="1"]
+
+[node name="TestReactR8" type="Node3D"]
+script = ExtResource("1")

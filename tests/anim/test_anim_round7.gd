@@ -430,7 +430,8 @@ func _check_reactions(h: AnimTestUtil.AnimHost, stance: Dictionary, rt: Dictiona
 	h.anim.play_move(&"jab", Tuning.frames(7), Tuning.frames(3), Tuning.frames(14))
 	await _frames(14)
 	h.anim.hold_pose(&"heavy_jab_load")
-	await _frames(10)
+	h.anim.set_charge_amount(1.0)  # Round 8: the load deepens with the charge
+	await _frames(40)
 	var wl: Vector3 = _sample(h)["lfist"]
 	h.anim.play_move(&"heavy_jab", Tuning.frames(8), Tuning.frames(4), Tuning.frames(18))
 	await _frames(16)

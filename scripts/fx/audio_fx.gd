@@ -32,6 +32,11 @@ extends Node
 ##   (amendment) keeps the teleport, pursuit, jump, landings, parkour, wall run
 ##   and the ram, and adds step_crunch (a footstep crack at speed), the
 ##   pursuit spike's floor boom and the ram's level-3 launch.
+## Round 8 (Charge and pressure): charge_tick (each step), charge_full,
+##   charge_fizzle (charge_cancelled), hit_charged and hit_broken (hit
+##   accents), guard_break (pressure_broken), pressure_tick, air_pop (air_hit),
+##   dazed (loop while broken). The charge hum follows c; charge_release is the
+##   release whoosh, by c.
 ## Slow motion (Round 5, F0): AudioServer.playback_speed_scale is GLOBAL in
 ##   4.8: AudioStreamPlaybackResampled multiplies every playback's resample
 ##   step by it, whatever bus the player sends to, so a bus alone cannot keep
@@ -94,6 +99,9 @@ const IDS: Array[StringName] = [
 	&"knee_floor", &"whip", &"drive_step",
 	# Round 7 amendment (god path)
 	&"step_crunch",
+	# Round 8 (Charge and pressure)
+	&"charge_tick", &"charge_full", &"charge_fizzle", &"hit_charged", &"hit_broken", &"guard_break",
+	&"pressure_tick", &"air_pop", &"dazed",
 ]
 ## Round 6: a body hitting a clutter surface layers that surface's knock.
 const SURFACE_IMPACT := {&"glass": &"strike_glass", &"cardboard": &"strike_cardboard", &"fabric": &"strike_fabric",
@@ -127,13 +135,17 @@ const STRIKE_MIN_DB := -7.0       ## the weakest strike (a jab) is at most this 
 const STRIKE_HOLE_DB := -3.0      ## a hole layers the surface's break sound this much quieter
 const STRIKE_CRACK_DB := -6.0     ## a crack layers the crack sound
 ## Ids synthesised as seamless loops (played until stopped).
-const LOOP_IDS: Array[StringName] = [&"charge_hum", &"wind"]
+const LOOP_IDS: Array[StringName] = [&"charge_hum", &"wind", &"dazed"]
 
-## Charge hum: pitch and level (dB) by charge level 0..3, players kept for it.
+## Charge hum: pitch and level (dB). Round 8: they follow the charge amount c
+## continuously from the first entry (c = 0) to the last (c = 1); the middle
+## entries are the Upgrade 2 levels (kept for reference). Players kept for it.
 const HUM_PITCH: Array[float] = [1.0, 1.2, 1.45, 1.8]
 const HUM_DB: Array[float] = [-9.0, -6.0, -3.5, -1.0]
 const HUM_POOL := 4
-const HUM_MAX_TIME := 3.0         ## s: a hum with no release event stops anyway
+## s: a hum with no release event stops anyway (Round 8: the longest legal
+## charge, to full and the hold at full, plus a margin: ChargeFX.charge_glow_max()).
+const HUM_MAX_TIME := 1.0 - Tuning.R8_TAP_MAX + Tuning.R8_CHARGE_HOLD_AT_FULL + 0.5
 const HUM_SLEW := 12.0            ## dB per second toward the level's volume
 ## A charged release already whooshed: skip the attack_active whoosh this soon after (ms).
 const RELEASE_WHOOSH_GAP_MS := 400
@@ -195,6 +207,9 @@ const BASE_DB := {
 	&"hit_crack": -3.0, &"hit_smack": -3.0, &"hit_thump": -1.0, &"counter_hit": -1.0, &"rush": -6.0,
 	&"oof": -4.0, &"whoosh_up": -6.0, &"knee_floor": -4.0, &"whip": -6.0, &"drive_step": -5.0,
 	&"step_crunch": -7.0,
+	# Round 8: the guard break is the loudest moment; ticks and the dazed loop stay under everything.
+	&"charge_tick": -9.0, &"charge_full": -4.0, &"charge_fizzle": -6.0, &"hit_charged": -1.0, &"hit_broken": 0.0,
+	&"guard_break": 1.5, &"pressure_tick": -11.0, &"air_pop": -3.0, &"dazed": -14.0,
 }
 
 ## Energy (J) at which a sound plays at its base level; louder above, quieter below.
@@ -231,7 +246,11 @@ var _owned_base := PackedFloat32Array()     ## per 3D player: base pitch of a pl
 var _owned_base_ui := PackedFloat32Array()  ## per UI player
 var _hum_players: Array[AudioStreamPlayer3D] = []
 var _hum_fighter: Array = []                ## Node3D per hum slot (null = idle)
-var _hum_level := PackedInt32Array()
+var _hum_level := PackedInt32Array()       ## Upgrade 2 level (unused by Round 8's c-driven hum)
+var _hum_start := PackedInt32Array()       ## clock ms of charge_started
+var _hum_c := PackedFloat32Array()          ## c the hum follows now
+var _hum_full: Array[bool] = []             ## charge_full reached
+var _hum_seen: Array[bool] = []             ## the CombatController reported is_charging()
 var _hum_time := PackedFloat32Array()
 var _hum_db := PackedFloat32Array()         ## current volume (slewed)
 var _last_release: Dictionary = {}          ## fighter id -> clock ms of its last charged release
@@ -276,6 +295,10 @@ func _ready() -> void:
 		_hum_players.append(h)
 		_hum_fighter.append(null)
 	_hum_level.resize(HUM_POOL)
+	_hum_start.resize(HUM_POOL)
+	_hum_c.resize(HUM_POOL)
+	_hum_full.resize(HUM_POOL)
+	_hum_seen.resize(HUM_POOL)
 	_hum_time.resize(HUM_POOL)
 	_hum_db.resize(HUM_POOL)
 	_task_id = WorkerThreadPool.add_task(_generate_all, false, "AudioFX synth")
@@ -404,6 +427,10 @@ func stop_all() -> void:
 		_hum_players[i].stop()
 		_hum_players[i].stream = null
 		_hum_fighter[i] = null
+	for i in _daze_players.size():
+		_daze_players[i].stop()
+		_daze_players[i].stream = null
+		_daze_fighter[i] = null
 	if _wind != null:
 		_wind.stop()
 		_wind.stream = null
@@ -494,6 +521,7 @@ func _process(delta: float) -> void:
 			else:
 				_owned_base_ui[i] = 0.0
 	_update_hums(delta, f)
+	_update_dazed(delta)
 
 ## Every sound id this module can play.
 func get_ids() -> Array[StringName]:
@@ -613,6 +641,15 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"whip": _make_whip(s)
 		&"drive_step": _make_drive_step(s)
 		&"step_crunch": _make_step_crunch(s)
+		&"charge_tick": _make_charge_tick(s)
+		&"charge_full": _make_charge_full(s)
+		&"charge_fizzle": _make_charge_fizzle(s)
+		&"hit_charged": _make_hit_charged(s)
+		&"hit_broken": _make_hit_broken(s)
+		&"guard_break": _make_guard_break(s)
+		&"pressure_tick": _make_pressure_tick(s)
+		&"air_pop": _make_air_pop(s)
+		&"dazed": _make_dazed(s)
 		_:
 			return PackedFloat32Array()
 	s.normalize(PEAK)
@@ -727,9 +764,13 @@ func _on_hit_landed(info: HitInfo) -> void:
 	_stop_hum_of(info.victim)  # a hit knocks the victim out of any charge
 	if info.kind == &"grab" or FXRules.is_throw_release(info):
 		return  # a throw's release whooshes on `thrown`
+	if info.pressure > 0.0:
+		_pressure_tick(info)  # Round 8
 	if FXRules.is_round7(info):
-		_r7_hit(info)  # Round 7: layers by weight instead of the tier's stream
+		_r7_hit(info)  # Round 7: layers by weight instead of the tier's stream (Round 8 accents included)
 		return
+	for layer: Array in r8_accent_layers(info):  # Round 8 accents on a tier hit
+		_play_fresh(layer[0], _hit_point(info), layer[1], layer[2], info.attacker)
 	var id := tier_sound_for(info)
 	if id == &"":
 		return
@@ -768,6 +809,8 @@ func _on_hit_blocked(info: HitInfo) -> void:
 	if info == null:
 		return
 	play(&"block", _hit_point(info), 0.0, 1.0)
+	if info.pressure > 0.0:
+		_pressure_tick(info)  # Round 8: blocked hits fill the meter too
 
 ## Contact point, or the victim's chest when the hit carries none.
 static func _hit_point(info: HitInfo) -> Vector3:
@@ -983,6 +1026,10 @@ func _on_charge_started(fighter: Node3D, _move_id: StringName) -> void:
 	_hum_fighter[slot] = fighter
 	_hum_level[slot] = 0
 	_hum_time[slot] = 0.0
+	_hum_start[slot] = clock_ms()
+	_hum_c[slot] = 0.0
+	_hum_full[slot] = false
+	_hum_seen[slot] = false
 	_hum_db[slot] = HUM_DB[0] - 8.0  # fades in
 	h.stream = stream
 	h.global_position = _pos_of(fighter)
@@ -993,34 +1040,58 @@ func _on_charge_started(fighter: Node3D, _move_id: StringName) -> void:
 	_used = true
 	sound_played.emit(&"charge_hum", h.global_position)
 
+## Round 8: each step of the move's meter (level = steps passed) ticks, a
+## little higher and louder per step.
 func _on_charge_level_changed(fighter: Node3D, level: int) -> void:
-	if not is_instance_valid(fighter):
+	if not is_instance_valid(fighter) or level <= 0:
 		return
 	var slot := _hum_slot(fighter)
 	if slot >= 0:
 		_hum_level[slot] = clampi(level, 0, HUM_PITCH.size() - 1)
-	if level > 0:
-		play(&"charge_level", _pos_of(fighter), -2.0 + 2.0 * level, 1.0 + 0.25 * (level - 1), fighter)
+	var db := R8_TICK_DB + R8_TICK_STEP_DB * (level - 1)
+	var pitch := 1.0 + R8_TICK_PITCH_STEP * (level - 1)
+	_play_fresh(&"charge_tick", _pos_of(fighter), db, pitch, fighter)
+	_log_r8(&"charge_step", [&"charge_tick"], [db], [pitch])
 
-func _on_charge_released(fighter: Node3D, _move_id: StringName, level: int) -> void:
+## Round 8: the release whooshes on its own frame, louder, longer and deeper
+## with c (the long charged whoosh layers under it from R8_RELEASE_HEAVY_FROM).
+## It is the charged strike's swing: the strike_started whoosh that follows
+## (after any glide) stands down, and so does attack_active's.
+func _on_charge_released(fighter: Node3D, _move_id: StringName, _level: int) -> void:
 	if not is_instance_valid(fighter):
 		return
+	var c := release_charge(fighter)
 	var slot := _hum_slot(fighter)
 	if slot >= 0:
 		_stop_hum(slot)
-	if level > 0:
-		# Round 5: the charged strike's own whoosh comes from strike_started (same
-		# tick); the release pop only plays when no strike follows (a caller
-		# without strike_started yet), so the two never double.
-		_release_deferred.call_deferred(fighter, level, clock_ms())
-		_last_release[fighter.get_instance_id()] = clock_ms()
+	var ids: Array = [&"charge_release"]
+	var db := lerpf(R8_RELEASE_DB.x, R8_RELEASE_DB.y, c)
+	var pitch := lerpf(R8_RELEASE_PITCH.x, R8_RELEASE_PITCH.y, c)
+	var dbs: Array = [db]
+	var pitches: Array = [pitch]
+	_play_fresh(&"charge_release", _pos_of(fighter), db, pitch, fighter)
+	if c >= R8_RELEASE_HEAVY_FROM:
+		var u := (c - R8_RELEASE_HEAVY_FROM) / (1.0 - R8_RELEASE_HEAVY_FROM)
+		var hdb := lerpf(R8_RELEASE_HEAVY_DB.x, R8_RELEASE_HEAVY_DB.y, u)
+		_play_fresh(&"whoosh_charged", _pos_of(fighter), hdb, lerpf(1.0, 0.86, u), fighter)
+		ids.append(&"whoosh_charged")
+		dbs.append(hdb)
+		pitches.append(lerpf(1.0, 0.86, u))
+	_last_release[fighter.get_instance_id()] = clock_ms()
+	_release_pending[fighter.get_instance_id()] = clock_ms()
+	_log_r8(&"charge_release", ids, dbs, pitches, c)
 
-func _release_deferred(fighter: Node3D, level: int, at_ms: int) -> void:
-	if not is_instance_valid(fighter):
-		return
-	if int(_strike_whoosh.get(fighter.get_instance_id(), -100000)) >= at_ms - 10:
-		return
-	play(&"charge_release", _pos_of(fighter), -4.0 + 2.5 * level, 1.15 - 0.1 * level, fighter)
+## c at a release: the hum's last c, or the CombatController's (B may clear it
+## before or after it emits), 1 after charge_full.
+func release_charge(fighter: Node3D) -> float:
+	var slot := _hum_slot(fighter)
+	var c := 0.0
+	if slot >= 0:
+		c = 1.0 if _hum_full[slot] else _hum_c[slot]
+	var cc := FXRules.combat_of(fighter)
+	if cc != null and cc.has_method(&"get_charge"):
+		c = maxf(c, clampf(float(cc.call(&"get_charge")), 0.0, 1.0))
+	return c
 
 ## Hums currently playing (tests, debug).
 func active_hums() -> int:
@@ -1029,6 +1100,15 @@ func active_hums() -> int:
 		if f != null:
 			n += 1
 	return n
+
+## The hum's base pitch at charge amount c (rising with c).
+static func hum_pitch_for(c: float) -> float:
+	return lerpf(HUM_PITCH[0], HUM_PITCH[HUM_PITCH.size() - 1], clampf(c, 0.0, 1.0))
+
+## c the hum of `fighter` follows (tests): -1 when it has none.
+func hum_charge(fighter: Node3D) -> float:
+	var slot := _hum_slot(fighter)
+	return _hum_c[slot] if slot >= 0 else -1.0
 
 ## Pitch of the hum for `fighter` (tests): 0 when it has none.
 func hum_pitch(fighter: Node3D) -> float:
@@ -1072,17 +1152,29 @@ func _update_hums(delta: float, pitch_factor: float) -> void:
 			_stop_hum(i)
 			continue
 		_hum_time[i] += delta
-		# An interrupted charge (down, flying, dead or held) stops its hum, like the glow.
-		if _hum_time[i] > HUM_MAX_TIME or FXRules.cannot_charge(f):
+		# Round 8: the hum follows c on the real clock (the player charges in real time).
+		var t := (clock_ms() - _hum_start[i]) * 0.001
+		var charging := FXRules.combat_flag(f, &"is_charging")
+		if charging == 1:
+			_hum_seen[i] = true
+		# An interrupted charge (down, flying, dead or held, or the CombatController
+		# no longer charging) stops its hum, like the glow.
+		if t > maxf(HUM_MAX_TIME, R8ChargeFX.charge_glow_max()) or FXRules.cannot_charge(f) \
+				or (charging == 0 and _hum_seen[i]):
 			_stop_hum(i)
 			continue
-		var lvl := _hum_level[i]
-		_hum_db[i] = move_toward(_hum_db[i], HUM_DB[lvl], HUM_SLEW * delta)
+		var c := 1.0 if _hum_full[i] else maxf(_hum_c[i], FXRules.charge_amount(f, t))
+		_hum_c[i] = c
+		var goal := lerpf(HUM_DB[0], HUM_DB[HUM_DB.size() - 1], c) + (R8_HUM_FULL_DB if _hum_full[i] else 0.0)
+		_hum_db[i] = move_toward(_hum_db[i], goal, HUM_SLEW * delta)
 		var h := _hum_players[i]
 		h.global_position = _pos_of(f)
-		h.volume_db = BASE_DB[&"charge_hum"] + _hum_db[i]
-		var wobble := 1.0 + 0.01 * sin(_hum_time[i] * TAU * (3.0 + lvl))
-		h.pitch_scale = HUM_PITCH[lvl] * wobble * (pitch_factor if is_player_source(f) else 1.0)
+		var throb := 0.0
+		if _hum_full[i]:
+			throb = R8_HUM_FULL_THROB_DB * (0.5 + 0.5 * sin(t * TAU * R8_HUM_FULL_THROB_HZ))
+		h.volume_db = BASE_DB[&"charge_hum"] + _hum_db[i] - throb
+		var wobble := 1.0 + lerpf(0.01, 0.025, c) * sin(_hum_time[i] * TAU * lerpf(3.0, 7.0, c))
+		h.pitch_scale = hum_pitch_for(c) * wobble * (pitch_factor if is_player_source(f) else 1.0)
 
 ## A looping stream ignores the retrigger guard (one per charging fighter).
 func _pick_loop(id: StringName) -> AudioStreamWAV:
@@ -1894,6 +1986,7 @@ func _build_round5() -> void:
 	GameEvents.limb_severed.connect(_on_limb_severed)
 	_connect_round6()
 	_connect_round7()
+	_connect_round8()
 
 ## Wind level 0..1 now (tests, debug).
 func get_wind_level() -> float:
@@ -1945,6 +2038,12 @@ func _update_round5(delta: float) -> void:
 func _on_strike_started(attacker: Node3D, _target: Node3D, move_id: StringName, sprint: bool,
 		charge_level: int) -> void:
 	if not is_instance_valid(attacker):
+		return
+	# Round 8: a charged strike's swing whooshed at its release (charge_released).
+	var rel := int(_release_pending.get(attacker.get_instance_id(), -100000))
+	if clock_ms() - rel < R8_RELEASE_COVER_MS:
+		_release_pending.erase(attacker.get_instance_id())
+		_strike_whoosh[attacker.get_instance_id()] = clock_ms()
 		return
 	var r7: Dictionary = Tuning.R7_MOVES.get(move_id, {})
 	if not r7.is_empty():
@@ -2261,6 +2360,7 @@ func _make_break_glass(s: _Synth) -> void:
 # =============================================================================
 
 const DestructionFXScript := preload("res://scripts/fx/destruction_fx.gd")
+const R8ChargeFX := preload("res://scripts/fx/charge_fx.gd")
 ## Break level (dB) at the smallest .. biggest break, and pitch (bigger is lower).
 const BREAK_DB := Vector2(-9.0, 2.0)
 const BREAK_PITCH := Vector2(1.18, 0.88)
@@ -2573,6 +2673,28 @@ static func hit_layers(info: HitInfo) -> Array:
 		out.append([&"hit_thump", lerpf(R7_THUMP_DB.x, R7_THUMP_DB.y, u), lerpf(R7_THUMP_PITCH.x, R7_THUMP_PITCH.y, u)])
 	if info != null and info.react == &"launch":
 		out.append([TIER_SOUND[HitInfo.Tier.LAUNCH], R7_LAUNCH_DB, 1.0])
+	# Round 8: a charged hit scales every layer with c on top of the weight.
+	if FXRules.is_charged(info):
+		var c := clampf(info.charge, 0.0, 1.0)
+		for layer: Array in out:
+			layer[1] = float(layer[1]) + R8_CHARGE_DB * c
+			layer[2] = float(layer[2]) * lerpf(1.0, R8_CHARGE_PITCH, c)
+	out.append_array(r8_accent_layers(info))
+	return out
+
+## Round 8 accents on a hit: [[id, dB, pitch], ...]. A charged hit adds the
+## charged crunch (louder and deeper with c); a hit on a broken enemy adds the
+## heavy broken accent.
+static func r8_accent_layers(info: HitInfo) -> Array:
+	var out: Array = []
+	if info == null:
+		return out
+	if FXRules.is_charged(info):
+		var c := clampf(info.charge, 0.0, 1.0)
+		out.append([&"hit_charged", lerpf(R8_CHARGED_DB.x, R8_CHARGED_DB.y, c),
+			lerpf(R8_CHARGED_PITCH.x, R8_CHARGED_PITCH.y, c)])
+	if info.broken_bonus:
+		out.append([&"hit_broken", R8_BROKEN_DB, 1.0])
 	return out
 
 ## A Round 7 player hit: every layer on the hit's physics frame. The attacker
@@ -2887,3 +3009,360 @@ func _make_step_crunch(s: _Synth) -> void:
 	s.tone(0.0, 0.1, s.rr(150.0, 190.0), 90.0, 0.015, 0.5, 0.0006, 0.02)
 	s.knocks(0.02, 0.1, 2, 900.0, 1500.0, 0.2, 0.01)
 	s.drive(1.6)
+
+
+# =============================================================================
+# Round 8: Charge and pressure (docs/Round 8 — Charge and Pressure.md). Every
+# handler listens to GameEvents and plays on the event's physics frame:
+# - charge_started: the hum (a seamless loop) fades in; its pitch and level
+#   follow the charge amount c (hum_pitch_for; c from
+#   CombatController.get_charge(), FXRules.charge_amount). charge_level_changed:
+#   a short tick per step, higher per step. charge_full: a bright ping; the hum
+#   sits at its top pitch and throbs. charge_released: the release whoosh,
+#   louder, longer and deeper with c (it is the charged strike's swing).
+#   charge_cancelled: the hum stops and the charge fizzles out.
+# - Hits: a tap is a quick crack (its weight, 0.2 to 0.3, plays the crack layer
+#   alone); a charged hit lifts every layer by c and adds the charged crunch; a
+#   hit on a broken enemy adds the heavy broken accent; a hit (landed or
+#   blocked) that adds pressure ticks softly, higher as the meter fills.
+# - pressure_broken: the guard break, unlike any hit: a glass shatter, a
+#   descending power-down tone, a ringing inharmonic clang and a sub boom (well
+#   over a second long). A quiet woozy loop plays on the broken enemy until
+#   pressure_recovered.
+# - air_follow_started: a rising whoosh and a rush. air_hit: a punchy pop,
+#   higher with every hit of the combo.
+# =============================================================================
+
+const R8_TICK_DB := -2.0             ## the first step's tick...
+const R8_TICK_STEP_DB := 1.5         ## ...this much louder per further step
+const R8_TICK_PITCH_STEP := 0.12     ## ...and this much higher
+const R8_FULL_DB := 0.0
+const R8_HUM_FULL_DB := 1.5          ## the hum at full sits this much over its c = 1 level...
+const R8_HUM_FULL_THROB_DB := 4.0    ## ...and throbs down by up to this...
+const R8_HUM_FULL_THROB_HZ := 8.0    ## ...this fast
+## Release whoosh (charge_release) at c = 0 .. 1; the long charged whoosh layers
+## under it from R8_RELEASE_HEAVY_FROM (dB from there .. c = 1).
+const R8_RELEASE_DB := Vector2(-6.0, 2.5)
+const R8_RELEASE_PITCH := Vector2(1.2, 0.85)
+const R8_RELEASE_HEAVY_FROM := 0.4
+const R8_RELEASE_HEAVY_DB := Vector2(-6.0, 1.0)
+## A strike_started this soon after the attacker's release is the released
+## strike (after its glide): its swing whoosh already played (ms).
+const R8_RELEASE_COVER_MS := 900
+const R8_FIZZLE_DB := 0.0
+## Charged hits: every layer + R8_CHARGE_DB x c dB and pitch x lerp(1, R8_CHARGE_PITCH, c);
+## the charged crunch at c = 0 .. 1.
+const R8_CHARGE_DB := 3.0
+const R8_CHARGE_PITCH := 0.9
+const R8_CHARGED_DB := Vector2(-8.0, 1.0)
+const R8_CHARGED_PITCH := Vector2(1.1, 0.88)
+const R8_BROKEN_DB := 0.0
+## Pressure tick: dB and pitch from an empty meter to a nearly full one.
+const R8_PRESSURE_DB := Vector2(-3.0, 1.0)
+const R8_PRESSURE_PITCH := Vector2(0.9, 1.5)
+const R8_BREAK_DB := 0.0
+const R8_DAZED_POOL := 3
+const R8_DAZED_DB := 0.0              ## the loop's level (over BASE_DB) once faded in
+const R8_DAZED_FADE := 14.0           ## dB per s in...
+const R8_DAZED_FADE_OUT := 150.0      ## ...and out (gone in 0.2 s)
+const R8_DAZED_SLACK := 1.0           ## s past R8_BREAK_TIME before a loop with no pressure_recovered stops
+## Air combo.
+const R8_AIR_FOLLOW_DB := Vector2(2.0, -3.0)  ## whoosh_up, rush
+const R8_AIR_POP_DB := 0.0
+const R8_AIR_POP_PITCH_STEP := 0.09   ## pitch x (1 + this x (count - 1))
+const R8_AIR_POP_PITCH_MAX := 1.7
+const R8_AIR_PAST_CAP_DB := -3.0      ## past debug_air_hits (no hang) the pop is a little quieter
+
+## Every Round 8 sound group played: {frame (physics), event, ids, db, pitch, c} (tests, newest last).
+var round8_sounds: Array[Dictionary] = []
+var _release_pending: Dictionary = {}      ## fighter id -> clock ms of its release (strike_started stands down)
+var _daze_players: Array[AudioStreamPlayer3D] = []
+var _daze_fighter: Array = []
+var _daze_start := PackedInt32Array()      ## clock ms
+var _daze_db := PackedFloat32Array()
+var _daze_out: Array[bool] = []            ## fading out
+var _daze_seen: Array[bool] = []           ## is_broken() was seen true
+var _r8_connected := false
+
+func _connect_round8() -> void:
+	if _r8_connected:
+		return
+	_r8_connected = true
+	for i in R8_DAZED_POOL:
+		var h := AudioStreamPlayer3D.new()
+		h.name = "Dazed_%d" % i
+		h.unit_size = 5.0
+		h.max_distance = 40.0
+		h.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
+		h.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		h.bus = WORLD_BUS
+		add_child(h)
+		_daze_players.append(h)
+		_daze_fighter.append(null)
+		_daze_out.append(false)
+		_daze_seen.append(false)
+	_daze_start.resize(R8_DAZED_POOL)
+	_daze_db.resize(R8_DAZED_POOL)
+	GameEvents.charge_full.connect(_on_charge_full)
+	GameEvents.charge_cancelled.connect(_on_charge_cancelled)
+	GameEvents.pressure_broken.connect(_on_pressure_broken)
+	GameEvents.pressure_recovered.connect(_on_pressure_recovered)
+	GameEvents.air_follow_started.connect(_on_air_follow_started)
+	GameEvents.air_hit.connect(_on_air_hit)
+	GameEvents.fighter_died.connect(func(f: Node3D, _i: HitInfo) -> void: _stop_dazed(f, true))
+	GameEvents.round_started.connect(func(_m: StringName) -> void: _release_pending.clear())
+
+func _log_r8(event: StringName, ids: Array, dbs: Array, pitches: Array, c := -1.0) -> void:
+	round8_sounds.append({"frame": Engine.get_physics_frames(), "event": event, "ids": ids, "db": dbs,
+		"pitch": pitches, "c": c})
+	if round8_sounds.size() > 64:
+		round8_sounds.pop_front()
+
+## Full charge: a bright ping; the hum goes to its top and throbs.
+func _on_charge_full(fighter: Node3D, _move_id: StringName) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var slot := _hum_slot(fighter)
+	if slot >= 0:
+		_hum_full[slot] = true
+		_hum_c[slot] = 1.0
+	_play_fresh(&"charge_full", _pos_of(fighter), R8_FULL_DB, 1.0, fighter)
+	_log_r8(&"charge_full", [&"charge_full"], [R8_FULL_DB], [1.0], 1.0)
+
+## A charge that ended without a strike: the hum stops and it fizzles out.
+func _on_charge_cancelled(fighter: Node3D, _move_id: StringName, reason: StringName) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var c := release_charge(fighter)
+	_stop_hum_of(fighter)
+	var pitch := lerpf(1.1, 0.9, c)
+	_play_fresh(&"charge_fizzle", _pos_of(fighter), R8_FIZZLE_DB, pitch, fighter)
+	_log_r8(StringName("charge_cancelled_" + String(reason)), [&"charge_fizzle"], [R8_FIZZLE_DB], [pitch], c)
+
+## A hit that added pressure: a soft glassy tick, higher as the meter fills.
+func _pressure_tick(info: HitInfo) -> void:
+	var p := FXRules.pressure_fraction(info.victim)
+	var db := lerpf(R8_PRESSURE_DB.x, R8_PRESSURE_DB.y, p)
+	var pitch := lerpf(R8_PRESSURE_PITCH.x, R8_PRESSURE_PITCH.y, p)
+	_play_fresh(&"pressure_tick", _hit_point(info), db, pitch, info.attacker)
+	_log_r8(&"pressure_tick", [&"pressure_tick"], [db], [pitch], p)
+
+## The guard break, then the dazed loop on the broken enemy. The attacker (the
+## player) owns the break sound: it keeps its pitch in slow motion.
+func _on_pressure_broken(fighter: Node3D, attacker: Node3D) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var at := FXRules.upper_body(fighter)
+	_play_fresh(&"guard_break", at, R8_BREAK_DB, 1.0, attacker if is_instance_valid(attacker) else null)
+	_start_dazed(fighter)
+	_log_r8(&"pressure_broken", [&"guard_break", &"dazed"], [R8_BREAK_DB, R8_DAZED_DB], [1.0, 1.0])
+
+func _on_pressure_recovered(fighter: Node3D) -> void:
+	_stop_dazed(fighter, false)
+
+## The launcher jump: a rising whoosh and a rush of air.
+func _on_air_follow_started(fighter: Node3D, _target: Node3D) -> void:
+	if not is_instance_valid(fighter):
+		return
+	_play_fresh(&"whoosh_up", _pos_of(fighter), R8_AIR_FOLLOW_DB.x, 0.95, fighter)
+	_play_fresh(&"rush", _pos_of(fighter), R8_AIR_FOLLOW_DB.y, 1.1, fighter)
+	_log_r8(&"air_follow_started", [&"whoosh_up", &"rush"], [R8_AIR_FOLLOW_DB.x, R8_AIR_FOLLOW_DB.y], [0.95, 1.1])
+
+## An air hit: a punchy pop on top of the hit, higher with the count.
+func _on_air_hit(attacker: Node3D, victim: Node3D, count: int) -> void:
+	if not is_instance_valid(victim):
+		return
+	var pitch := air_pop_pitch(count)
+	var db := R8_AIR_POP_DB + (R8_AIR_PAST_CAP_DB if count > Tuning.debug_air_hits else 0.0)
+	_play_fresh(&"air_pop", FXRules.upper_body(victim), db, pitch, attacker)
+	_log_r8(&"air_hit", [&"air_pop"], [db], [pitch], float(count))
+
+## The air pop's pitch for the count-th air hit of a combo (rising).
+static func air_pop_pitch(count: int) -> float:
+	return minf(1.0 + R8_AIR_POP_PITCH_STEP * maxi(count - 1, 0), R8_AIR_POP_PITCH_MAX)
+
+# --- The dazed loop ---------------------------------------------------------------------
+
+## True while `fighter`'s dazed loop plays (tests).
+func is_dazed_playing(fighter: Node3D) -> bool:
+	var i := _daze_slot(fighter)
+	return i >= 0 and not _daze_out[i] and _daze_players[i].playing
+
+## Dazed loops playing (tests, debug).
+func active_dazed() -> int:
+	var n := 0
+	for i in _daze_fighter.size():
+		if _daze_fighter[i] != null:
+			n += 1
+	return n
+
+func _daze_slot(fighter: Node3D) -> int:
+	if not is_instance_valid(fighter):
+		return -1
+	for i in _daze_fighter.size():
+		if _daze_fighter[i] != null and _daze_fighter[i] == fighter:
+			return i
+	return -1
+
+func _start_dazed(fighter: Node3D) -> void:
+	if _quitting or _daze_players.is_empty():
+		return
+	var slot := _daze_slot(fighter)
+	if slot < 0:
+		var oldest := 0
+		for i in _daze_fighter.size():
+			if _daze_fighter[i] == null:
+				slot = i
+				break
+			if _daze_start[i] < _daze_start[oldest]:
+				oldest = i
+		if slot < 0:
+			slot = oldest
+	var stream := _pick_loop(&"dazed")
+	if stream == null:
+		return
+	var h := _daze_players[slot]
+	_daze_fighter[slot] = fighter
+	_daze_start[slot] = clock_ms()
+	_daze_out[slot] = false
+	_daze_seen[slot] = false
+	_daze_db[slot] = R8_DAZED_DB - 18.0  # fades in
+	h.stream = stream
+	h.global_position = FXRules.head_of(fighter)
+	h.volume_db = BASE_DB[&"dazed"] + _daze_db[slot]
+	h.pitch_scale = _rng.randf_range(0.95, 1.05)
+	h.play()
+	_used = true
+	sound_played.emit(&"dazed", h.global_position)
+
+func _stop_dazed(fighter: Node3D, at_once: bool) -> void:
+	var i := _daze_slot(fighter)
+	if i < 0:
+		return
+	if at_once:
+		_free_dazed(i)
+	else:
+		_daze_out[i] = true
+
+func _free_dazed(i: int) -> void:
+	_daze_players[i].stop()
+	_daze_fighter[i] = null
+	_daze_out[i] = false
+
+func _update_dazed(delta: float) -> void:
+	for i in _daze_fighter.size():
+		var f = _daze_fighter[i]
+		if f == null:
+			continue
+		if not is_instance_valid(f) or not (f as Node3D).is_inside_tree() \
+				or ((f as Node).has_method(&"is_dead") and f.call(&"is_dead")):
+			_free_dazed(i)
+			continue
+		if not _daze_out[i]:
+			var broken := FXRules.combat_flag(f, &"is_broken")
+			if broken == 1:
+				_daze_seen[i] = true
+			if (clock_ms() - _daze_start[i]) * 0.001 > Tuning.R8_BREAK_TIME + R8_DAZED_SLACK \
+					or (broken == 0 and _daze_seen[i]):
+				_daze_out[i] = true
+		var goal := R8_DAZED_DB - 30.0 if _daze_out[i] else R8_DAZED_DB
+		_daze_db[i] = move_toward(_daze_db[i], goal, (R8_DAZED_FADE_OUT if _daze_out[i] else R8_DAZED_FADE) * delta)
+		if _daze_out[i] and _daze_db[i] <= goal + 0.01:
+			_free_dazed(i)
+			continue
+		var h := _daze_players[i]
+		h.global_position = FXRules.head_of(f)
+		h.volume_db = BASE_DB[&"dazed"] + _daze_db[i]
+
+# --- Round 8 sound designs ---------------------------------------------------------------
+
+## Charge step: a short dry tick, a click with a small ping (under 0.1 s).
+func _make_charge_tick(s: _Synth) -> void:
+	var f := s.rr(1650.0, 1800.0)
+	s.noise_burst(0.0, 0.025, 0.7, 7000.0, 5000.0, 2500.0, 0.0002, 0.004)
+	s.tone(0.0, 0.07, f, f, 1.0, 0.6, 0.0004, 0.014)
+	s.tone(0.0, 0.05, f * 2.0, f * 2.0, 1.0, 0.2, 0.0004, 0.008)
+
+## Full charge: a bright bell ping with a rising sparkle and a shimmer tail.
+func _make_charge_full(s: _Synth) -> void:
+	var f := s.rr(1280.0, 1360.0)
+	s.modal(0.0, 0.8, f, [1.0, 2.0, 3.01, 4.17], [1.0, 0.55, 0.3, 0.18], [0.32, 0.2, 0.12, 0.08], 0.6)
+	s.tone(0.0, 0.25, f * 0.5, f * 1.5, 0.06, 0.35, 0.002, 0.08)
+	s.tone(0.0, 0.7, f * 2.0, f * 2.02, 1.0, 0.15, 0.003, 0.25)
+	s.noise_burst(0.0, 0.2, 0.25, 10000.0, 7000.0, 5000.0, 0.001, 0.05)
+
+## Fizzle: a falling, sputtering tone with a dry hiss and crackle.
+func _make_charge_fizzle(s: _Synth) -> void:
+	s.tone(0.0, 0.45, s.rr(560.0, 620.0), 140.0, 0.15, 0.55, 0.002, 0.16, 1, 23.0, 0.06)
+	s.crackle(0.0, 0.4, 0.45, 900.0, 0.15, 5000.0)
+	s.noise_burst(0.0, 0.42, 0.35, 5000.0, 900.0, 600.0, 0.004, 0.14)
+	s.lowpass(7000.0)
+
+## Charged crunch (a charged hit's accent): a deep compressed boom with a bony crunch.
+func _make_hit_charged(s: _Synth) -> void:
+	var f := s.rr(70.0, 80.0)
+	s.tone(0.0, 0.6, f * 1.6, f * 0.5, 0.05, 1.0, 0.001, 0.15)
+	s.noise_burst(0.0, 0.35, 0.7, 1200.0, 200.0, 0.0, 0.001, 0.08)
+	s.crackle(0.002, 0.14, 0.6, 1400.0, 0.05, 4200.0)
+	s.noise_burst(0.0, 0.03, 0.6, 8000.0, 4000.0, 2000.0, 0.0002, 0.006)
+	s.drive(2.4)
+
+## Broken accent (a hit on a broken enemy): a very low slam, a crack, and a
+## short glassy splinter that echoes the guard break.
+func _make_hit_broken(s: _Synth) -> void:
+	var f := s.rr(52.0, 58.0)
+	s.tone(0.0, 0.8, f * 1.8, f * 0.6, 0.06, 1.0, 0.001, 0.2)
+	s.noise_burst(0.0, 0.05, 0.8, 9000.0, 5000.0, 2500.0, 0.0002, 0.008)
+	s.noise_burst(0.0, 0.4, 0.5, 900.0, 160.0, 0.0, 0.002, 0.1)
+	s.modal(0.01, 0.35, s.rr(2300.0, 2500.0), [1.0, 1.53, 2.31], [0.5, 0.35, 0.2], [0.09, 0.06, 0.04], 0.35)
+	s.crackle(0.005, 0.12, 0.35, 2000.0, 0.04, 8000.0)
+	s.drive(2.0)
+
+## Guard break: unlike any hit. A glass shatter (dense bright crackle and a
+## hissing burst), a descending power-down tone, a ringing inharmonic clang and
+## a sub boom with a long tail (about 1.5 s; hits die in well under a second).
+func _make_guard_break(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.03, 1.0, 12000.0, 8000.0, 4000.0, 0.0002, 0.005)
+	s.crackle(0.0, 0.55, 0.8, 3200.0, 0.14, 9500.0)
+	s.noise_burst(0.0, 0.5, 0.5, 11000.0, 5000.0, 3000.0, 0.001, 0.12)
+	var f := s.rr(1020.0, 1080.0)
+	s.modal(0.0, 1.4, f, [1.0, 1.48, 2.17, 2.93, 3.83], [1.0, 0.8, 0.55, 0.35, 0.22],
+			[0.5, 0.38, 0.26, 0.18, 0.12], 0.45)
+	s.tone(0.02, 1.0, 520.0, 95.0, 0.3, 0.55, 0.004, 0.4, 2)
+	var b := s.rr(48.0, 54.0)
+	s.tone(0.0, 1.5, b * 1.4, b * 0.6, 0.2, 0.9, 0.003, 0.45)
+	s.noise_burst(0.0, 1.1, 0.4, 260.0, 70.0, 0.0, 0.01, 0.35)
+	s.drive(1.6)
+
+## Pressure tick: a soft glassy tink (subtle; it rises in pitch as the meter fills).
+func _make_pressure_tick(s: _Synth) -> void:
+	var f := s.rr(2500.0, 2700.0)
+	s.modal(0.0, 0.16, f, [1.0, 2.76], [1.0, 0.4], [0.035, 0.02], 0.6)
+	s.noise_burst(0.0, 0.02, 0.2, 9000.0, 6000.0, 3500.0, 0.0002, 0.004)
+
+## Air pop: a punchy, airy pop: a fast-falling knock, a click and a short fwip.
+func _make_air_pop(s: _Synth) -> void:
+	var f := s.rr(300.0, 340.0)
+	s.tone(0.0, 0.16, f, f * 0.4, 0.012, 1.0, 0.0004, 0.04)
+	s.noise_burst(0.0, 0.03, 0.6, 6500.0, 3500.0, 1500.0, 0.0002, 0.006)
+	s.swoosh(0.0, 0.14, 0.45, 1500.0, 5200.0, 3000.0, 0.3)
+	s.drive(1.8)
+
+## Dazed: a quiet, woozy 1 s seamless loop: three soft chimes twinkling in turn
+## with a slow pitch wobble (every partial and modulator completes whole cycles
+## in the loop).
+func _make_dazed(s: _Synth) -> void:
+	var n := int(1.0 * _Synth.SR)
+	s.buf.resize(n)
+	var fs := [880.0, 1320.0, 1760.0]
+	var ph := [s.rand(), s.rand(), s.rand()]
+	for k in n:
+		var t := k / _Synth.SR
+		var v := 0.0
+		for j in 3:
+			# Phase modulation by a 2 Hz wobble (whole cycles: seamless).
+			var p: float = TAU * (float(fs[j]) * t + float(ph[j])) + 0.9 * sin(TAU * 2.0 * t + j)
+			var tw := pow(0.5 + 0.5 * sin(TAU * 3.0 * t + j * TAU / 3.0), 3.0)
+			v += sin(p) * tw * (0.5 if j == 0 else 0.3)
+		s.buf[k] = v * (0.8 + 0.2 * sin(TAU * 1.0 * t))
+

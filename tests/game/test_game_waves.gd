@@ -4,6 +4,9 @@ extends Node
 ## MAX_ENEMIES_ON_FIELD alive, AttackDirector.set_wave per wave, the last kill
 ## (GameEvents.last_kill, the next wave held until it has played), 25 HP back
 ## between waves, no regen during a wave, and the player's death ending the run.
+## Round 8: Waves use the player's own upgrades (not the Duel's max); an
+## enemy close to the player in view gets a health + pressure pair that reads
+## the real CombatController; the enemies' levels are printed.
 
 const RUN_SECONDS := 8.0
 
@@ -132,6 +135,7 @@ func _run() -> void:
 	_check(gm.get_enemies_left() == 3, "wave 1 has 3 enemies (%d)" % gm.get_enemies_left())
 	_check(not gm.hud._opp_root.visible, "waves show no enemy HP bar")
 	_check(gm.hud._mode_label.text == "WAVE 1", "HUD reads 'WAVE 1' (%s)" % gm.hud._mode_label.text)
+	_check(not GameMenus.is_max_upgrades_applied(), "Round 8: Waves use the player's own upgrades")
 
 	# Make the queue bigger than the field cap to exercise the cap.
 	for i in 9:
@@ -147,6 +151,7 @@ func _run() -> void:
 	# No regen during a wave: 50 HP never goes up until the wave ends.
 	_freeze_ai = true
 	await _step(gm, 2)
+	await _check_enemy_bars(gm)
 	_shield(gm, false)
 	gm.player.apply_damage(50.0, &"test")
 	var hp_max_seen := [gm.player.hp]
@@ -191,6 +196,34 @@ func _run() -> void:
 	_check(gm.menus.screen == GameMenus.Screen.ROUND_OVER, "results screen shown")
 	_check(int(gm.menus.last_results.get("waves_cleared", -1)) == 2, "results: 2 waves cleared (%s)" % gm.menus.last_results.get("waves_cleared"))
 	_check(_max_alive <= Tuning.MAX_ENEMIES_ON_FIELD, "cap held for the whole test (max %d)" % _max_alive)
+
+## Round 8: an enemy placed in view 3 m in front of the player shows its
+## health + pressure pair, reading the real CombatController.
+func _check_enemy_bars(gm: GameMode) -> void:
+	var alive := gm.get_alive_enemies()
+	var levels := PackedStringArray()
+	for f in alive:
+		levels.append("%s L%d" % [f.archetype, f.level])
+	print("    wave 1 enemy levels: %s" % ", ".join(levels))
+	if alive.is_empty() or gm.camera_rig == null:
+		_check(false, "an enemy to show bars over")
+		return
+	var f: Fighter = alive[0]
+	var fwd := -gm.camera_rig.get_camera().global_basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized() if fwd.length() > 0.01 else Vector3.FORWARD
+	f.global_position = gm.player.global_position + fwd * 3.0 + Vector3.UP * 0.05
+	f.reset_physics_interpolation()
+	await _step(gm, int(0.4 * Engine.physics_ticks_per_second))
+	var it := {}
+	for e: Dictionary in gm.hud.get_enemy_bars():
+		if e["fighter"] == f:
+			it = e
+	var c := f.combat
+	var want := HUD.pressure_fraction(c.get_pressure(), c.get_pressure_max(), c.is_broken())
+	_check(not it.is_empty() and absf(float(it["pressure"]) - want) < 0.02 and absf(float(it["hp"]) - f.hp / f.max_hp) < 0.001,
+		"an engaged enemy shows health + pressure from the real CombatController (pressure %.2f / %.2f, bars %s)" % [
+			c.get_pressure(), c.get_pressure_max(), it.get("pressure", "none")])
 
 func _wait_until(cond: Callable, max_real: float) -> void:
 	var until := TimeDirector.now() + max_real

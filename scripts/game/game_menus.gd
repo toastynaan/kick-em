@@ -9,10 +9,17 @@ extends CanvasLayer
 ##
 ## Pause > Debug settings holds the player's upgrades until the progression
 ## round (Round 7 amendment: God path): sprint speed cap (8 / 10 / 12 m/s),
-## Battering Ram level (0-3), teleport (on / off), pursuit chain (0-3), plus the
-## F3 overlay. Each writes its Tuning.debug_* static at once and is saved in
-## user://settings.cfg (section "debug") next to the camera settings. The
-## Focus meter is gone, so there is no starting-Focus setting.
+## Battering Ram level (0-3), teleport (on / off), pursuit chain (0-3); Round 8
+## adds the charge time (1.0 .. 0.5 s), pressure (x1 .. x2), the launch step
+## (1.0 .. 0.5) and air hits (4 .. 6); plus the F3 overlay. Each writes its
+## Tuning.debug_* static at once and is saved in user://settings.cfg (section
+## "debug") next to the camera settings. The Focus meter is gone, so there is
+## no starting-Focus setting.
+##
+## Round 8 Duel: GameMode applies every upgrade at Tuning.R8_UPGRADE_MAX for
+## the round (apply_max_upgrades) and restores the player's own values after
+## (restore_own_upgrades). While the max is applied, Debug settings shows and
+## edits the player's own values, and every save writes those, never the max.
 
 signal duel_pressed
 signal waves_pressed
@@ -32,8 +39,18 @@ const GRAB_LAB_SCENE := "res://scenes/grab_lab.tscn"
 const SETTINGS_PATH := "user://settings.cfg"
 const RAM_LEVELS := 4      ## Battering Ram 0 (not earned) .. 3
 const PURSUIT_LEVELS := 4  ## pursuits chained off one launch: 0 (off) .. 3
+const DEBUG_BUTTON_FONT := 22 ## px: Debug settings items (nine of them and BACK fit a 900 px window)
+## Round 8 upgrades: the start value (Tuning's default) and the menu's step.
+## The max is Tuning.R8_UPGRADE_MAX[key]; the menu cycles start .. max.
+const R8_UPGRADE_START := {"charge_full": 1.0, "pressure_mult": 1.0, "launch_step": 1.0, "air_hits": 4}
+const R8_UPGRADE_STEP := {"charge_full": 0.1, "pressure_mult": 0.25, "launch_step": 0.1, "air_hits": 1}
+## Every upgrade key, in menu order (also Tuning.R8_UPGRADE_MAX's keys).
+const UPGRADE_KEYS: Array[String] = ["speed_cap", "ram_level", "teleport", "pursuit_max", "charge_full",
+	"pressure_mult", "launch_step", "air_hits"]
 
 static var _debug_loaded := false
+## The player's own upgrades while the Duel's max is applied ({} = not applied).
+static var _own_upgrades := {}
 
 ## Set by GameMode: true while a round is running and may be paused.
 var can_pause := false
@@ -63,8 +80,10 @@ var debug_settings_button: Button
 var _debug: Control
 var _debug_first: Button
 ## Debug setting buttons by key: &"speed_cap", &"ram_level", &"teleport",
-## &"pursuit_max", &"overlay".
+## &"pursuit_max", &"charge_full", &"pressure_mult", &"launch_step",
+## &"air_hits", &"overlay".
 var debug_buttons := {}
+var _debug_duel_note: Label
 var _over_grid: GridContainer
 ## Last stats shown on the results panel (tests read it).
 var last_results := {}
@@ -292,15 +311,18 @@ static func title_key_lines() -> Array:
 		["Restart", k.call(&"restart"), "Help", k.call(&"help")],
 	]
 
-## The title's short lesson on the Round 7 kit and the god path.
+## The title's short lesson on the Round 8 strikes (tap or hold to charge,
+## pressure, the air combo) and the Round 7 god path.
 static func title_tips() -> String:
 	var k := func(action: StringName) -> String: return UIKit.key_label(action, false)
 	var back := "S"
 	for spec: Array in Controls.ACTIONS.get(&"move_back", []):
 		if spec[0] == &"key":
 			back = OS.get_keycode_string(int(spec[1]))
-	return ("Tap %s: jab, cross, hook. Hold it, or a kick: the heavy version.\n" % k.call(&"punch")
-		+ "Uppercut lifts, gut punch folds, leg kick drops them to a knee:\nhit those states for bigger results.\n"
+	return ("Tap %s: jab, cross, hook. Tap any strike for a quick hit;\nhold it to charge (the meter at the bottom), release to strike.\n" % k.call(&"punch")
+		+ "Every hit fills the enemy's pressure bar: full breaks them open.\n"
+		+ "Hit a lifted, folded or kneeling enemy for a bigger result.\n"
+		+ "Charged uppercut, then %s: follow them up. Air hits hang;\na kick sends them away, %s + punch spikes them down.\n" % [k.call(&"jump"), back]
 		+ "Orange icon over an enemy: %s to counter. Blue icon: %s to dodge.\n" % [k.call(&"counter"), k.call(&"dash")]
 		+ "%s just before a hit lands: teleport behind them.\n" % k.call(&"dash")
 		+ "Right after a launch, %s again to pursue the body: attack to send it\nfurther, or %s + attack to spike it into the ground.\n" % [k.call(&"dash"), back]
@@ -408,19 +430,27 @@ func show_debug() -> void:
 func _build_debug() -> void:
 	_debug = _modal("DEBUG", Color.WHITE)
 	var box: VBoxContainer = _debug.get_meta(&"box")
-	(_debug.get_meta(&"title") as Label).add_theme_font_size_override(&"font_size", 64)
+	(_debug.get_meta(&"title") as Label).add_theme_font_size_override(&"font_size", 48)
+	box.add_theme_constant_override(&"separation", 8)
 	box.add_child(UIKit.label("Your upgrades until progression arrives. Saved between sessions.", 18, UIKit.TEXT_DIM, false, 3))
+	_debug_duel_note = UIKit.label("DUEL: every upgrade is at max this round. Changes here are your own settings.",
+		18, UIKit.ACCENT, true, 3)
+	_debug_duel_note.visible = false
+	box.add_child(_debug_duel_note)
 	_debug_first = _debug_button(box, &"speed_cap")
-	_debug_button(box, &"ram_level")
-	_debug_button(box, &"teleport")
-	_debug_button(box, &"pursuit_max")
-	_debug_button(box, &"overlay")
-	_menu_button(box, "BACK", show_pause)
+	for key: StringName in [&"ram_level", &"teleport", &"pursuit_max", &"charge_full", &"pressure_mult",
+			&"launch_step", &"air_hits", &"overlay"]:
+		_debug_button(box, key)
+	var back := _menu_button(box, "BACK", show_pause)
+	back.add_theme_font_size_override(&"font_size", DEBUG_BUTTON_FONT)
+	back.custom_minimum_size.y = 0.0
 	box.add_child(UIKit.label("Enter / A: next value   ←/→: change", 18, UIKit.TEXT_DIM, false, 3))
 
 ## A button that cycles one setting: press = next value, left / right = step.
 func _debug_button(parent: Control, key: StringName) -> Button:
 	var b := _menu_button(parent, "", step_debug_setting.bind(key, 1))
+	b.add_theme_font_size_override(&"font_size", DEBUG_BUTTON_FONT)
+	b.custom_minimum_size.y = 0.0
 	b.gui_input.connect(func(ev: InputEvent) -> void:
 		if ev.is_action_pressed(&"ui_left") or ev.is_action_pressed(&"ui_right"):
 			step_debug_setting(key, -1 if ev.is_action_pressed(&"ui_left") else 1)
@@ -429,7 +459,20 @@ func _debug_button(parent: Control, key: StringName) -> Button:
 	return b
 
 ## Step a debug setting by `dir` (wraps), apply it to Tuning at once and save.
+## While the Duel's max upgrades are applied, an upgrade steps the player's own
+## value (saved, applied after the Duel) and the live value stays at max.
 func step_debug_setting(key: StringName, dir: int) -> void:
+	var own := is_max_upgrades_applied() and key != &"overlay"
+	if own:
+		apply_upgrades(_own_upgrades)  # step the player's own values...
+	_step_setting(key, dir)
+	if own:
+		_own_upgrades = upgrade_values()  # ...and keep the Duel's max live
+		apply_upgrades(Tuning.R8_UPGRADE_MAX)
+	save_debug_settings()
+	_refresh_debug_labels()
+
+func _step_setting(key: StringName, dir: int) -> void:
 	match key:
 		&"speed_cap":
 			var caps := Tuning.SPRINT_CAPS
@@ -441,30 +484,139 @@ func step_debug_setting(key: StringName, dir: int) -> void:
 			Tuning.debug_teleport = not Tuning.debug_teleport
 		&"pursuit_max":
 			Tuning.debug_pursuit_max = wrapi(Tuning.debug_pursuit_max + dir, 0, PURSUIT_LEVELS)
+		&"charge_full":
+			Tuning.debug_charge_full = _step_in(upgrade_steps("charge_full"), Tuning.debug_charge_full, dir)
+		&"pressure_mult":
+			Tuning.debug_pressure_mult = _step_in(upgrade_steps("pressure_mult"), Tuning.debug_pressure_mult, dir)
+		&"launch_step":
+			Tuning.debug_launch_step = _step_in(upgrade_steps("launch_step"), Tuning.debug_launch_step, dir)
+		&"air_hits":
+			Tuning.debug_air_hits = roundi(_step_in(upgrade_steps("air_hits"), Tuning.debug_air_hits, dir))
 		&"overlay":
 			Tuning.debug_overlay = not Tuning.debug_overlay
-	save_debug_settings()
-	_refresh_debug_labels()
+
+## The next value of `list` from the one nearest `value` (wraps).
+static func _step_in(list: Array[float], value: float, dir: int) -> float:
+	return list[wrapi(_nearest_index(list, value) + dir, 0, list.size())]
+
+static func _nearest_index(list: Array[float], value: float) -> int:
+	var best := 0
+	for i in list.size():
+		if absf(list[i] - value) < absf(list[best] - value):
+			best = i
+	return best
+
+## A Round 8 upgrade's menu values, start .. Tuning.R8_UPGRADE_MAX[key] by
+## R8_UPGRADE_STEP (charge_full: 1.0, 0.9 .. 0.5).
+static func upgrade_steps(key: String) -> Array[float]:
+	var a := float(R8_UPGRADE_START[key])
+	var b := float(Tuning.R8_UPGRADE_MAX[key])
+	var step := absf(float(R8_UPGRADE_STEP[key])) * signf(b - a)
+	var out: Array[float] = [a]
+	if step == 0.0:
+		return out
+	var n := roundi((b - a) / step)
+	for i in range(1, n + 1):
+		out.append(roundf((a + step * i) * 1000.0) / 1000.0)
+	return out
+
+## A loaded Round 8 value: clamped into start .. max, then the nearest menu value.
+static func _clamp_upgrade(key: String, value: float) -> float:
+	var list := upgrade_steps(key)
+	var lo := minf(list[0], list[list.size() - 1])
+	var hi := maxf(list[0], list[list.size() - 1])
+	return list[_nearest_index(list, clampf(value, lo, hi))]
 
 ## The F3 overlay on or off (Debug settings item), applied at once and saved.
 func toggle_overlay() -> void:
 	step_debug_setting(&"overlay", 1)
 
+## The items show the player's own upgrades (during the Duel too, where the
+## live values are at max).
 func _refresh_debug_labels() -> void:
 	if debug_buttons.is_empty():
 		return
-	(debug_buttons[&"speed_cap"] as Button).text = "SPEED CAP:  %d m/s%s" % [roundi(Tuning.debug_speed_cap),
-		"  (base)" if is_equal_approx(Tuning.debug_speed_cap, Tuning.SPRINT_CAPS[0]) else "  (upgraded)"]
-	(debug_buttons[&"ram_level"] as Button).text = "BATTERING RAM:  %s" % (
-		"0  (not earned)" if Tuning.debug_ram_level <= 0
-		else "LEVEL %d%s" % [Tuning.debug_ram_level, "  (launches)" if Tuning.debug_ram_level >= RAM_LEVELS - 1 else ""])
-	(debug_buttons[&"teleport"] as Button).text = "TELEPORT:  %s" % ("ON" if Tuning.debug_teleport else "OFF")
-	(debug_buttons[&"pursuit_max"] as Button).text = "PURSUIT CHAIN:  %s" % (
-		"0  (off)" if Tuning.debug_pursuit_max <= 0 else "%d per launch" % Tuning.debug_pursuit_max)
+	var v := own_upgrades()
+	for key: String in v:
+		(debug_buttons[StringName(key)] as Button).text = upgrade_text(key, v[key])
 	(debug_buttons[&"overlay"] as Button).text = "DEBUG OVERLAY (F3):  %s" % ("ON" if Tuning.debug_overlay else "OFF")
+	_debug_duel_note.visible = is_max_upgrades_applied()
+
+## A Debug settings item's text for an upgrade value.
+static func upgrade_text(key: String, value: Variant) -> String:
+	var tag := func(at_start: bool, at_max: bool) -> String:
+		return "  (base)" if at_start else ("  (max)" if at_max else "")
+	match key:
+		"speed_cap":
+			return "SPEED CAP:  %d m/s%s" % [roundi(float(value)),
+				"  (base)" if is_equal_approx(float(value), Tuning.SPRINT_CAPS[0]) else "  (upgraded)"]
+		"ram_level":
+			return "BATTERING RAM:  %s" % ("0  (not earned)" if int(value) <= 0
+				else "LEVEL %d%s" % [int(value), "  (launches)" if int(value) >= RAM_LEVELS - 1 else ""])
+		"teleport":
+			return "TELEPORT:  %s" % ("ON" if bool(value) else "OFF")
+		"pursuit_max":
+			return "PURSUIT CHAIN:  %s" % ("0  (off)" if int(value) <= 0 else "%d per launch" % int(value))
+		"charge_full":
+			return "CHARGE TIME:  %.1f s to full%s" % [float(value), tag.call(
+				is_equal_approx(float(value), float(R8_UPGRADE_START[key])), is_equal_approx(float(value), float(Tuning.R8_UPGRADE_MAX[key])))]
+		"pressure_mult":
+			return "PRESSURE:  x%.2f per hit%s" % [float(value), tag.call(
+				is_equal_approx(float(value), float(R8_UPGRADE_START[key])), is_equal_approx(float(value), float(Tuning.R8_UPGRADE_MAX[key])))]
+		"launch_step":
+			return "LAUNCH STEP:  %s" % ("full charge  (base)" if float(value) >= 0.999
+				else "from %d%% charge%s" % [roundi(float(value) * 100.0),
+					"  (max)" if is_equal_approx(float(value), float(Tuning.R8_UPGRADE_MAX[key])) else ""])
+		"air_hits":
+			return "AIR HITS:  %d per combo%s" % [int(value), tag.call(int(value) == int(R8_UPGRADE_START[key]),
+				int(value) == int(Tuning.R8_UPGRADE_MAX[key]))]
+	return "%s:  %s" % [key.to_upper(), str(value)]
+
+# --- Upgrades and the Duel's max ------------------------------------------------------
+## The live upgrade values (Tuning.debug_*), keyed like Tuning.R8_UPGRADE_MAX.
+static func upgrade_values() -> Dictionary:
+	return {"speed_cap": Tuning.debug_speed_cap, "ram_level": Tuning.debug_ram_level,
+		"teleport": Tuning.debug_teleport, "pursuit_max": Tuning.debug_pursuit_max,
+		"charge_full": Tuning.debug_charge_full, "pressure_mult": Tuning.debug_pressure_mult,
+		"launch_step": Tuning.debug_launch_step, "air_hits": Tuning.debug_air_hits}
+
+## Write upgrade values (any subset of UPGRADE_KEYS) to Tuning.debug_*.
+static func apply_upgrades(v: Dictionary) -> void:
+	Tuning.debug_speed_cap = float(v.get("speed_cap", Tuning.debug_speed_cap))
+	Tuning.debug_ram_level = int(v.get("ram_level", Tuning.debug_ram_level))
+	Tuning.debug_teleport = bool(v.get("teleport", Tuning.debug_teleport))
+	Tuning.debug_pursuit_max = int(v.get("pursuit_max", Tuning.debug_pursuit_max))
+	Tuning.debug_charge_full = float(v.get("charge_full", Tuning.debug_charge_full))
+	Tuning.debug_pressure_mult = float(v.get("pressure_mult", Tuning.debug_pressure_mult))
+	Tuning.debug_launch_step = float(v.get("launch_step", Tuning.debug_launch_step))
+	Tuning.debug_air_hits = int(v.get("air_hits", Tuning.debug_air_hits))
+
+## The player's own upgrades: the live values, or the ones the Duel's max set aside.
+static func own_upgrades() -> Dictionary:
+	return _own_upgrades.duplicate() if not _own_upgrades.is_empty() else upgrade_values()
+
+## True while the Duel's max upgrades are applied.
+static func is_max_upgrades_applied() -> bool:
+	return not _own_upgrades.is_empty()
+
+## Round 8 Duel: set the player's own upgrades aside (once; a restart keeps
+## them) and apply every one at Tuning.R8_UPGRADE_MAX.
+static func apply_max_upgrades() -> void:
+	if _own_upgrades.is_empty():
+		_own_upgrades = upgrade_values()
+	apply_upgrades(Tuning.R8_UPGRADE_MAX)
+
+## Put the player's own upgrades back (no-op when the max is not applied).
+static func restore_own_upgrades() -> void:
+	if _own_upgrades.is_empty():
+		return
+	apply_upgrades(_own_upgrades)
+	_own_upgrades = {}
 
 ## Load the debug settings once per session (GameMode._ready). force: reload.
-## The speed cap must be one of Tuning.SPRINT_CAPS; levels are clamped.
+## The speed cap must be one of Tuning.SPRINT_CAPS; levels are clamped; the
+## Round 8 values clamp into start .. max and snap to the menu's values.
+## During the Duel's max the file's upgrades become the player's own values.
 static func load_debug_settings(force := false) -> void:
 	if _debug_loaded and not force:
 		return
@@ -472,21 +624,31 @@ static func load_debug_settings(force := false) -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS_PATH) != OK:
 		return
+	var duel := is_max_upgrades_applied()
+	if duel:
+		apply_upgrades(_own_upgrades)
 	var cap := float(cfg.get_value("debug", "speed_cap", Tuning.debug_speed_cap))
 	if Tuning.SPRINT_CAPS.has(cap):
 		Tuning.debug_speed_cap = cap
 	Tuning.debug_ram_level = clampi(int(cfg.get_value("debug", "ram_level", Tuning.debug_ram_level)), 0, RAM_LEVELS - 1)
 	Tuning.debug_teleport = bool(cfg.get_value("debug", "teleport", Tuning.debug_teleport))
 	Tuning.debug_pursuit_max = clampi(int(cfg.get_value("debug", "pursuit_max", Tuning.debug_pursuit_max)), 0, PURSUIT_LEVELS - 1)
+	Tuning.debug_charge_full = _clamp_upgrade("charge_full", float(cfg.get_value("debug", "charge_full", Tuning.debug_charge_full)))
+	Tuning.debug_pressure_mult = _clamp_upgrade("pressure_mult", float(cfg.get_value("debug", "pressure_mult", Tuning.debug_pressure_mult)))
+	Tuning.debug_launch_step = _clamp_upgrade("launch_step", float(cfg.get_value("debug", "launch_step", Tuning.debug_launch_step)))
+	Tuning.debug_air_hits = roundi(_clamp_upgrade("air_hits", float(cfg.get_value("debug", "air_hits", Tuning.debug_air_hits))))
 	Tuning.debug_overlay = bool(cfg.get_value("debug", "overlay", Tuning.debug_overlay))
+	if duel:
+		_own_upgrades = upgrade_values()
+		apply_upgrades(Tuning.R8_UPGRADE_MAX)
 
+## Saves the player's own upgrades (never the Duel's max) and the overlay.
 static func save_debug_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS_PATH)  # keep the camera section
-	cfg.set_value("debug", "speed_cap", Tuning.debug_speed_cap)
-	cfg.set_value("debug", "ram_level", Tuning.debug_ram_level)
-	cfg.set_value("debug", "teleport", Tuning.debug_teleport)
-	cfg.set_value("debug", "pursuit_max", Tuning.debug_pursuit_max)
+	var v := own_upgrades()
+	for key: String in UPGRADE_KEYS:
+		cfg.set_value("debug", key, v[key])
 	cfg.set_value("debug", "overlay", Tuning.debug_overlay)
 	cfg.save(SETTINGS_PATH)
 

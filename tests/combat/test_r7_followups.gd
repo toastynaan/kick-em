@@ -2,9 +2,11 @@ extends "res://tests/combat/combat_test_base.gd"
 ## Follow-ups pressed on the beat of the hit (Round 7 integration fix: docs/
 ## Round 7 — Freeflow Combat.md: Chains and the input buffer), through the real
 ## input path (Input.action_press -> PlayerController -> InputInterpreter):
-## - uppercut (E), then the roundhouse key (R) pressed during the uppercut's
-##   hitstop: the press is buffered, the roundhouse comes out after the chain
-##   cut and launches the lifted grunt at 15 m/s +-1;
+## - a charged uppercut (E held 0.4 s: Round 8, only a charged uppercut lifts),
+##   then the roundhouse key (R) pressed during the uppercut's hitstop: the
+##   press is buffered, the roundhouse comes out after the chain cut and
+##   launches the lifted grunt at 15 m/s +-1 (the payoff; a level-3 grunt, so
+##   the uppercut's pressure does not break it open and add the break bonus);
 ## - after that launch, a Dash tap 0.2 s later pursues (agent H's Defence), and
 ##   the next punch relaunches the body (the pursuit hit).
 
@@ -19,13 +21,14 @@ func run() -> void:
 	var g := spawn(&"grunt", Vector3(0, 0, -1.0), Vector3.BACK)
 	g.max_hp = 1000.0
 	g.hp = 1000.0
+	g.level = 3
 	var moves: Array[StringName] = []
 	p.combat.attack_active.connect(func(id: StringName) -> void: moves.append(id))
 	await ticks(30)
 	clear_events()
 
-	print("uppercut, then the roundhouse pressed during the uppercut's hitstop")
-	await tap_input(&"uppercut")
+	print("a charged uppercut, then the roundhouse pressed during the uppercut's hitstop")
+	await tap_input(&"uppercut", 0.4)
 	await wait_until(func() -> bool: return not hits_on(g).is_empty(), 1.0)
 	var up_t := TimeDirector.now()
 	var frozen_at_press := p.is_frozen() and p.combat.is_attack_active()

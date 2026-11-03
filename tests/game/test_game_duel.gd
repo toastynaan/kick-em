@@ -2,6 +2,9 @@ extends Node
 ## GameMode duel: starts headless without the menu, runs ~20 s of game time,
 ## then killing the Duelist is the last kill (GameEvents.last_kill: close-up
 ## and 0.2x slow time) and the round ends in a victory panel with the stats.
+## Round 8: the round plays with every upgrade at Tuning.R8_UPGRADE_MAX and
+## the player's own values come back when it ends; the Duelist's pressure bar
+## sits under its health bar and reads the real CombatController.
 
 const RUN_SECONDS := 20.0
 
@@ -32,12 +35,23 @@ func _physics_frames(n: int, gm: GameMode = null) -> void:
 			gm.player.heal_fraction(1.0)
 		await get_tree().physics_frame
 
+func _upgrades_match(v: Dictionary, want: Dictionary) -> bool:
+	for k: String in want:
+		if typeof(want[k]) == TYPE_BOOL:
+			if bool(v[k]) != bool(want[k]):
+				return false
+		elif not is_equal_approx(float(v[k]), float(want[k])):
+			return false
+	return true
+
 func _run() -> void:
 	var gm := GameMode.new()
 	gm.show_title = false
 	add_child(gm)
+	var own := GameMenus.upgrade_values()
 	gm.start_round(&"duel")
 	await get_tree().process_frame
+	_check(_upgrades_match(GameMenus.upgrade_values(), Tuning.R8_UPGRADE_MAX), "Round 8: the Duel plays at max upgrades (%s)" % [GameMenus.upgrade_values()])
 
 	_check(_round_started == [&"duel"], "round_started(duel) emitted")
 	_check(gm.player != null and gm.player.is_in_group(&"player"), "player spawned")
@@ -48,6 +62,13 @@ func _run() -> void:
 	_check(enemies.size() == 1 and enemies[0].archetype == &"duelist", "one Duelist spawned")
 	_check(enemies.size() == 1 and enemies[0].max_hp == 200.0 and gm.player.max_hp == 100.0, "Round 5 health: Duelist 200, player 100")
 	_check(gm.hud.opponent == enemies[0] and gm.hud._opp_root.visible, "duel HUD shows the Duelist's HP bar")
+	if enemies.size() == 1:
+		var dc := enemies[0].combat
+		var want := HUD.pressure_fraction(dc.get_pressure(), dc.get_pressure_max(), dc.is_broken())
+		var bar := gm.hud.get_opponent_pressure()
+		_check(bar["visible"] and absf(float(bar["fill"]) - want) < 0.001,
+			"its pressure bar under it reads the real get_pressure() (%.2f / %.2f)" % [dc.get_pressure(), dc.get_pressure_max()])
+		_check(gm.hud.get_enemy_bars().is_empty(), "no world bars over the Duelist")
 	_check(not gm.camera_rig.is_follow_cam_active(), "duel: no follow-cam in play")
 	var cam := get_viewport().get_camera_3d()
 	_check(cam != null and cam.get_parent() is CameraRig, "rig camera is current")
@@ -79,6 +100,8 @@ func _run() -> void:
 	duelist.apply_damage(duelist.max_hp + 10.0, &"test")
 	await _physics_frames(3)
 	_check(gm.is_round_over(), "killing the Duelist ends the round")
+	_check(_upgrades_match(GameMenus.upgrade_values(), own) and not GameMenus.is_max_upgrades_applied(),
+		"the round's end restores the player's own upgrades")
 	_check(_round_over == [true], "round_over(true) emitted")
 	_check(_last_kills == [duelist], "the Duelist's death is the last kill (GameEvents.last_kill)")
 	var slow: Dictionary = Tuning.SLOW_TIME[&"last_kill"]

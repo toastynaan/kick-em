@@ -11,6 +11,12 @@ extends Resource
 ## pushes (push_dir) and which limbs sweep for hits. Enemy moves carry a preset
 ## tier (Round 5), their damage from Tuning.DMG_ENEMY and whether the player
 ## can counter them.
+##
+## Round 8 (docs/Round 8 — Charge and Pressure.md: Moves): the eight strikes of
+## Tuning.R8_MOVES (`r8`) take their frame data from the row's "tap" entry. The
+## charged version of a strike (`charged`, MoveLibrary.charged_move) and its air
+## strike (`air`, MoveLibrary.air_move) are copies of the tap with their own
+## frames; CombatController resolves their hits from the row.
 
 @export var id: StringName
 ## PoseAnimator move id (play_move). The move id once agent P poses it.
@@ -46,7 +52,8 @@ extends Resource
 
 ## Kick (FX strike class, legacy guards).
 @export var is_kick := false
-## Round 7: no charge holds. Kept empty for older readers (tests/anim).
+## The pose held while this strike charges (Round 8: heavy_<id>_load, set by
+## MoveLibrary when PoseLibrary has it; empty otherwise).
 @export var charge_hold: StringName = &""
 ## Dropping strike (an attack in the air or late in a vault): the active frames
 ## last until the fighter lands (at most drop_max frames).
@@ -60,7 +67,8 @@ extends Resource
 @export var lunge_through_active := true
 
 ## Tell armor while in startup/active: 1 absorbs flinches (Round 7: tapped
-## punches), 2 also staggers. Non-player fighters add config "armor_bonus".
+## punches), 2 also staggers. Non-player fighters add config "armor_bonus"
+## (every move) and get at least 1 on the moves in config "armor_moves".
 @export var armor := 0
 
 # Flow
@@ -78,6 +86,16 @@ extends Resource
 ## Enemy moves: the player can counter it (orange tell). False for grabs and
 ## the heavy's shoulder charge (blue tell: dodge only).
 @export var counterable := true
+
+# Round 8
+## One of the eight strikes of Tuning.R8_MOVES (also `r7`: glide, chains and the
+## chain cut work as in Round 7). A tap unless `charged` or `air`.
+@export var r8 := false
+## The charged version: R8_RELEASE_STARTUP frames, the tap's active frames, the
+## tap's recovery + R8_CHARGED_EXTRA_RECOVERY; breaks guards and tell armor.
+@export var charged := false
+## An air strike (air combo): Tuning.R8_AIR_FRAMES, never charged, no glide or lunge.
+@export var air := false
 
 func startup_s() -> float:
 	return Tuning.frames(startup)
@@ -100,6 +118,12 @@ func r7_entry() -> Dictionary:
 	if not r7:
 		return {}
 	return Tuning.R7_MOVES.get(id, MoveLibrary.LOCAL_R7.get(id, {}))
+
+## The Round 8 row of a strike (Tuning.R8_MOVES: "tap" and "charged"); {} for other moves.
+func r8_row() -> Dictionary:
+	if not r8:
+		return {}
+	return Tuning.R8_MOVES.get(id, {})
 
 func strike_limbs() -> Array[StringName]:
 	if limbs.is_empty():

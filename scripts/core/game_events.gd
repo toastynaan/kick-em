@@ -179,6 +179,24 @@ signal drive_impact(holder: Node3D, victim: Node3D, target: Node3D, position: Ve
 ## G: throw wind-up progress 0..1 while LMB is held with a body (FX arm glow, camera zoom). 0 = ended.
 signal throw_windup(holder: Node3D, amount: float)
 
+# Round 8: charge and pressure (docs/Round 8 — Charge and Pressure.md). The
+# Upgrade 2 charge signals are reused: charge_started(fighter, move_id) when a held
+# press passes R8_TAP_MAX; charge_level_changed(fighter, level) when c crosses one
+# of the move's steps (level = steps passed); charge_released(fighter, move_id, level)
+# at the release (or the auto-fire). All emitted by B.
+## B: the charge reached full (the meter flashes; it fires itself R8_CHARGE_HOLD_AT_FULL later).
+signal charge_full(fighter: Node3D, move_id: StringName)
+## B: a charge ended without a strike. reason: &"hit" | &"cancel" | &"grabbed" | &"down".
+signal charge_cancelled(fighter: Node3D, move_id: StringName, reason: StringName)
+## B: a fighter's pressure broke (dazed and open for R8_BREAK_TIME). attacker: who filled it last.
+signal pressure_broken(fighter: Node3D, attacker: Node3D)
+## B: the break ended (the fighter can act again).
+signal pressure_recovered(fighter: Node3D)
+## M: the player's launcher jump toward a lifted body started.
+signal air_follow_started(fighter: Node3D, target: Node3D)
+## B: an air strike landed. count: air hits in this combo so far (hangs while count <= debug_air_hits).
+signal air_hit(attacker: Node3D, victim: Node3D, count: int)
+
 # Flow
 signal round_started(mode: StringName)
 signal wave_started(index: int, total: int)

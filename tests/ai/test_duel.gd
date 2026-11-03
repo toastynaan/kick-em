@@ -3,17 +3,22 @@ extends Node
 ## `-- --seconds=N`). It must attack repeatedly (about one attack every
 ## 1.2-2.5 s of open time), mix its moves, and never start an attack while
 ## the player is down, held or in hitstun.
-## Phase B (Round 7 defence): the player dummy jabs the Duelist whenever he is
-## in reach between his turns (no token, not attacking: a dummy that struck as
-## he closed in would only ever meet his wind-up) and throws a guard breaker
-## (gut punch, uppercut, front kick, in turn) every third time, and on the
-## tick it sees a fresh read guard of his go up (as a player would: jab,
-## blocked, gut punch; a press in its own recovery is buffered by B; Tuning
-## read chance, no overrides). The Duelist
-## guards some (B's guard blocks the taps), never parries or teleports, and
-## every broken guard is answered with an e_hook (before any other attack of
-## his) within ANSWER_LIMIT s of him being able to act again (an uppercut's
-## lift ends in a knockdown and a get-up first), never started while he reacts.
+## Phase B (Round 7 defence, Round 8 strikes): the player dummy jabs the
+## Duelist whenever he is in reach between his turns (no token, not
+## attacking: a dummy that struck as he closed in would only ever meet his
+## wind-up) and his pressure has calmed under PRESSURE_CALM, and throws a
+## guard breaker (Round 8: a charged gut punch, uppercut or front kick, held
+## BREAK_HOLD s; only charged strikes break a guard) every third time, and on
+## the tick it sees a fresh read guard of his go up (as a player would: jab,
+## blocked, charged gut punch; Tuning read chance, no overrides). The
+## Duelist guards some (B's guard blocks the taps), never parries or
+## teleports, and every broken guard that leaves him free (not broken open,
+## pressure under Tuning.R8_PRESSURE_BACK_OFF) is answered with an e_hook
+## (before any other attack of his) within ANSWER_LIMIT s of him being able
+## to act again (an uppercut's lift ends in a knockdown and a get-up first);
+## one that leaves him broken or pressured is not answered: he does nothing,
+## or backs off. He never starts an attack while reacting, broken open or
+## backing off.
 ## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
@@ -54,11 +59,17 @@ const ANSWER_LIMIT := AIBrain.ANSWER_WINDOW
 const BREAK_QUIET := 5.0
 const BREAKERS: Array[int] = [CombatController.Action.GUT_PUNCH, CombatController.Action.UPPERCUT,
 	CombatController.Action.FRONT_KICK]
+## s a breaker is held: past Tuning.R8_TAP_MAX, a charged strike (far from full).
+const BREAK_HOLD := 0.35
+## The dummy jabs only while his pressure fraction is under this (it lets his
+## meter drain, so most guard breaks find him free to answer).
+const PRESSURE_CALM := 0.2
 var breaks: Array[float] = []
 var parries := 0
 var counter_tells := 0
 var guard_blocked := 0           ## player strikes the Duelist's guard stopped
-var launch_log: Array = []        ## [time, move, reacting or stunned at the start]
+var launch_log: Array = []        ## [time, move, reacting or stunned at the start, broken or backing off]
+var pressured_breaks: Array[float] = []  ## guard breaks that left him broken or at p >= R8_PRESSURE_BACK_OFF
 
 func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
@@ -190,7 +201,8 @@ func _phase_guard() -> void:
 	GameEvents.hit_blocked.connect(func(i: HitInfo) -> void:
 		if i.victim == duelist: guard_blocked += 1)
 	brain.attack_launched.connect(func(m: StringName) -> void:
-		launch_log.append([Util.game_now(), m, duelist.is_reacting() or duelist.is_lifted() or duelist.is_in_hitstun()]))
+		launch_log.append([Util.game_now(), m, duelist.is_reacting() or duelist.is_lifted() or duelist.is_in_hitstun(),
+			brain.is_broken() or brain.is_backing_off()]))
 	# Back to the duel spawns, in the open (phase A may have knocked the dummy
 	# into the clutter); the dummy stays on its spot when on its feet.
 	var home := player.get_ground_position()
@@ -209,16 +221,18 @@ func _phase_guard() -> void:
 	var states := {}                  ## the Duelist's state at each of the dummy's strikes
 	var answered_read := -1           ## brain.guard_reads when the dummy last answered a guard
 	var breakers := 0
-	var synthetic := 0
 	var next_strike := 0.0
 	var t0 := Util.game_now()
 	var reads0 := brain.guard_reads
 	var seen_breaks := brain.guard_breaks
 	var acts: Array[float] = []       ## times the Duelist could act again after not being able to
 	var could_act := true
+	var hold_action := -1             ## a breaker being charged...
+	var release_at := 0.0             ## ...released at this time
 	while Util.game_now() - t0 < PHASE_B_MAX:
 		var now := Util.game_now()
-		if now - t0 > PHASE_B_MIN and breaks.size() >= BREAKS_WANTED and now - breaks[-1] > BREAK_QUIET:
+		if now - t0 > PHASE_B_MIN and breaks.size() - pressured_breaks.size() >= BREAKS_WANTED \
+				and now - breaks[-1] > BREAK_QUIET and hold_action < 0:
 			break
 		await get_tree().physics_frame
 		var can := duelist.can_act() or (duelist.combat.is_attacking() and not duelist.is_reacting())
@@ -228,6 +242,8 @@ func _phase_guard() -> void:
 		if brain.guard_breaks > seen_breaks:
 			seen_breaks = brain.guard_breaks
 			breaks.append(Util.game_now())
+			if duelist.combat.is_broken() or duelist.combat.get_pressure_fraction() >= Tuning.R8_PRESSURE_BACK_OFF:
+				pressured_breaks.append(breaks[-1])
 		if player.hp < player.max_hp * 0.4 and not player.is_dead():
 			player.heal_fraction(1.0)
 		if duelist.hp < duelist.max_hp * 0.3:
@@ -236,7 +252,16 @@ func _phase_guard() -> void:
 			player.global_position = home
 			player.reset_physics_interpolation()
 		var d := Util.flat_dist(duelist.get_ground_position(), player.get_ground_position())
+		if hold_action >= 0:
+			# Charging a breaker: keep facing him, release on time.
+			player.snap_facing(duelist.get_ground_position() - player.get_ground_position())
+			if Util.game_now() >= release_at:
+				player.combat.release(hold_action)
+				hold_action = -1
+				next_strike = Util.game_now() + STRIKE_GAP
+			continue
 		var after_break := not breaks.is_empty() and Util.game_now() - breaks[-1] < BREAK_QUIET
+		var calm := duelist.combat.get_pressure_fraction() < PRESSURE_CALM and not duelist.combat.is_broken()
 		# A fresh read guard: answer it with a guard breaker at once (buffered
 		# when the dummy is still in its own recovery).
 		if duelist.combat.is_blocking() and brain.guard_reads != answered_read and d < STRIKE_REACH \
@@ -249,11 +274,10 @@ func _phase_guard() -> void:
 			states["guarding"] = int(states.get("guarding", 0)) + 1
 			player.snap_facing(duelist.get_ground_position() - player.get_ground_position())
 			player.combat.press(bk)
-			await get_tree().physics_frame
-			player.combat.release(bk)
-			next_strike = Util.game_now() + STRIKE_GAP
+			hold_action = bk
+			release_at = Util.game_now() + BREAK_HOLD
 			continue
-		if Util.game_now() < next_strike or d >= STRIKE_REACH or not player.can_act() \
+		if Util.game_now() < next_strike or d >= STRIKE_REACH or not player.can_act() or not calm \
 				or after_break or AttackDirector.has_token(duelist) or duelist.combat.is_attacking():
 			continue
 		var to := duelist.get_ground_position() - player.get_ground_position()
@@ -269,16 +293,19 @@ func _phase_guard() -> void:
 			action = BREAKERS[breakers % BREAKERS.size()]
 			breakers += 1
 		player.combat.press(action)
+		if action != CombatController.Action.LIGHT:
+			hold_action = action  # charged: released after BREAK_HOLD
+			release_at = Util.game_now() + BREAK_HOLD
+			continue
 		await get_tree().physics_frame
 		player.combat.release(action)
-		if action != CombatController.Action.LIGHT and not player.combat.is_attacking() \
-				and duelist.combat.is_blocking():
-			# B does not run this button yet: a hit his guard cannot stop.
-			synthetic += 1
-			_guard_break_hit()
 	var answered := 0
+	var free_breaks := 0
 	var gaps: Array[String] = []
 	for t in breaks:
+		var pressured := t in pressured_breaks
+		if not pressured:
+			free_breaks += 1
 		var first: Array = []
 		for l: Array in launch_log:
 			if l[0] > t:
@@ -292,39 +319,25 @@ func _phase_guard() -> void:
 			if a > t and a <= first[0]:
 				t_act = a
 				break
-		gaps.append("%s %.2f s after he could act (%.2f s after the break)" % [first[1], first[0] - t_act, first[0] - t])
-		if first[1] == &"e_hook" and first[0] - t_act <= ANSWER_LIMIT and not first[2]:
+		gaps.append("%s%s %.2f s after he could act (%.2f s after the break)" % [
+			"(pressured) " if pressured else "", first[1], first[0] - t_act, first[0] - t])
+		if not pressured and first[1] == &"e_hook" and first[0] - t_act <= ANSWER_LIMIT and not first[2]:
 			answered += 1
 	var bad := launch_log.filter(func(l: Array) -> bool: return l[2]).size()
+	var bad_pressure := launch_log.filter(func(l: Array) -> bool: return l[3]).size()
 	print("[ai] info: the Duelist at the dummy's strikes: %s" % str(states))
-	print("[ai] info: phase B %.0f s: %d strikes (%d guard breakers, %d as guard-break hits while B lacks them), %d reads, %d blocked, %d guard breaks; first attack after each break: %s" % [
-		Util.game_now() - t0, strikes, breakers, synthetic, brain.guard_reads - reads0, guard_blocked,
-		breaks.size(), "; ".join(gaps)])
+	print("[ai] info: phase B %.0f s: %d strikes (%d charged guard breakers), %d reads, %d blocked, %d guard breaks (%d left him broken or pressured), %d pressure breaks; first attack after each break: %s" % [
+		Util.game_now() - t0, strikes, breakers, brain.guard_reads - reads0, guard_blocked,
+		breaks.size(), pressured_breaks.size(), brain.pressure_breaks, "; ".join(gaps)])
 	check(brain.guard_reads - reads0 >= 1 and guard_blocked >= 1,
 		"the Duelist guards the player's strikes in Duel mode (%d reads, %d blocked)" % [brain.guard_reads - reads0, guard_blocked])
-	check(breaks.size() >= 2, "guard breakers get through his raised guard in the duel (%d breaks)" % breaks.size())
-	check(breaks.size() >= 1 and answered == breaks.size(),
-		"every broken guard is answered with an e_hook within %.1f s of him acting again (%d / %d)" % [ANSWER_LIMIT, answered, breaks.size()])
+	check(breaks.size() >= 2, "charged guard breakers get through his raised guard in the duel (%d breaks)" % breaks.size())
+	check(free_breaks >= 1 and answered == free_breaks,
+		"every broken guard that leaves him free is answered with an e_hook within %.1f s of him acting again (%d / %d)" % [
+			ANSWER_LIMIT, answered, free_breaks])
 	check(parries == 0 and counter_tells == 0, "no parry (%d) and no teleport counter (%d) in Duel" % [parries, counter_tells])
 	check(bad == 0, "never starts an attack while reacting or in hitstun (%d of %d)" % [bad, launch_log.size()])
-
-## A gut punch his guard cannot stop (stands in for B's guard break).
-func _guard_break_hit() -> void:
-	var info := HitInfo.new()
-	info.attacker = player
-	info.victim = duelist
-	info.kind = &"strike"
-	info.move_id = &"gut_punch"
-	info.damage = 8.0
-	info.unblockable = true
-	info.tier = HitInfo.Tier.STAGGER
-	info.reaction = HitInfo.Reaction.STAGGER
-	info.react = &"fold"
-	info.stun = 1.1
-	info.push = 0.3
-	info.hit_direction = (duelist.get_ground_position() - player.get_ground_position()).normalized()
-	info.hit_position = duelist.get_aim_point()
-	duelist.take_hit(info)
+	check(bad_pressure == 0, "never starts an attack while broken open or backing off (%d of %d)" % [bad_pressure, launch_log.size()])
 
 func _finish() -> void:
 	AttackDirector.reset()

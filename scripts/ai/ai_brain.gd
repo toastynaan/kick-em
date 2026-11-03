@@ -47,10 +47,26 @@ extends Node
 ## director for a spaced swing (request_swing) and starts the attack, or
 ## gives the token back after GIVE_UP_TIME. It never acts while down, in
 ## hitstun, held or in a Round 7 reaction (Fighter.is_reacting / is_lifted:
-## no attack, no token request, a held token goes back), pauses briefly after
+## no attack, no token request, a held token goes back; Round 8: a tap's
+## flinch keeps it, below), pauses briefly after
 ## a get-up, and walks back into its ring after being pushed or launched away.
 ## It never tries to break a grab once the clinch has connected, nor while
 ## the holder drives it (Carry.is_driving).
+##
+## Round 8 (docs/Round 8 — Charge and Pressure.md: Pressure). The brain reads
+## its pressure p (CombatController.get_pressure_fraction, get_pressure()):
+## - guards (the grunt's tap guard, the Duelist's read) x (1 - p), and x
+##   Tuning.R8_LEVEL_BLOCK_MULT for its level (Fighter.level; block_mult());
+## - the time between its attacks x (1 + p) (the interval runs 1 / (1 + p) as fast);
+## - tells Tuning.R8_PRESSURE_TELL_SLOW x p s longer, never under the tell floor;
+## - from Tuning.R8_PRESSURE_BACK_OFF a free enemy (not mid-attack, not about
+##   to swing a token it holds) backs off BACK_OFF_STEP m and circles there
+##   instead of trading, and re-engages as its pressure drains (_update_back_off).
+## Broken open (is_broken: B's is_broken, H's &"broken" reaction) it does
+## nothing: no attack, no guard, no token; after GameEvents.pressure_recovered
+## it fights on normally. A tap's flinch (react &"flinch", about 0.2 s) is
+## shrugged off: it keeps its token and its move, and walks in and swings
+## again the tick it can act (_while_flinching).
 
 signal attack_launched(move_id: StringName)
 ## Duelist vanish step done (round 2.5): reappeared at `spot`.
@@ -290,6 +306,13 @@ const VSTEP_RADII: Array[float] = [2.5, 1.8, 3.2]  ## m from the player, in orde
 const VSTEP_HIDE := 0.12            ## s hidden before the teleport
 const VSTEP_SHOW := 0.05            ## s after reappearing before it acts
 const VSTEP_COOLDOWN := 6.0
+# Round 8: backing off under pressure (the doc says "backs off"; distances are ours).
+const BACK_OFF_STEP := 2.0          ## m a pressured enemy backs off beyond where it stood
+const BACK_OFF_MAX_RADIUS := 6.0    ## m from the player it backs off to at most
+## s a back-off lasts at most. Pressure drains well before this (1.5 s after
+## the last hit, then Tuning.R8_PRESSURE_DECAY of max per s), so it only
+## guards against running away forever; it then waits for a new hit.
+const BACK_OFF_MAX_TIME := 4.0
 
 ## Tests: >= 0 seeds every brain's RNG (seed + its slot) for reproducible soaks.
 static var test_seed := -1
@@ -435,6 +458,16 @@ var _sw_start := Vector3.INF
 var _next_escalate := STALL_ESCALATE  ## stuck_time at which the next escalation fires
 var _backoff_until := 0.0
 var _wide := false                  ## body wider than AINavGrid.BODY_RADIUS: always takes a wide way when one exists
+# Round 8: pressure
+var backoffs := 0                   ## back-offs started (tests, soaks)
+var flinch_shrugs := 0              ## taps' flinches shrugged off with the token kept (tests, soaks)
+var pressure_breaks := 0            ## GameEvents.pressure_broken on us (tests, soaks)
+var _backing_off := false
+var _backoff_since := 0.0
+var _backoff_radius := 0.0          ## m from the player kept while backing off
+var _backoff_spent_p := INF         ## a back-off timed out at this pressure: none again until it rises
+var _turn_flinched := false         ## the current token turn was flinched by a tap
+var _in_flinch := false             ## flinching now (counts each flinch once)
 
 func _ready() -> void:
 	# Body-sized checks: a hole knocked into a wall at waist height must not
@@ -485,6 +518,8 @@ func _ready() -> void:
 	GameEvents.limb_severed.connect(_on_limb_severed)
 	GameEvents.hit_landed.connect(_on_hit_landed)
 	GameEvents.fighter_died.connect(_on_fighter_died)
+	GameEvents.pressure_broken.connect(_on_pressure_broken)
+	GameEvents.pressure_recovered.connect(_on_pressure_recovered)
 	AttackDirector.register_enemy(fighter)
 	if _armed_archetype():
 		_build_stick()
@@ -567,8 +602,8 @@ func grab_break_chance(record := false) -> float:
 	_grabbed_at = kept
 	if fighter.is_dead() or fighter.is_down() or is_fleeing():
 		return 0.0
-	if fighter.is_reacting() or fighter.is_lifted():
-		return 0.0  # Round 7: a reacting body connects at once
+	if fighter.is_reacting() or fighter.is_lifted() or is_broken():
+		return 0.0  # Round 7: a reacting body connects at once (Round 8: a broken one too)
 	var c := fighter.combat
 	if c != null and (c.is_hit_stunned() or (c.has_method(&"is_dazed") and c.is_dazed()) \
 			or (c.has_method(&"is_stumbling") and c.is_stumbling())):
@@ -607,7 +642,135 @@ func get_debug_text() -> String:
 		_approach_time, _in_range_time, _interval_left, maxf(_resume_at - _time, 0.0), _start_failures,
 		_block_down, fighter.can_act(), _is_attacking(), _flee, _steer_in.snapped(Vector3.ONE * 0.01),
 		_steer_out.snapped(Vector3.ONE * 0.01), "-" if _route_point == Vector3.INF else str(_route_point.snapped(Vector3.ONE * 0.01)),
-		_side_sign, " locked" if _side_locked else ""] + " blocked=%.2f pos=%s" % [_blocked_time, _pos().snapped(Vector3.ONE * 0.1)]
+		_side_sign, " locked" if _side_locked else ""] + " blocked=%.2f pos=%s" % [_blocked_time, _pos().snapped(Vector3.ONE * 0.1)] \
+		+ " p=%.2f backoff=%s broken=%s" % [get_pressure(), _backing_off, is_broken()]
+
+# --- Round 8: pressure -----------------------------------------------------------
+
+## The pressure fraction p, 0..1 (1 while broken): CombatController.get_pressure_fraction().
+func get_pressure() -> float:
+	if fighter == null or fighter.combat == null:
+		return 0.0
+	return clampf(fighter.combat.get_pressure_fraction(), 0.0, 1.0)
+
+## Broken open by pressure (AttackDirector.is_enemy_broken): it does nothing.
+func is_broken() -> bool:
+	return fighter != null and AttackDirector.is_enemy_broken(fighter)
+
+## Backing off under pressure (_update_back_off): it asks for no token.
+func is_backing_off() -> bool:
+	return _backing_off
+
+## The share of its guards and reads this enemy still makes: x (1 - p), and x
+## Tuning.R8_LEVEL_BLOCK_MULT for its level (higher levels block more). 0 while broken.
+func block_mult() -> float:
+	if is_broken():
+		return 0.0
+	var mults := Tuning.R8_LEVEL_BLOCK_MULT
+	return (1.0 - get_pressure()) * mults[clampi(fighter.level - 1, 0, mults.size() - 1)]
+
+## The share of tapped strikes aimed at it that it guards now: the
+## archetype's "guard_chance" (grunts: Tuning.GUARD_TAP_CHANCE) x block_mult().
+func get_guard_chance() -> float:
+	return clampf(float(fighter.config.get("guard_chance", 0.0)) * block_mult(), 0.0, 1.0)
+
+## B: our pressure broke (dazed and open for Tuning.R8_BREAK_TIME). The guard
+## drops, a pending answer, punish, move or string goes, and the token goes
+## back (the director sees is_enemy_broken too). It does nothing until it
+## can act again; pressure_recovered then clears what pressure left.
+func _on_pressure_broken(f: Node3D, _attacker: Node3D) -> void:
+	if f != fighter or fighter.is_dead():
+		return
+	pressure_breaks += 1
+	_want_guard = false
+	_guard_until = 0.0
+	_tap_guard_until = -INF
+	_apply_guard()
+	_answer_pending = false
+	_punish_until = 0.0
+	_has_move = false
+	_following = false
+	_string_rest.clear()
+	_backing_off = false
+	if AttackDirector.has_token(fighter) and not _is_attacking():
+		AttackDirector.release_token(fighter)
+
+## B: the break is over and the meter is empty: it fights on normally.
+func _on_pressure_recovered(f: Node3D) -> void:
+	if f != fighter:
+		return
+	_backing_off = false
+	_backoff_spent_p = INF
+	_turn_flinched = false
+
+## Round 8: from Tuning.R8_PRESSURE_BACK_OFF a free enemy (not mid-attack,
+## not about to swing a token it holds: _about_to_swing) backs off instead of
+## trading: BACK_OFF_STEP m beyond where it stood (at most
+## BACK_OFF_MAX_RADIUS from the player), circling out there (_do_ring) and
+## asking for no token. A token it is still closing in with goes back, and a
+## pending answer or punish is dropped. It re-engages once its pressure
+## drains below the line, or after BACK_OFF_MAX_TIME (then not again until a
+## new hit raises its pressure). True while it backs off this tick.
+func _update_back_off(player: Fighter) -> bool:
+	var p := get_pressure()
+	var line := Tuning.R8_PRESSURE_BACK_OFF
+	if _backing_off and (p < line or _time - _backoff_since > BACK_OFF_MAX_TIME):
+		_backing_off = false
+		_backoff_spent_p = p if p >= line else INF
+	if not _backing_off:
+		if p < line:
+			_backoff_spent_p = INF
+			return false
+		if is_finite(_backoff_spent_p):
+			if p <= _backoff_spent_p + 1e-4:
+				_backoff_spent_p = minf(_backoff_spent_p, p)  # still draining: no new hit yet
+				return false
+			_backoff_spent_p = INF
+		if _is_attacking() or _about_to_swing(player):
+			return false
+		_backing_off = true
+		_backoff_since = _time
+		_backoff_radius = minf(_dist_to(player) + BACK_OFF_STEP, BACK_OFF_MAX_RADIUS)
+		backoffs += 1
+	if _is_attacking():
+		return false
+	_answer_pending = false
+	_punish_until = 0.0
+	if AttackDirector.has_token(fighter):
+		_give_up_token()
+	return true
+
+## A token holder about to use it trades even under pressure: a string's
+## next hit, or its move in range. One still closing in, or one a tap
+## flinched this turn, is free to back off.
+func _about_to_swing(player: Fighter) -> bool:
+	if not AttackDirector.has_token(fighter) or _turn_flinched:
+		return false
+	if _following:
+		return true
+	return _has_move and _dist_to(player) <= float(MOVE_RANGE.get(_move_id, 1.5)) + RANGE_SLACK
+
+## Round 8: a tap's flinch is shrugged off (AttackDirector.is_flinching and
+## keeps_turn: nothing worse on top of it).
+func _shrugging_off() -> bool:
+	return AttackDirector.is_flinching(fighter) and AttackDirector.keeps_turn(fighter)
+
+## A tap's flinch (about 0.2 s): it stands for it and keeps its token, its
+## move and its place; the tick it can act it walks in and swings again (a
+## wind-up the tap cut short starts over). The flinch got through its guard:
+## the guard drops.
+func _while_flinching() -> void:
+	_want_guard = false
+	_guard_until = 0.0
+	_tap_guard_until = -INF
+	_apply_guard()
+	_answer_deadline = INF
+	_fetch_target = null
+	if AttackDirector.has_token(fighter):
+		if not _in_flinch:
+			flinch_shrugs += 1
+		_turn_flinched = true
+	_in_flinch = true
 
 # --- Main loop ---------------------------------------------------------------
 
@@ -629,6 +792,7 @@ func _physics_process(delta: float) -> void:
 	if _is_disabled():
 		_while_disabled()
 		return
+	_in_flinch = false
 	if _was_down:
 		_was_down = false
 		_resume_at = _time + GETUP_PAUSE
@@ -647,6 +811,7 @@ func _physics_process(delta: float) -> void:
 		return
 	_track_player(delta, player)
 	_update_throw_aim(delta)
+	var backing := _update_back_off(player)  # Round 8: under pressure it backs off instead of trading
 	if _answer_pending and _tick_answer(player):
 		_apply_guard()
 		return
@@ -666,9 +831,11 @@ func _physics_process(delta: float) -> void:
 	else:
 		_has_move = false
 		_following = false
+		_turn_flinched = false
 		_string_rest.clear()
 		_do_ring(delta, player)
-		_tick_request(delta, player)
+		if not backing:
+			_tick_request(delta, player)
 	_apply_guard()
 
 func _is_disabled() -> bool:
@@ -679,8 +846,8 @@ func _is_disabled() -> bool:
 		_entry_interrupted = true
 	return disabled
 
-## Down, in hitstun, held, or in a Round 7 reaction (snap, spin, fold,
-## buckle, push, lifted) (no side effects).
+## Down, in hitstun, held, in a Round 7 reaction (snap, spin, fold,
+## buckle, push, lifted, a tap's flinch) or broken open by pressure (no side effects).
 func _is_impaired() -> bool:
 	return fighter.is_down() or fighter.is_in_hitstun() or AttackDirector.is_enemy_impaired(fighter)
 
@@ -693,15 +860,19 @@ func _is_attacking() -> bool:
 func _carrying() -> bool:
 	return fighter.carry != null and fighter.carry.is_holding()
 
-## Down, stunned, held or reacting: no moves, no turn, no token request; a
-## token not yet used for an attack goes back. A Duelist's answer to a broken
-## guard waits (its deadline starts once he can act again).
+## Down, stunned, held, reacting or broken: no moves, no turn, no token
+## request; a token not yet used for an attack goes back. A Duelist's answer
+## to a broken guard waits (its deadline starts once he can act again).
+## Round 8: a tap's flinch keeps the turn (_while_flinching).
 func _while_disabled() -> void:
 	fighter.move_input = Vector3.ZERO
+	if _shrugging_off():
+		_while_flinching()
+		return
 	# Keep a raised guard through blockstun; drop it when down, held or
 	# reacting, or when it was broken (_on_guard_broken).
 	if fighter.is_down() or (fighter.carry and fighter.carry.is_held()) \
-			or fighter.is_reacting() or fighter.is_lifted():
+			or fighter.is_reacting() or fighter.is_lifted() or is_broken():
 		_want_guard = false
 		_guard_until = 0.0
 		_tap_guard_until = -INF
@@ -903,16 +1074,18 @@ func _do_ring(delta: float, player: Fighter) -> void:
 	var ring := AttackDirector.get_ring(fighter)
 	var far := ring != AttackDirector.Ring.NEAR or fighter.archetype == &"thrower"
 	var radius := ring_radius(far)
+	if _backing_off:
+		radius = maxf(radius, _backoff_radius)  # Round 8: backed off under pressure
 	_want_guard = _guard_wanted(d, false)
 	if _fetch_rubble(delta, center):
 		return
 
-	# Taunts (far ring only).
-	if _time < _taunt_until:
+	# Taunts (far ring only; not while backing off).
+	if _time < _taunt_until and not _backing_off:
 		fighter.move_input = Vector3.ZERO
 		_face(center)
 		return
-	if far and fighter.archetype != &"thrower":
+	if far and fighter.archetype != &"thrower" and not _backing_off:
 		_taunt_timer -= delta
 		if _taunt_timer <= 0.0:
 			_taunt_timer = _rng.randf_range(TAUNT_INTERVAL.x, TAUNT_INTERVAL.y)
@@ -921,8 +1094,8 @@ func _do_ring(delta: float, player: Fighter) -> void:
 				_face(center)
 				return
 
-	# Duelist feints: a quick step in, then back out.
-	if fighter.archetype == &"duelist" and not far:
+	# Duelist feints: a quick step in, then back out (not while backing off).
+	if fighter.archetype == &"duelist" and not far and not _backing_off:
 		_feint_timer -= delta
 		if _feint_timer <= 0.0:
 			_feint_timer = _rng.randf_range(FEINT_INTERVAL.x, FEINT_INTERVAL.y)
@@ -1039,7 +1212,8 @@ func _tick_request(delta: float, player: Fighter) -> void:
 		_interval_left = minf(_interval_left, _rng.randf_range(NEAR_JOIN_INTERVAL.x, NEAR_JOIN_INTERVAL.y))
 	_was_near = near
 	if near or engaged:
-		_interval_left -= delta
+		# Round 8: under pressure the interval runs 1 / (1 + p) as fast (time between attacks x (1 + p)).
+		_interval_left -= delta / (1.0 + get_pressure())
 	var urgent := _answer_pending or _time < _punish_until or _brawler_wants_grab()
 	if not urgent and (_interval_left > 0.0 or not (near or engaged)):
 		return
@@ -1198,12 +1372,15 @@ func _try_start(downed: bool) -> void:
 		if _start_failures > START_FAIL_MAX:
 			_give_up_token()
 
-## Startup (s of the enemy's own time) of `move` this wave.
+## Startup (s of the enemy's own time) of `move` this wave. Round 8:
+## Tuning.R8_PRESSURE_TELL_SLOW x p longer under pressure; never under the
+## tell floor (AttackDirector.tell_min_frames).
 func _startup_for(move: StringName) -> float:
 	var s := AttackDirector.enemy_startup_s(move)
 	if Tuning.difficulty == Tuning.Difficulty.EASY:
 		s += EASY_TELL_BONUS
-	return s
+	s += Tuning.R8_PRESSURE_TELL_SLOW * get_pressure()
+	return maxf(s, Tuning.frames(AttackDirector.tell_min_frames()))
 
 ## Expected first active frames of the string's later hits, in s after the
 ## first hit's: each previous hit's active + whiff recovery, then the next
@@ -1228,7 +1405,8 @@ func _give_up_token() -> void:
 	_answer_pending = false
 	_interval_left = REQUEST_RETRY * 2.0
 
-## The attack interval runs start to start: the time the attack took counts.
+## The attack interval runs start to start: the time the attack took counts
+## (at 1 / (1 + p), as the interval runs: Round 8, start to start x (1 + p)).
 ## A string goes on with its next move while the token is held.
 func _on_attack_ended(_move_id_ended: StringName) -> void:
 	if not _string_rest.is_empty() and AttackDirector.has_token(fighter) and not fighter.is_dead():
@@ -1240,7 +1418,7 @@ func _on_attack_ended(_move_id_ended: StringName) -> void:
 		_start_failures = 0
 		return
 	_string_rest.clear()
-	_interval_left = maxf(_new_interval() - (_time - _attack_started_at), REQUEST_RETRY)
+	_interval_left = maxf(_new_interval() - (_time - _attack_started_at) / (1.0 + get_pressure()), REQUEST_RETRY)
 
 func _new_interval() -> float:
 	if AttackDirector.live_enemy_count() <= 1:
@@ -1422,7 +1600,8 @@ func _brawler_wants_grab() -> bool:
 # --- Guarding the player's strikes ------------------------------------------------
 
 ## B: a strike's startup began. A tapped strike aimed at us (is_tapped_strike):
-## guard it with the archetype's "guard_chance" (grunts: Tuning.GUARD_TAP_CHANCE).
+## guard it with get_guard_chance() (the archetype's "guard_chance", grunts:
+## Tuning.GUARD_TAP_CHANCE, x (1 - p) and x the level's block mult: Round 8).
 ## Round 7 removed sidestepping the player's sprint strikes.
 func _on_strike_started(attacker: Node3D, target: Node3D, move: StringName, _sprint: bool, charge_level: int) -> void:
 	if target != fighter or not attacker is Fighter or attacker == fighter:
@@ -1432,17 +1611,20 @@ func _on_strike_started(attacker: Node3D, target: Node3D, move: StringName, _spr
 		return
 	if _is_impaired() or _is_attacking():
 		return
-	var guard_chance := float(fighter.config.get("guard_chance", 0.0))
+	var guard_chance := get_guard_chance()
 	if guard_chance > 0.0 and is_tapped_strike(move, charge_level):
 		# Already guarding (the string goes on): keep it up; else roll.
 		if _time < _tap_guard_until or _rng.randf() < guard_chance:
 			_tap_guard(a)
 
-## A strike a tap guard is raised against: Round 7's punch string taps (jab,
-## cross, hook: Tuning.R7_MOVES "guard_break" false); for older move ids, a
-## Round 5 strike at charge level 0. Heavies, the gut punch, the uppercut and
-## the kicks break a guard (B), so a grunt does not raise one against them.
+## A strike a tap guard is raised against. Round 8 strikes (Tuning.R8_MOVES,
+## B's GameEvents.strike_started charge_level 0 for a tap, 1+ for a charged
+## strike, same id): every tap; a charged strike breaks a guard (B), so never
+## one. Other Round 7 ids (the heavies) by Tuning.R7_MOVES "guard_break"; for
+## older move ids, a Round 5 strike at charge level 0.
 static func is_tapped_strike(move: StringName, charge_level := 0) -> bool:
+	if Tuning.R8_MOVES.has(move):
+		return charge_level == 0
 	if Tuning.R7_MOVES.has(move):
 		return not bool(Tuning.R7_MOVES[move].get("guard_break", false))
 	return charge_level == 0
@@ -1742,14 +1924,15 @@ func _read_chance() -> float:
 	return float(chances[clampi(Tuning.difficulty, 0, chances.size() - 1)])
 
 ## Read chance against a player move repeated `repeats` times within
-## MASH_WINDOW: the archetype's chance, +MASH_BONUS per repeat, capped at MASH_CAP.
+## MASH_WINDOW: the archetype's chance, +MASH_BONUS per repeat, capped at
+## MASH_CAP; Round 8: x block_mult() (pressure, level). The test override is exact.
 func get_read_chance(repeats := 0) -> float:
 	if read_chance_override >= 0.0:
 		return read_chance_override
 	var base := _read_chance()
-	if repeats <= 0:
-		return base
-	return maxf(base, minf(base + MASH_BONUS * repeats, MASH_CAP))
+	if repeats > 0:
+		base = maxf(base, minf(base + MASH_BONUS * repeats, MASH_CAP))
+	return clampf(base * block_mult(), 0.0, 1.0)
 
 ## The anti-mash family of a player move: every press of the punch button
 ## (Round 7's jab, cross, hook and their heavies) is one move; older ids drop
@@ -1798,10 +1981,10 @@ func _on_player_attack_incoming(move: StringName, time_to_active: float) -> void
 	_face(player.get_ground_position())
 	_apply_guard()
 
-## Free to raise (or keep) a guard: not down, held, reacting or hit-stunned
-## (a blockstun is fine: the guard is up).
+## Free to raise (or keep) a guard: not down, held, reacting, broken or
+## hit-stunned (a blockstun is fine: the guard is up).
 func _can_guard_now() -> bool:
-	if fighter.is_down() or fighter.is_reacting() or fighter.is_lifted():
+	if fighter.is_down() or fighter.is_reacting() or fighter.is_lifted() or is_broken():
 		return false
 	if fighter.carry != null and fighter.carry.is_held():
 		return false
@@ -2173,7 +2356,7 @@ func _tick_vanish_step(player: Fighter) -> bool:
 	var long_way := nav_path_length > VSTEP_PATH_LEN  # INF: the grid found no way at all
 	# Only when it means to close in: holding a token, or well outside its ring.
 	var want_close := AttackDirector.has_token(fighter) or d > Tuning.NEAR_RING.y + 1.0 or long_way
-	if _is_attacking() or not AttackDirector.is_player_open() or d <= VSTEP_MIN_DIST or not want_close:
+	if _is_attacking() or _backing_off or not AttackDirector.is_player_open() or d <= VSTEP_MIN_DIST or not want_close:
 		_vstep_best = d
 		_vstep_progress_at = _time
 		return false

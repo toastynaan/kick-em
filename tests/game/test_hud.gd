@@ -5,17 +5,28 @@ extends Node
 ## strike, blue grab or charge, gone at the first active frame), and the Round 7
 ## F3 debug overlay (move, string, chain, glide, the target's reaction state,
 ## the last hit's Round 7 fields) mirroring Tuning.debug_overlay. Round 7
-## removed the Focus bars, the reticle and lock-on marker, the charge meter,
-## the counter-bonus cue, parry feedback and the sprint marker: none is built.
+## removed the Focus bars, the reticle and lock-on marker, the counter-bonus
+## cue, parry feedback and the sprint marker: none is built. Round 8 brought
+## the charge meter back (built, hidden until a charge). The user's
+## settings.cfg is restored byte for byte.
 ## (Combo counter: test_hud_combo. Counter prompts: test_hud_prompts. Help:
-## test_help_controls.)
+## test_help_controls. Charge meter and pressure bars: test_hud_charge.)
 
 var _fails := 0
 
 func _ready() -> void:
+	var cfg_existed := FileAccess.file_exists(GameMenus.SETTINGS_PATH)
+	var cfg_bytes := FileAccess.get_file_as_bytes(GameMenus.SETTINGS_PATH) if cfg_existed else PackedByteArray()
 	for i in 5:
 		await get_tree().process_frame
 	await _run()
+	# F3 saved the overlay: put the user's settings.cfg back as it was.
+	if cfg_existed:
+		var f := FileAccess.open(GameMenus.SETTINGS_PATH, FileAccess.WRITE)
+		f.store_buffer(cfg_bytes)
+		f.close()
+	elif FileAccess.file_exists(GameMenus.SETTINGS_PATH):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(GameMenus.SETTINGS_PATH))
 	print("TEST test_hud: %s" % ("PASS" if _fails == 0 else "FAIL (%d)" % _fails))
 	get_tree().quit(0 if _fails == 0 else 1)
 
@@ -240,10 +251,12 @@ func _round7(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	_check(hud.get_arrows().is_empty(), "an on-screen wind-up gets no arrow")
 	GameEvents.attack_active.emit(foe, &"e_jab")
 
-	# Removed Round 5 UI is not built.
-	_check(not ("_reticle" in hud) and not ("_lock_marker" in hud) and not ("_charge" in hud)
+	# Removed Round 5 UI is not built; Round 8's charge meter is (hidden until a charge).
+	_check(not ("_reticle" in hud) and not ("_lock_marker" in hud)
 		and not ("_counter_label" in hud) and not ("_sprint_marker" in hud) and not ("_focus_label" in hud)
-		and not ("focus" in hud._bars), "no Focus bars, reticle, lock marker, charge meter, counter-bonus cue or sprint marker")
+		and not ("focus" in hud._bars), "no Focus bars, reticle, lock marker, counter-bonus cue or sprint marker")
+	_check(hud._charge != null and not hud._charge.visible and not hud.get_charge_meter().get("visible", false),
+		"Round 8 charge meter built, hidden with no charge")
 
 	# F3 debug overlay: mirrors Tuning.debug_overlay; shows the Round 7 combat state.
 	var saved_overlay := Tuning.debug_overlay
@@ -273,7 +286,7 @@ func _round7(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	_check(own.contains("UPGRADES   speed cap") and own.contains("teleport") and own.contains("pursuit x"),
 		"overlay: the god-path upgrades (speed cap, ram, teleport, pursuit chain)")
 	var stale := PackedStringArray()
-	for w in ["FOCUS", "sprint_charge", "charge", "P 0."]:
+	for w in ["FOCUS", "sprint_charge", "P 0.", "CHARGE 1"]:
 		if own.contains(w):
 			stale.append(w)
 	_check(stale.is_empty(), "overlay: nothing from removed systems (found: %s)" % ", ".join(stale))
@@ -295,7 +308,6 @@ func _round7(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	hud.toggle_debug()
 	_check(not hud.is_debug_visible() and not Tuning.debug_overlay, "F3 hides it and clears Tuning.debug_overlay")
 	Tuning.debug_overlay = saved_overlay
-	GameMenus.save_debug_settings()
 	foe.queue_free()
 	behind.queue_free()
 	await _frames(2)

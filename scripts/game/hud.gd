@@ -9,10 +9,23 @@ extends CanvasLayer
 ## hang), TELEPORT / SIDESTEP feedback, off-screen attack arrows, world popups,
 ## bowling chain, controls help (F1) and the debug
 ## overlay (F3, mirrors Tuning.debug_overlay: move, string, chain, glide, the
-## combat target's reaction state).
+## combat target's reaction state; Round 8: the charge c and steps, the
+## target's pressure, broken state and level, the air hits).
+## Round 8 (docs/Round 8 — Charge and Pressure.md, The meter and Pressure):
+## - The charge meter, bottom centre where Round 5's was: shown while
+##   CombatController.is_charging(), it fills with get_charge() and is white
+##   under the first of get_charge_steps(), orange past it and red past the last
+##   (no labels; thin ticks mark the steps). It pops as c crosses a step,
+##   flashes on charge_full and pulses while full, stays up CHARGE_HOLD after
+##   charge_released, and drains with a shake on charge_cancelled. The events
+##   and the getters are both read, so a missed event never strands it.
+## - Pressure bars from get_pressure() / get_pressure_max(): under the
+##   Duelist's top health bar, and in Waves a compact health + pressure pair
+##   over each enemy that is engaged (the player's target, close, under
+##   pressure) or damaged. While is_broken() the bar is full and flashes, then
+##   it empties. A break pops "BROKEN" over the enemy.
 ## The layer sits above ScreenFX's, so screen effects never dim it.
 ## Title, pause and results panels live in GameMenus. Built entirely in code.
-## No health bars over enemies.
 ## OWNER: agent J (HUD, flow & menus).
 
 const HUD_LAYER := 10           ## at least this; always above ScreenFX's layers
@@ -58,6 +71,27 @@ const HANG_TEXT := "ATTACK: LAUNCH  /  BACK + ATTACK: SPIKE"
 const PURSUE_ABOVE := 0.7       ## m above the flying body's centre of mass
 const LAUNCH_HITSTOP_FALLBACK := 0.11 ## real s for a launch HitInfo with no hitstop (Defence's value)
 const HANG_GRACE := 0.35        ## real s after Tuning.PURSUIT_HANG the hang cue may stay (Defence's strike grace)
+## Round 8 charge meter (bottom centre, Round 5's place and look).
+const CHARGE_HOLD := 0.35       ## real s the meter stays up after the release (fading over the second half)
+const CHARGE_CANCEL_TIME := 0.35 ## real s a cancelled charge takes to drain and shake out
+const CHARGE_SHAKE := 10.0      ## px peak sideways shake of a cancel
+const CHARGE_STEP_POP := 0.14   ## real s the bar pops when c crosses one of the move's steps
+const CHARGE_FULL_POP := 0.2    ## real s of the white flash when the charge reaches full
+const CHARGE_PULSE := 24.0      ## rad/s of the white pulse while full
+const CHARGE_STEP_EPS := 0.001  ## c this close under a step counts as past it
+## Round 8 pressure bars.
+const PRESSURE_DRAIN := 2.5     ## share of the bar per real s the shown pressure falls (it rises at once)
+const PRESSURE_PULSE := 22.0    ## rad/s of the broken flash
+const OPP_PRESSURE_H := 10.0    ## px, the Duelist's pressure bar under its HP bar
+const ENEMY_BAR_W := 78.0       ## px, Waves: the bar pair over an enemy
+const ENEMY_BAR_HP_H := 7.0
+const ENEMY_BAR_P_H := 5.0
+const ENEMY_BAR_GAP := 2.0      ## px between the two bars
+const ENEMY_BAR_ABOVE := 0.3    ## m above a standing enemy's head
+const ENEMY_BAR_ABOVE_BODY := 0.9 ## m above a ragdolling body's centre of mass
+const ENEMY_BAR_ENGAGE := 6.0   ## m: an enemy this close to the player is engaged
+const ENEMY_BAR_FADE := 0.2     ## real s to fade in or out
+const ENEMY_BAR_MAX_DIST := 30.0 ## m from the camera: farther bars are not drawn
 
 var player: Fighter
 var mode: StringName = &"duel"
@@ -118,6 +152,26 @@ var _opp_hp_label: Label
 var _opp_hp_delayed := 1.0
 var _opp_hp_last := -1.0
 var _opp_hit_at := -100.0
+var _opp_pressure: _PressureBar
+var _opp_p_shown := 0.0
+## Round 8 charge meter: &"" hidden, &"charging", &"released" (held up for
+## CHARGE_HOLD), &"cancelled" (draining for CHARGE_CANCEL_TIME).
+var _charge: _Charge
+var _charge_state: StringName = &""
+var _charge_c := 0.0
+var _charge_steps: Array[float] = []
+var _charge_move: StringName = &""
+var _charge_t0 := -INF                      ## real s the current state began
+var _charge_full := false
+var _charge_full_at := -INF
+var _charge_polled := false                 ## is_charging() reported this charge (else events only)
+var _charge_passed := 0                     ## steps passed (pops on each new one)
+var _charge_step_at := -INF
+var _charge_info := {}                      ## the meter as last drawn (tests)
+## Round 8 enemy bars (Waves): instance id -> {fighter, shown, alpha}.
+var _enemy_bar_state := {}
+var _enemy_bars_draw: _EnemyBars
+var _enemy_bar_items: Array = []            ## last drawn (tests)
 
 var _hp_shown := 1.0
 var _hp_delayed := 1.0
@@ -162,6 +216,13 @@ func _ready() -> void:
 	GameEvents.pursuit.connect(_on_pursuit)
 	GameEvents.teleported.connect(_on_teleported)
 	GameEvents.sidestepped.connect(_on_sidestepped)
+	# Round 8: the charge meter and pressure.
+	GameEvents.charge_started.connect(_on_charge_started)
+	GameEvents.charge_level_changed.connect(_on_charge_level_changed)
+	GameEvents.charge_full.connect(_on_charge_full)
+	GameEvents.charge_released.connect(_on_charge_released)
+	GameEvents.charge_cancelled.connect(_on_charge_cancelled)
+	GameEvents.pressure_broken.connect(_on_pressure_broken)
 	_hint_until = TimeDirector.now() + HINT_TIME
 
 # --- Public API ----------------------------------------------------------------
@@ -280,6 +341,12 @@ func set_round_over() -> void:
 	_hang_victim = null
 	_prompts_draw.items = []
 	_prompts_draw.queue_redraw()
+	_charge_state = &""
+	_charge.visible = false
+	_enemy_bar_state.clear()
+	_enemy_bar_items = []
+	_enemy_bars_draw.items = []
+	_enemy_bars_draw.queue_redraw()
 	_combo_count = 0
 	_combo_box.modulate.a = 0.0
 	_chain_label.modulate.a = 0.0
@@ -316,6 +383,22 @@ func get_counter_prompts() -> Array:
 ## center, on_screen}.
 func get_pursuit_cue() -> Dictionary:
 	return _cue
+
+## The charge meter as drawn this frame: {visible, state (&"charging",
+## &"released", &"cancelled" or &""), fill, c, steps, passed, tier (0 white,
+## 1 orange, 2 red), color (the tier's), draw_color (with the full flash),
+## full, flashing, shake (px), alpha, scale, move}.
+func get_charge_meter() -> Dictionary:
+	return _charge_info
+
+## Waves: the health + pressure pairs drawn this frame over enemies:
+## [{fighter, pos (screen px), hp, pressure (shown fraction), broken, alpha}].
+func get_enemy_bars() -> Array:
+	return _enemy_bar_items
+
+## Duel: the Duelist's pressure bar under its health bar {visible, fill, broken}.
+func get_opponent_pressure() -> Dictionary:
+	return {"visible": _opp_root.visible, "fill": _opp_pressure.fill, "broken": _opp_pressure.broken}
 
 ## Attackers with an open counter window on the player (drawn or not).
 func get_prompt_attackers() -> Array:
@@ -448,6 +531,12 @@ func _build() -> void:
 	_root.add_child(_popups)
 	_root.move_child(_popups, _arrows.get_index() + 1)
 
+	# Round 8: health + pressure over Waves enemies, under the prompts.
+	_enemy_bars_draw = _EnemyBars.new()
+	_enemy_bars_draw.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_enemy_bars_draw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(_enemy_bars_draw)
+
 	# Counter prompts over the attackers, above the popups.
 	_prompts_draw = _Prompts.new()
 	_prompts_draw.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -478,6 +567,24 @@ func _build() -> void:
 	_opp_hp_label.custom_minimum_size.x = 60.0
 	_opp_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_opp_root.add_child(_opp_hp_label)
+	# Round 8: its pressure, under the health bar.
+	_opp_pressure = _PressureBar.new()
+	_opp_pressure.bar_w = OPP_W
+	_opp_pressure.position = Vector2(70.0, 30.0 + _Bars.HP_H + 8.0)
+	_opp_pressure.size = Vector2(OPP_W, OPP_PRESSURE_H)
+	_opp_pressure.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_opp_root.add_child(_opp_pressure)
+
+	# Round 8: the charge meter, bottom centre (Round 5's place).
+	_charge = _Charge.new()
+	_charge.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_charge.offset_left = -_Charge.W * 0.5
+	_charge.offset_right = _Charge.W * 0.5
+	_charge.offset_top = -190
+	_charge.offset_bottom = -140
+	_charge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_charge.visible = false
+	_root.add_child(_charge)
 
 	# Debug overlay, top-right.
 	_debug_panel = PanelContainer.new()
@@ -553,6 +660,8 @@ func _process(_delta: float) -> void:
 	_update_combo(t)
 	_update_prompts(t)
 	_update_pursuit_cue(t)
+	_update_charge(t)
+	_update_enemy_bars(t, dt)
 	_prompts_draw.items = _prompt_items + ([_cue] if not _cue.is_empty() else [])
 	_prompts_draw.queue_redraw()
 	_update_arrows(t, dt)
@@ -611,6 +720,9 @@ func _update_opponent(t: float, dt: float) -> void:
 		_opp_bars.hp = 0.0
 		_opp_hp_label.text = "0"
 		_opp_bars.queue_redraw()
+		_opp_pressure.fill = 0.0
+		_opp_pressure.broken = false
+		_opp_pressure.queue_redraw()
 		return
 	var f: Fighter = opponent
 	var max_hp := maxf(f.max_hp, 1.0)
@@ -627,6 +739,14 @@ func _update_opponent(t: float, dt: float) -> void:
 	_opp_bars.pulse = t
 	_opp_bars.queue_redraw()
 	_opp_hp_label.text = "%d" % ceili(f.hp)
+	var cc := _combat(f)
+	var broken := cc != null and cc.is_broken()
+	var p := pressure_fraction(cc.get_pressure(), cc.get_pressure_max(), broken) if cc != null else 0.0
+	_opp_p_shown = p if p >= _opp_p_shown else move_toward(_opp_p_shown, p, dt * PRESSURE_DRAIN)
+	_opp_pressure.fill = _opp_p_shown
+	_opp_pressure.broken = broken
+	_opp_pressure.pulse = t
+	_opp_pressure.queue_redraw()
 
 ## Project world popups to the screen; drop expired ones.
 func _update_popups(t: float) -> void:
@@ -985,6 +1105,233 @@ func _on_counter_whiffed(defender: Node3D) -> void:
 	popup_at(player.get_aim_point() + Vector3.UP * 0.7, "DODGE IT" if blue else "WHIFF",
 		UIKit.TELL_GRAB if blue else UIKit.TEXT_DIM, 28, 0.7)
 
+# --- Round 8: charge meter ------------------------------------------------------------
+## The CombatController the Round 8 reads go through (tests substitute a double).
+func _combat(f: Fighter) -> CombatController:
+	return f.combat if f != null and is_instance_valid(f) else null
+
+func _player_ok() -> bool:
+	return player != null and is_instance_valid(player) and not player.is_dead()
+
+## Steps of `steps` that `c` has reached.
+static func charge_steps_passed(c: float, steps: Array) -> int:
+	var n := 0
+	for s: float in steps:
+		if c >= s - CHARGE_STEP_EPS:
+			n += 1
+	return n
+
+## The meter's colour tier: 0 white under the first step, 1 orange past it, 2
+## red past the last. A move with one step goes white -> red; with none it
+## stays white (and still flashes at full).
+static func charge_tier(c: float, steps: Array) -> int:
+	var passed := charge_steps_passed(c, steps)
+	if passed <= 0:
+		return 0
+	return 2 if passed >= steps.size() else 1
+
+static func charge_color(tier: int) -> Color:
+	return [UIKit.CHARGE_WHITE, UIKit.CHARGE_ORANGE, UIKit.CHARGE_RED][clampi(tier, 0, 2)]
+
+func _charge_begin(move_id: StringName, t: float) -> void:
+	_charge_state = &"charging"
+	_charge_t0 = t
+	_charge_c = 0.0
+	_charge_steps = []
+	_charge_move = move_id
+	_charge_full = false
+	_charge_full_at = -INF
+	_charge_polled = false
+	_charge_passed = 0
+	_charge_step_at = -INF
+
+func _charge_end(state: StringName, t: float) -> void:
+	_charge_state = state
+	_charge_t0 = t
+
+func _on_charge_started(fighter: Node3D, move_id: StringName) -> void:
+	if _is_player(fighter) and not _round_over:
+		_charge_begin(move_id, TimeDirector.now())
+
+func _on_charge_level_changed(fighter: Node3D, _level: int) -> void:
+	if _is_player(fighter) and _charge_state == &"charging":
+		_charge_step_at = TimeDirector.now()
+
+func _on_charge_full(fighter: Node3D, move_id: StringName) -> void:
+	if not _is_player(fighter) or _round_over:
+		return
+	var t := TimeDirector.now()
+	if _charge_state != &"charging":
+		_charge_begin(move_id, t)
+	_charge_c = 1.0
+	if not _charge_full:
+		_charge_full = true
+		_charge_full_at = t
+
+func _on_charge_released(fighter: Node3D, _move_id: StringName, _level: int) -> void:
+	if _is_player(fighter) and _charge_state == &"charging":
+		_charge_end(&"released", TimeDirector.now())
+
+func _on_charge_cancelled(fighter: Node3D, _move_id: StringName, _reason: StringName) -> void:
+	if _is_player(fighter) and _charge_state == &"charging":
+		_charge_end(&"cancelled", TimeDirector.now())
+
+## The meter follows CombatController's getters each frame, and the charge
+## events in between. A charge the getters reported that stops with no event
+## counts as released. With events only (no getter reports it), c runs on the
+## time held, from R8_TAP_MAX to Tuning.debug_charge_full.
+func _update_charge(t: float) -> void:
+	var cc := _combat(player) if _player_ok() else null
+	if cc != null and not _round_over and cc.is_charging():
+		if _charge_state != &"charging":
+			_charge_begin(cc.get_charge_move(), t)
+		_charge_polled = true
+		_charge_c = clampf(cc.get_charge(), 0.0, 1.0)
+		_charge_steps = cc.get_charge_steps()
+		if cc.get_charge_move() != &"":
+			_charge_move = cc.get_charge_move()
+		if cc.is_charge_full() and not _charge_full:
+			_charge_full = true
+			_charge_full_at = t
+	elif _charge_state == &"charging":
+		if _charge_polled or _round_over or not _player_ok():
+			_charge_end(&"released", t)
+		elif not _charge_full:
+			var span := maxf(Tuning.debug_charge_full - Tuning.R8_TAP_MAX, 0.01)
+			_charge_c = clampf((t - _charge_t0) / span, _charge_c, 1.0)
+	if _charge_state == &"charging":
+		var passed := charge_steps_passed(_charge_c, _charge_steps)
+		if passed > _charge_passed:
+			_charge_step_at = t
+		_charge_passed = passed
+	var fill := _charge_c
+	var alpha := 1.0
+	var shake := 0.0
+	var shown := _charge_state == &"charging"
+	if _charge_state == &"released":
+		var k := (t - _charge_t0) / CHARGE_HOLD
+		shown = k < 1.0
+		alpha = clampf(2.0 - 2.0 * k, 0.0, 1.0)
+	elif _charge_state == &"cancelled":
+		var k := (t - _charge_t0) / CHARGE_CANCEL_TIME
+		shown = k < 1.0
+		fill = _charge_c * clampf(1.0 - k, 0.0, 1.0)
+		shake = CHARGE_SHAKE * (1.0 - clampf(k, 0.0, 1.0)) * sin(k * 46.0)
+		alpha = clampf(1.0 - k * k, 0.0, 1.0)
+	if not shown:
+		_charge_state = &""
+	var tier := charge_tier(_charge_c, _charge_steps)
+	var col := charge_color(tier)
+	var flashing := shown and _charge_full and _charge_state != &"cancelled"
+	var full_pop := clampf(1.0 - (t - _charge_full_at) / CHARGE_FULL_POP, 0.0, 1.0) if flashing else 0.0
+	var step_pop := clampf(1.0 - (t - _charge_step_at) / CHARGE_STEP_POP, 0.0, 1.0) if shown else 0.0
+	var draw_col := col
+	if _charge_state == &"cancelled":
+		draw_col = col.lerp(Color(0.45, 0.45, 0.47), 0.65)
+	elif flashing:
+		draw_col = col.lerp(Color.WHITE, maxf(0.5 + 0.5 * sin(t * CHARGE_PULSE), full_pop))
+	_charge.visible = shown
+	if shown:
+		_charge.fill = fill
+		_charge.color = draw_col
+		_charge.tick_color = col
+		_charge.steps = _charge_steps
+		_charge.passed = charge_steps_passed(_charge_c, _charge_steps)
+		_charge.glow = (0.35 + 0.5 * (0.5 + 0.5 * sin(t * CHARGE_PULSE))) if flashing else 0.0
+		_charge.full_pop = full_pop
+		_charge.bar_scale = 1.0 + 0.12 * step_pop + 0.1 * full_pop
+		_charge.shake = shake
+		_charge.alpha = alpha
+		_charge.queue_redraw()
+	_charge_info = {"visible": shown, "state": _charge_state, "fill": fill if shown else 0.0, "c": _charge_c,
+		"steps": _charge_steps, "passed": charge_steps_passed(_charge_c, _charge_steps), "tier": tier, "color": col,
+		"draw_color": draw_col, "full": _charge_full, "flashing": flashing, "shake": shake, "alpha": alpha,
+		"scale": _charge.bar_scale, "move": _charge_move}
+
+# --- Round 8: pressure bars -------------------------------------------------------------
+## The bar's share: 1 while broken open, else pressure / capacity (0..1).
+static func pressure_fraction(pressure: float, pressure_max: float, broken: bool) -> float:
+	if broken:
+		return 1.0
+	return clampf(pressure / maxf(pressure_max, 0.001), 0.0, 1.0)
+
+## Waves: a compact health + pressure pair over each enemy that is engaged (the
+## player's combat target, within ENEMY_BAR_ENGAGE, or under pressure or
+## broken) or damaged, fading in and out. The Duelist uses the top bars.
+## Shown pressure rises at once and falls at PRESSURE_DRAIN, so a break's full
+## bar visibly empties. Bars lift above an enemy's counter prompt.
+func _update_enemy_bars(t: float, dt: float) -> void:
+	var cam := get_viewport().get_camera_3d()
+	var vp := get_viewport().get_visible_rect().grow(-8.0)
+	var target: Fighter = null
+	if _player_ok() and player.combat != null:
+		target = player.combat.get_combat_target()
+	var items: Array = []
+	var seen := {}
+	for n in get_tree().get_nodes_in_group(&"enemies"):
+		var f := n as Fighter
+		if f == null or f == opponent or f.is_queued_for_deletion():
+			continue
+		var id := f.get_instance_id()
+		seen[id] = true
+		if not _enemy_bar_state.has(id):
+			_enemy_bar_state[id] = {"fighter": f, "shown": 0.0, "alpha": 0.0}
+		var e: Dictionary = _enemy_bar_state[id]
+		var cc := _combat(f)
+		var broken := cc != null and cc.is_broken()
+		var p := pressure_fraction(cc.get_pressure(), cc.get_pressure_max(), broken) if cc != null else 0.0
+		var shown_p: float = e["shown"]
+		shown_p = p if p >= shown_p else move_toward(shown_p, p, dt * PRESSURE_DRAIN)
+		e["shown"] = shown_p
+		var engaged := f == target or p > 0.0 or broken
+		if not engaged and _player_ok():
+			var d := player.get_ground_position() - f.get_ground_position()
+			engaged = Vector2(d.x, d.z).length() <= ENEMY_BAR_ENGAGE
+		var damaged := f.hp < f.max_hp - 0.01
+		var want := not _round_over and not f.is_dead() and (engaged or damaged)
+		var a := move_toward(float(e["alpha"]), 1.0 if want else 0.0, dt / ENEMY_BAR_FADE)
+		e["alpha"] = a
+		if a <= 0.0 or cam == null:
+			continue
+		var anchor := f.get_center_of_mass() + Vector3.UP * ENEMY_BAR_ABOVE_BODY if f.is_body_simulating() \
+			else f.get_ground_position() + Vector3.UP * (f.get_height() + ENEMY_BAR_ABOVE)
+		if cam.is_position_behind(anchor) or cam.global_position.distance_to(anchor) > ENEMY_BAR_MAX_DIST:
+			continue
+		var sp := cam.unproject_position(anchor)
+		if _prompts.has(id):
+			sp.y -= PROMPT_GAP + PROMPT_H + _Prompts.CAPTION_SIZE + 6.0  # above the counter badge
+		if not vp.has_point(sp):
+			continue
+		items.append({"fighter": f, "pos": sp, "hp": clampf(f.hp / maxf(f.max_hp, 1.0), 0.0, 1.0),
+			"pressure": shown_p, "broken": broken, "alpha": a, "pulse": t})
+	for id in _enemy_bar_state.keys():
+		if not seen.has(id):
+			_enemy_bar_state.erase(id)
+	_enemy_bar_items = items
+	_enemy_bars_draw.items = items
+	_enemy_bars_draw.queue_redraw()
+
+## A break pops "BROKEN" over the enemy (its bar flashes until it recovers).
+func _on_pressure_broken(fighter: Node3D, _attacker: Node3D) -> void:
+	if _round_over or not is_instance_valid(fighter) or not (fighter is Fighter) or _is_player(fighter):
+		return
+	popup_at((fighter as Fighter).get_aim_point() + Vector3.UP * 0.6, "BROKEN", UIKit.PRESSURE_COLOR, 34, 0.9)
+
+## A pressure bar in `r`: dark back, gold fill that brightens toward full;
+## while broken it is full and flashes white with an outline.
+static func draw_pressure(ci: CanvasItem, r: Rect2, fill: float, broken: bool, pulse: float, alpha: float) -> void:
+	ci.draw_rect(r.grow(2.0), Color(0, 0, 0, 0.75 * alpha))
+	ci.draw_rect(r, Color(0.14, 0.11, 0.04, 0.9 * alpha))
+	var col := UIKit.PRESSURE_COLOR.darkened(0.3 * (1.0 - clampf(fill, 0.0, 1.0)))
+	var flash := 0.5 + 0.5 * sin(pulse * PRESSURE_PULSE)
+	if broken:
+		fill = 1.0
+		col = UIKit.PRESSURE_COLOR.lerp(UIKit.PRESSURE_BROKEN, flash)
+	col.a *= alpha
+	ci.draw_rect(Rect2(r.position, Vector2(r.size.x * clampf(fill, 0.0, 1.0), r.size.y)), col)
+	if broken:
+		ci.draw_rect(r.grow(3.0), Color(UIKit.PRESSURE_BROKEN, (0.4 + 0.6 * flash) * alpha), false, 2.0)
+
 # --- Off-screen arrows -------------------------------------------------------------
 ## Off-screen attack arrows (Feel Reference: Off-screen attackers): from a
 ## wind-up that started off screen until its first active frame (attack_active),
@@ -1174,11 +1521,15 @@ static func describe_hit(info: HitInfo) -> String:
 
 ## The player's combat state for the overlay, read through the Round 7 contract
 ## (CombatController, Defence, Traversal, Carry, Fighter stubs) and, when B adds
-## them, get_strike_debug()'s "buffered" / "phase" keys.
+## them, get_strike_debug()'s "buffered" / "phase" keys. Round 8: the charge
+## (c, steps, full), the air hits, and the target's pressure, broken time and level.
 func gather_combat_debug() -> Dictionary:
 	var d := {"move": &"", "phase": "IDLE", "string_index": 0, "chain": 0, "glide": false,
 		"buffered": "-", "target": "", "target_react": &"", "target_left": 0.0, "target_dist": -1.0,
-		"target_down": false, "target_lifted": false, "hud_combo": _combo_count}
+		"target_down": false, "target_lifted": false, "hud_combo": _combo_count,
+		"charging": false, "charge": 0.0, "charge_steps": [], "charge_full": false, "charge_move": &"",
+		"air_hits": 0, "target_pressure": 0.0, "target_pressure_max": 0.0, "target_broken": false,
+		"target_broken_left": 0.0, "target_level": 0}
 	if player == null or not is_instance_valid(player) or player.combat == null:
 		return d
 	var c := player.combat
@@ -1192,6 +1543,14 @@ func gather_combat_debug() -> Dictionary:
 	d["string_index"] = c.get_string_index()
 	d["chain"] = c.get_chain_count()
 	d["glide"] = c.is_gliding()
+	var cc := _combat(player)
+	if cc != null:
+		d["charging"] = cc.is_charging()
+		d["charge"] = cc.get_charge()
+		d["charge_steps"] = cc.get_charge_steps()
+		d["charge_full"] = cc.is_charge_full()
+		d["charge_move"] = cc.get_charge_move()
+		d["air_hits"] = cc.get_air_hits()
 	if c.has_method(&"get_strike_debug"):
 		var sd: Dictionary = c.call(&"get_strike_debug")
 		for k in ["buffered", "buffer"]:
@@ -1212,6 +1571,13 @@ func gather_combat_debug() -> Dictionary:
 		d["target_down"] = target.is_down()
 		d["target_lifted"] = target.is_lifted()
 		d["target_dist"] = player.get_ground_position().distance_to(target.get_ground_position())
+		d["target_level"] = target.level
+		var tc := _combat(target)
+		if tc != null:
+			d["target_pressure"] = tc.get_pressure()
+			d["target_pressure_max"] = tc.get_pressure_max()
+			d["target_broken"] = tc.is_broken()
+			d["target_broken_left"] = tc.get_broken_time_left()
 	return d
 
 ## Overlay lines for gather_combat_debug()'s dictionary.
@@ -1235,6 +1601,24 @@ static func combat_debug_lines(d: Dictionary) -> PackedStringArray:
 			state += " LIFTED"
 		lines.append("TARGET     %s  react %s %.2f s  %.1f m" % [target, state, float(d.get("target_left", 0.0)),
 			float(d.get("target_dist", 0.0))])
+	# Round 8: the charge, the target's pressure, the air combo.
+	var steps := PackedStringArray()
+	for s: float in d.get("charge_steps", []):
+		steps.append("%.2f" % s)
+	if d.get("charging", false):
+		lines.append("CHARGE     c %.2f  steps [%s]%s  %s" % [float(d.get("charge", 0.0)), ", ".join(steps),
+			"  FULL" if d.get("charge_full", false) else "", String(d.get("charge_move", &""))])
+	else:
+		lines.append("CHARGE     -")
+	if target == "":
+		lines.append("PRESSURE   -")
+	else:
+		var pmax := float(d.get("target_pressure_max", 0.0))
+		var pv := float(d.get("target_pressure", 0.0))
+		lines.append("PRESSURE   %.2f / %.2f (%d%%)%s   level %d" % [pv, pmax, roundi(100.0 * pv / maxf(pmax, 0.001)),
+			"  BROKEN %.2f s" % float(d.get("target_broken_left", 0.0)) if d.get("target_broken", false) else "",
+			int(d.get("target_level", 0))])
+	lines.append("AIR        hits %d / %d" % [int(d.get("air_hits", 0)), Tuning.debug_air_hits])
 	return lines
 
 func _debug_text() -> String:
@@ -1269,6 +1653,9 @@ func _debug_text() -> String:
 		lines.append("UPGRADES   speed cap %d m/s  ram %d  teleport %s  pursuit x%d   cue %s" % [
 			roundi(Tuning.debug_speed_cap), Tuning.debug_ram_level, "ON" if Tuning.debug_teleport else "off",
 			Tuning.debug_pursuit_max, String(_cue.get("text", "-"))])
+		lines.append("           full charge %.2f s  pressure x%.2f  launch step %.2f  air hits %d%s" % [
+			Tuning.debug_charge_full, Tuning.debug_pressure_mult, Tuning.debug_launch_step, Tuning.debug_air_hits,
+			"   (DUEL: all at max)" if GameMenus.is_max_upgrades_applied() else ""])
 		lines.append("PROMPTS    %d open (%d counterable)" % [_prompts.size(),
 			_prompts.values().filter(func(e: Dictionary) -> bool: return bool(e["counterable"])).size()])
 	lines.append("FPS %d   physics %.2f ms   process %.2f ms" % [
@@ -1332,6 +1719,72 @@ class _Bars extends Control:
 		for q in range(1, 4):
 			var x := hp_w * q * 0.25
 			draw_line(Vector2(x, HP_H * 0.6), Vector2(x, HP_H), Color(0, 0, 0, 0.45), 2.0)
+
+## Round 8 charge meter: a bar that fills with c in the colour of the steps
+## passed (white, orange, red), thin ticks at the steps (no labels), popping
+## when a step is crossed and pulsing white with a glow while full. HUD sets
+## every value; this only draws.
+class _Charge extends Control:
+	const W := 320.0
+	const H := 16.0
+	const BAR_Y := 26.0
+	var fill := 0.0
+	var color := UIKit.CHARGE_WHITE      ## fill colour, the full flash included
+	var tick_color := UIKit.CHARGE_WHITE ## the tier's own colour
+	var steps: Array[float] = []
+	var passed := 0
+	var glow := 0.0                      ## > 0 while full: outline alpha
+	var full_pop := 0.0
+	var bar_scale := 1.0
+	var shake := 0.0                     ## px sideways (a cancel)
+	var alpha := 1.0
+
+	func _draw() -> void:
+		var r := Rect2(Vector2(0, BAR_Y), Vector2(W, H))
+		var c := r.get_center()
+		draw_set_transform(c * (1.0 - bar_scale) + Vector2(shake, 0.0), 0.0, Vector2(bar_scale, bar_scale))
+		draw_rect(r.grow(3.0), Color(0, 0, 0, 0.75 * alpha))
+		draw_rect(r, Color(0.12, 0.1, 0.08, 0.9 * alpha))
+		var w := W * clampf(fill, 0.0, 1.0)
+		draw_rect(Rect2(r.position, Vector2(w, H)), Color(color, color.a * alpha))
+		draw_rect(Rect2(r.position, Vector2(w, H * 0.35)), Color(1, 1, 1, 0.15 * alpha))
+		for i in steps.size():
+			if steps[i] >= 0.999:
+				continue  # the bar's end is the full mark
+			var x := W * steps[i]
+			var reached := i < passed
+			draw_line(Vector2(x, BAR_Y - 4.0), Vector2(x, BAR_Y + H + 4.0),
+				Color(tick_color, alpha) if reached else Color(1, 1, 1, 0.7 * alpha), 3.0 if reached else 2.0)
+		if glow > 0.0:
+			draw_rect(r.grow(5.0 + 4.0 * full_pop), Color(1, 1, 1, glow * alpha), false, 2.0)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+## Round 8: the Duelist's pressure under its health bar.
+class _PressureBar extends Control:
+	var bar_w := 360.0
+	var fill := 0.0
+	var broken := false
+	var pulse := 0.0
+
+	func _draw() -> void:
+		HUD.draw_pressure(self, Rect2(Vector2.ZERO, Vector2(bar_w, HUD.OPP_PRESSURE_H)), fill, broken, pulse, 1.0)
+
+## Round 8 (Waves): a compact health + pressure pair over each shown enemy.
+class _EnemyBars extends Control:
+	var items: Array = []
+
+	func _draw() -> void:
+		var w := HUD.ENEMY_BAR_W
+		for it: Dictionary in items:
+			var a: float = it["alpha"]
+			var c: Vector2 = it["pos"]
+			var hp_r := Rect2(c + Vector2(-w * 0.5, -(HUD.ENEMY_BAR_HP_H + HUD.ENEMY_BAR_GAP + HUD.ENEMY_BAR_P_H)),
+				Vector2(w, HUD.ENEMY_BAR_HP_H))
+			draw_rect(hp_r.grow(2.0), Color(0, 0, 0, 0.75 * a))
+			draw_rect(hp_r, Color(0.16, 0.05, 0.05, 0.9 * a))
+			draw_rect(Rect2(hp_r.position, Vector2(w * float(it["hp"]), hp_r.size.y)), Color(UIKit.HP_COLOR, a))
+			var p_r := Rect2(hp_r.position + Vector2(0.0, HUD.ENEMY_BAR_HP_H + HUD.ENEMY_BAR_GAP), Vector2(w, HUD.ENEMY_BAR_P_H))
+			HUD.draw_pressure(self, p_r, float(it["pressure"]), bool(it["broken"]), float(it["pulse"]), a)
 
 ## Counter prompts: a key badge (circle for one-letter keys, a pill otherwise)
 ## in the tell colour, the caption above it, a pointer to the attacker's head

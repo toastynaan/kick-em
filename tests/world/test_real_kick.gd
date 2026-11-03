@@ -1,13 +1,16 @@
 extends Node3D
-## Round 7 launches through REAL strikes into walls (docs/Round 7 — Freeflow
-## Combat.md: Moves, Payoffs; the wall table is unchanged). A player Fighter
-## strikes a 70 kg dummy whose COM stands 2 m in front of a single panel; the
-## wall decides on E = 1/2 M v^2 straight into it (break at break_energy, crack
-## at CRACK_FRACTION of it, else bounce).
-##   heavy roundhouse (its own launch, 11 m/s at 20 deg): ~3,740 J:
+## Round 8 launches through REAL strikes into walls (docs/Round 8 — Charge and
+## Pressure.md: Moves; Round 7's payoffs; the wall table is unchanged). A player
+## Fighter strikes a 70 kg dummy whose COM stands 2 m in front of a single panel;
+## the wall decides on E = 1/2 M v^2 straight into it (break at break_energy,
+## crack at CRACK_FRACTION of it, else bounce). Pressure is off
+## (debug_pressure_mult 0) so no break bonus changes the speeds.
+##   roundhouse charged at c = 0 (11 m/s at 18 deg): ~3,830 J:
 ##     breaks drywall, cracks brick, bounces off concrete.
-##   uppercut -> roundhouse (the lift payoff, 15 m/s at 12 deg): ~7,530 J:
+##   roundhouse charged at c = 1 (16 m/s at 18 deg): ~8,100 J:
 ##     breaks drywall and brick, cracks concrete.
+##   charged uppercut (c = 0, a 0.8 m lift) -> tapped roundhouse (the lift
+##   payoff, 15 m/s at 12 deg): ~7,530 J: breaks drywall and brick, cracks concrete.
 ## Prints the launch speed and angle, the measured wall energy and the outcome.
 
 const WALL_DIST := 2.0
@@ -27,27 +30,36 @@ func _ready() -> void:
 		print("[realkick] FAIL: real ragdoll unavailable")
 		get_tree().quit(1)
 		return
+	var pressure_mult := Tuning.debug_pressure_mult
+	Tuning.debug_pressure_mult = 0.0
 	var lane := 0
-	var heavy: Dictionary = Tuning.R7_MOVES[&"heavy_roundhouse"]
-	var heavy_expect := {&"drywall": &"break", &"brick": &"crack", &"concrete": &"bounce"}
+	var rh: Dictionary = Tuning.R8_MOVES[&"roundhouse"]["charged"]
+	var rh_v: Vector2 = rh["launch_speed"]
+	var light_expect := {&"drywall": &"break", &"brick": &"crack", &"concrete": &"bounce"}
 	for surface: StringName in [&"drywall", &"brick", &"concrete"]:
-		await _case([&"heavy_roundhouse"], "heavy roundhouse   ", float(heavy["launch_speed"]),
-			float(heavy["launch_angle"]), surface, heavy_expect[surface], lane)
+		await _case([[&"roundhouse", 0.0]], "roundhouse c=0      ", rh_v.x, float(rh["launch_angle"]),
+			surface, light_expect[surface], lane)
+		lane += 1
+	var full_expect := {&"drywall": &"break", &"brick": &"break", &"concrete": &"crack"}
+	for surface: StringName in [&"drywall", &"brick", &"concrete"]:
+		await _case([[&"roundhouse", 1.0]], "roundhouse c=1      ", rh_v.y, float(rh["launch_angle"]),
+			surface, full_expect[surface], lane)
 		lane += 1
 	var payoff: Dictionary = Tuning.R7_PAYOFFS[&"roundhouse"][&"lift"]
-	var payoff_expect := {&"drywall": &"break", &"brick": &"break", &"concrete": &"crack"}
 	for surface: StringName in [&"drywall", &"brick", &"concrete"]:
-		await _case([&"uppercut", &"roundhouse"], "uppercut->roundhouse", float(payoff["launch_speed"]),
-			float(payoff["launch_angle"]), surface, payoff_expect[surface], lane)
+		await _case([[&"uppercut", 0.0], [&"roundhouse", -1.0]], "uppercut->roundhouse", float(payoff["launch_speed"]),
+			float(payoff["launch_angle"]), surface, full_expect[surface], lane)
 		lane += 1
+	Tuning.debug_pressure_mult = pressure_mult
 	print("")
 	for r in _rows:
 		print("[realkick] ", r)
 	print("[realkick] RESULT: ", "PASS" if _ok else "FAIL")
 	get_tree().quit(0 if _ok else 1)
 
-## Play `moves` from the attacker on the victim (each starts once the previous
-## one has hit and finished: play_move never cancels a move), then read the last
+## Play `moves` ([id, c] each: c < 0 is a tap, else a strike charged to c) from
+## the attacker on the victim (each starts once the previous one has hit and
+## finished: play_move / play_charged never cancel a move), then read the last
 ## hit's launch and the panel's decision.
 func _case(moves: Array, label: String, want_v: float, want_angle: float, surface: StringName,
 		expect: StringName, lane: int) -> void:
@@ -70,7 +82,11 @@ func _case(moves: Array, label: String, want_v: float, want_angle: float, surfac
 			while attacker.combat.is_attacking() and TimeDirector.now() - tw < 1.0:
 				await get_tree().physics_frame
 		_hits.clear()
-		attacker.combat.play_move(moves[i], victim)
+		var step: Array = moves[i]
+		if float(step[1]) < 0.0:
+			attacker.combat.play_move(step[0], victim)
+		else:
+			attacker.combat.play_charged(step[0], float(step[1]), victim)
 		var t0 := TimeDirector.now()
 		while _hits.is_empty() and TimeDirector.now() - t0 < 1.5:
 			await get_tree().physics_frame

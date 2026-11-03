@@ -1,10 +1,12 @@
 extends "res://tests/input/input_test_base.gd"
-## Round 7 reactions through the whole path (acceptance 3 with B): a real
-## button press (Input.action_press -> PlayerController -> CombatController's
-## strike, glide and hit) on a fresh grunt gives the reaction of Tuning.R7_MOVES,
+## Round 8 tap reactions through the whole path (Round 8 acceptance 2 with B;
+## rewritten from Round 7, whose taps were heavier): a real button tap
+## (Input.action_press -> PlayerController -> CombatController's strike, glide
+## and hit) on a fresh grunt gives the reaction of Tuning.R8_MOVES[move].tap,
 ## and Fighter.react plays it out: the reported state, the push (+-20%) and the
-## stun (+-0.05 s, the victim's hitstop excluded); the uppercut lifts to
-## R7_LIFT_HEIGHT and lands into a knockdown. Prints the measured numbers.
+## stun (+-0.05 s, the victim's hitstop excluded). The jab and leg kick taps
+## flinch, the gut punch tap is the quick fold, the front kick tap shoves, the
+## uppercut tap snaps the head. Prints the measured numbers.
 
 const STUN_TOL := 0.05
 const PUSH_TOL := 0.2
@@ -26,7 +28,7 @@ func run() -> void:
 	for c: Array in CASES:
 		var button: StringName = c[0]
 		var move_id: StringName = c[1]
-		var row: Dictionary = Tuning.R7_MOVES[move_id]
+		var row: Dictionary = Tuning.R8_MOVES[move_id]["tap"]
 		var at := Vector3(lane * 8.0, 0, 0)
 		lane += 1
 		p.teleport_to(at, Vector3.FORWARD)
@@ -74,15 +76,11 @@ func run() -> void:
 		check(info != null and info.move_id == move_id, "%s fires %s" % [button, move_id])
 		check(kind == want_react and info != null and info.react == want_react, "%s: reaction %s" % [move_id, want_react])
 		check(state_ok, "%s: state reported all through the reaction" % move_id)
-		if kind == &"lift":
-			check(absf(peak - Tuning.R7_LIFT_HEIGHT) <= 0.05, "%s: lifted %.2f m (want %.1f)" % [move_id, peak, Tuning.R7_LIFT_HEIGHT])
-			await ticks(2)
-			check(v.is_down() and v.get_react_state() == &"down", "%s: landed into a knockdown" % move_id)
-		else:
-			var want_push: float = row["push"]
-			var want_stun: float = row["stun"]
-			check(absf(push - want_push) <= want_push * PUSH_TOL, "%s: push %.2f m (want %.2f)" % [move_id, push, want_push])
-			check(absf(stun - want_stun) <= STUN_TOL, "%s: stun %.3f s (want %.2f)" % [move_id, stun, want_stun])
+		var want_push: float = row["push"]
+		var want_stun: float = row["stun"]
+		check(info != null and not info.charged, "%s: a tap, not a charge" % move_id)
+		check(absf(push - want_push) <= want_push * PUSH_TOL, "%s: push %.2f m (want %.2f)" % [move_id, push, want_push])
+		check(absf(stun - want_stun) <= STUN_TOL, "%s: stun %.3f s (want %.2f)" % [move_id, stun, want_stun])
 		await wait_until(func() -> bool: return p.can_act() and not p.combat.is_attacking(), 240)
 		v.queue_free()
 		await ticks(5)

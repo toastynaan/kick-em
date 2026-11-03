@@ -68,6 +68,17 @@ extends Node
 ##   (camera forward when neutral) at R7_DRIVE_TURN_RATE at most; the fighter
 ##   faces it. A breakable the driven body broke open (broken, or open along the
 ##   drive's line) does not stop the capsule: it passes through for DRIVE_PASS_TIME.
+## - Round 8 launcher jump (docs/Round 8 — Charge and Pressure.md: Air combo):
+##   start_air_follow() leaps from the ground (or a jump under way) so the
+##   player's chest reaches the lifted body's chest R8_AIR_FOLLOW_TIME later,
+##   AIR_FOLLOW_STOP short of it horizontally. The path is a cubic in time
+##   re-planned every tick from the capsule's state to the body's predicted
+##   chest at the leap's end (its arc: velocity and lift gravity), so it tracks
+##   the body; the take-off velocity is the constant-deceleration plan, which
+##   the cubic keeps exactly when the body does what was predicted. It ends
+##   rising at AIR_FOLLOW_EXIT_VY (more under a body still rising), then plain
+##   air physics and landing levels. A hang() started during an attack (B's air
+##   strikes) is not ended by strikes; a pursuit hang still is.
 
 enum Mode { GROUND, AIR, PARKOUR, WALL_RUN, HANG }
 
@@ -225,6 +236,20 @@ const DRIVE_PASS_TIME := 0.5
 ## m above the feet (x height scale) where the drive's line is tested for a hole.
 const DRIVE_PASS_HEIGHTS: Array[float] = [0.5, 0.9, 1.3]
 
+# --- Round 8 (launcher jump) -----------------------------------------------------
+## m horizontally the launcher jump stops short of the lifted body ("about 1 m in front").
+const AIR_FOLLOW_STOP := 1.0
+## m/s the launcher jump still rises at its top: about 0.15 s and 0.11 m more
+## under Tuning.PLAYER_GRAVITY, so B's first air strike (R8_AIR_FRAMES startup
+## and active) lands before the player starts to fall.
+const AIR_FOLLOW_EXIT_VY := 1.5
+## Chest bone height above the feet as a share of the fighter's height, when
+## the rig cannot be read (a ragdolling or rig-less body).
+const CHEST_SHARE := 0.7
+## m/s: a lifted body moving up or down slower than this is held (H's
+## air_hang): its arc is predicted without gravity.
+const AIR_FOLLOW_HELD_VY := 0.05
+
 var fighter: Fighter
 ## 0..1 = sprint start speed (6 m/s) .. the speed cap. Effects, camera and audio read it.
 var sprint_charge := 0.0
@@ -349,8 +374,20 @@ var _wr_step := 0.0
 ## along n): a facade of separate panels is one wall.
 var _used_walls: Array[Vector3] = []
 
-# Hang (pursuit)
+# Hang (pursuit; Round 8 air strikes)
 var _hang_until := -INF
+var _hang_keep := false           ## began during an attack (an air strike's hang): strikes do not end it
+
+# Launcher jump (Round 8)
+var air_follows := 0              ## launcher jumps started (tests, debug)
+var _af_active := false
+var _af_target: Fighter
+var _af_t := 0.0                  ## player s into the leap
+var _af_vel := Vector3.ZERO       ## planned velocity (m per player s)
+var _af_end := Vector3.ZERO       ## planned feet position at the leap's end
+var _af_end_vel := Vector3.ZERO   ## planned velocity at the leap's end
+var _af_dir := Vector3.FORWARD    ## flat direction to the body (the stop side)
+var _af_floor := 0.0              ## floor y under the take-off (the body's prediction never goes below it)
 
 # Battering Ram
 var _ram_last := {}               ## victim instance id -> real time
@@ -461,6 +498,8 @@ func on_dash_pressed() -> bool:
 		# Vault, wall run, hang: remember the hold; the sprint resumes on landing.
 		# In the air a tap is the air dash (once per airtime).
 		if _mode == Mode.AIR:
+			if _af_active:
+				return true  # the launcher jump owns the capsule: no air dash
 			if _air_speed >= _sprint_floor():
 				_set_sprinting(true)
 			_try_air_dash()
@@ -491,6 +530,8 @@ func on_jump_pressed() -> bool:
 		return false
 	if fighter.carry != null and (fighter.carry.is_held() or fighter.carry.is_holding_body()):
 		return false  # Round 7: no jump while holding a body
+	if _af_active:
+		return true  # mid launcher jump: no wall run, no buffered jump
 	var now := TimeDirector.now()
 	match _mode:
 		Mode.WALL_RUN:
@@ -514,7 +555,7 @@ func on_strike_started(sprint_strike: bool) -> void:
 	_committed = true
 	_commit_frame = Engine.get_physics_frames()
 	_air_dash_left = 0.0  # a strike cuts an air dash short
-	if _mode == Mode.HANG:
+	if _mode == Mode.HANG and not _hang_keep:
 		_end_hang(true)
 	_land_left = 0.0
 	_land_kind = &""
@@ -543,8 +584,8 @@ func on_strike_started(sprint_strike: bool) -> void:
 func begin_drop_strike() -> bool:
 	if fighter == null:
 		return false
-	if _mode == Mode.HANG or _hang_attack:
-		return false  # a pursuit follow-up is not a dropping strike
+	if _mode == Mode.HANG or _hang_attack or _af_active:
+		return false  # a pursuit follow-up (or a launcher jump's strike) is not a dropping strike
 	if _mode == Mode.PARKOUR:
 		if _pk_kind != &"vault" or _pk_p < Tuning.VAULT_ATTACK_FROM:
 			return false
@@ -569,10 +610,12 @@ func begin_drop_strike() -> bool:
 	return true
 
 ## Defence (pursuit): hold the player in the air, no gravity, for up to this
-## long or until an attack starts.
+## long or until an attack starts. Round 8: a hang that begins during an
+## attack (B's landed air strike) lasts its whole time; strikes do not end it.
 func hang(duration_real: float) -> void:
 	if fighter == null or duration_real <= 0.0:
 		return
+	_af_stop()
 	if _mode == Mode.PARKOUR:
 		_finish_parkour_tween()
 	if _mode == Mode.WALL_RUN:
@@ -582,6 +625,7 @@ func hang(duration_real: float) -> void:
 	_mode = Mode.HANG
 	_air_dash_left = 0.0
 	_hang_until = TimeDirector.now() + duration_real
+	_hang_keep = fighter.combat != null and fighter.combat.is_attacking()
 	_hang_attack = false
 	_drop_strike = false
 	_slam = false
@@ -676,6 +720,8 @@ func get_debug_text() -> String:
 		s += "  INVULN"
 	if _driving:
 		s += "  DRIVE %.2f m/s %.1fs" % [_drive_speed, _drive_t]
+	if _af_active:
+		s += "  AIR_FOLLOW %.2f" % _af_t
 	return s
 
 # --- Extra queries (agent M; H / B / E / F may use them) -------------------------
@@ -1195,6 +1241,9 @@ func _enter_air(jumped: bool) -> void:
 	_bleed_left = 0.0
 
 func _tick_air(pdt: float, factor: float, now: float) -> void:
+	if _af_active:
+		_tick_air_follow(pdt, factor, now)
+		return
 	var hv := Vector3(fighter.velocity.x, 0.0, fighter.velocity.z)
 	if _air_dash_left > 0.0 and not _drop_strike:
 		_tick_air_dash(pdt, factor, now)
@@ -1369,7 +1418,7 @@ func _tick_hang(pdt: float, factor: float, now: float) -> void:
 		_end_hang(false)
 		_tick_air(pdt, factor, now)
 		return
-	if fighter.combat != null and fighter.combat.is_attacking() and _committed:
+	if not _hang_keep and fighter.combat != null and fighter.combat.is_attacking() and _committed:
 		_end_hang(true)
 		_tick_air(pdt, factor, now)
 		return
@@ -2516,6 +2565,7 @@ func _on_ragdoll_state_changed(_old: int, new_state: int) -> void:
 
 func _interrupt(reason: StringName, keep_hang := false) -> void:
 	_cut_dodge()
+	_af_stop()
 	_driving = false  # Carry ends its side (a hit on the player ends the drive and the hold)
 	_off_floor = false
 	if _mode == Mode.WALL_RUN:
@@ -3408,3 +3458,209 @@ func _camera_forward() -> Vector3:
 			f = -cam.global_basis.z
 	f.y = 0.0
 	return f.normalized() if f.length_squared() > 1e-4 else Vector3.ZERO
+
+
+# =============================================================================
+# Round 8: the launcher jump (contract API; agent M)
+# =============================================================================
+
+## The launcher jump: leap to `target`'s height (a lifted body) in about
+## Tuning.R8_AIR_FOLLOW_TIME. H calls it on Jump when combat.get_air_follow_target()
+## is set. False if it could not start: an invalid target (dead, down, held, not
+## lifted, flat distance over R8_AIR_FOLLOW_RANGE), or a player who can't jump
+## (reacting, in hitstun, stunned, held, holding a body, in active frames,
+## wall running, vaulting, hanging, dropping, already following). A strike's
+## startup or recovery (the uppercut's) is cancelled; a hitstop only delays
+## the take-off. Emits GameEvents.air_follow_started.
+func start_air_follow(target: Fighter) -> bool:
+	if not _can_air_follow(target):
+		return false
+	var c := fighter.combat
+	if c != null and c.is_attacking():
+		c.cancel()  # the uppercut's recovery (active frames were refused above)
+	if _mode == Mode.PARKOUR:
+		_finish_parkour_tween()  # a step cut short (only steps let it start)
+	_cut_dodge()
+	_end_sprint_state()
+	_land_left = 0.0
+	_land_kind = &""
+	_air_dash_left = 0.0
+	_drop_strike = false
+	_drop_sprint = false
+	_slam = false
+	_hang_attack = false
+	var feet := fighter.global_position
+	var above := _height_above_floor()
+	_af_floor = feet.y - above if is_finite(above) else feet.y
+	_enter_air(false)  # not a jump: no air mantle, no coyote
+	_air_floor = _af_floor
+	_air_speed = 0.0
+	_free_hv = Vector3.ZERO  # the leap is not earned speed
+	_coyote_until = -INF
+	_jump_buffer_until = -INF
+	_af_active = true
+	_af_target = target
+	_af_t = 0.0
+	_af_dir = _flat_to(target.global_position, fighter.get_forward())
+	_af_plan(Tuning.R8_AIR_FOLLOW_TIME)
+	# Take-off: the constant-deceleration plan from here to the predicted end
+	# (start velocity 2 d / T - v_end), which the cubic keeps while the body
+	# does what was predicted.
+	_af_vel = 2.0 * (_af_end - feet) / Tuning.R8_AIR_FOLLOW_TIME - _af_end_vel
+	fighter.velocity = _af_vel
+	fighter.snap_facing(_af_dir)
+	_play_timed(&"air_follow", Tuning.R8_AIR_FOLLOW_TIME)  # P's leap pose, done at the top
+	air_follows += 1
+	GameEvents.air_follow_started.emit(fighter, target)
+	return true
+
+## The launcher jump is under way: true for the whole leap, from
+## start_air_follow until the player is at the body's height (E frames it).
+func is_air_following() -> bool:
+	return _af_active
+
+## The body the launcher jump is following (null when none).
+func get_air_follow_target() -> Fighter:
+	return _af_target if _af_active and is_instance_valid(_af_target) else null
+
+func _can_air_follow(target: Fighter) -> bool:
+	if fighter == null or target == null or not is_instance_valid(target) or target == fighter:
+		return false
+	if _af_active or not target.is_inside_tree():
+		return false
+	if target.is_dead() or target.is_down() or target.is_held() or not target.is_lifted():
+		return false
+	var to := target.global_position - fighter.global_position
+	if Vector2(to.x, to.z).length() > Tuning.R8_AIR_FOLLOW_RANGE:
+		return false
+	if fighter.is_dead() or fighter.is_down() or fighter.is_held():
+		return false
+	if fighter.ragdoll != null and fighter.ragdoll.is_simulating():
+		return false
+	if fighter.is_reacting() or fighter.is_in_hitstun():
+		return false
+	if fighter.carry != null and (fighter.carry.is_held() or fighter.carry.is_holding_body() \
+			or fighter.carry.is_busy()):
+		return false
+	var c := fighter.combat
+	if c != null and (c.is_stunned() or c.is_attack_active()):
+		return false
+	if _driving:
+		return false
+	match _mode:
+		Mode.WALL_RUN, Mode.HANG:
+			return false
+		Mode.PARKOUR:
+			return _pk_kind == &"step"
+		Mode.AIR:
+			return not _drop_strike and not _slam
+	return true
+
+## One tick of the leap: re-plan the cubic from the capsule's position and
+## velocity to the predicted end, step along it, face the body.
+func _tick_air_follow(pdt: float, factor: float, now: float) -> void:
+	var total := Tuning.R8_AIR_FOLLOW_TIME
+	var tau := maxf(total - _af_t, 1e-4)
+	var s := minf(pdt, tau)
+	_af_plan(tau)
+	var p0 := fighter.global_position
+	var v0 := _af_vel
+	var d := _af_end - p0
+	var a := (3.0 * d - (2.0 * v0 + _af_end_vel) * tau) / (tau * tau)
+	var b := (-2.0 * d + (v0 + _af_end_vel) * tau) / (tau * tau * tau)
+	var disp := v0 * s + a * (s * s) + b * (s * s * s)
+	var v1 := v0 + 2.0 * a * s + 3.0 * b * (s * s)
+	fighter.velocity = disp / pdt * factor
+	fighter.move_and_slide()
+	if fighter.is_on_ceiling():
+		v1.y = minf(v1.y, 0.0)
+	_af_vel = v1
+	fighter.velocity = v1
+	_af_t += s
+	_air_top = maxf(_air_top, fighter.global_position.y)
+	var tgt := get_air_follow_target()
+	if tgt != null:
+		var face := _flat_to(tgt.global_position, Vector3.ZERO)
+		if face != Vector3.ZERO:
+			fighter.snap_facing(face)
+	if _af_t >= total - 1e-5:
+		_af_finish()
+	elif fighter.is_on_floor() and v1.y <= 0.0 and _af_t > total * 0.5:
+		# The body came down before the leap ended: land with it.
+		_af_finish()
+		_land(maxf(-v1.y, 0.0), now)
+
+## The leap's end (feet) and velocity there, from the body's arc
+## Tuning.R8_AIR_FOLLOW_TIME after take-off (`tau` from now). A target that is
+## gone, down or no longer lifted keeps the last plan.
+func _af_plan(tau: float) -> void:
+	var t := _af_target
+	if t == null or not is_instance_valid(t) or t.is_down() or t.is_held() or not t.is_lifted():
+		return
+	var factor := fighter.own_time_factor()
+	# The body moves in its own time: per player second it covers
+	# own_time_factor (its) / own_time_factor (ours) of its velocity.
+	var k := t.own_time_factor() / factor
+	var vb := t.velocity * k
+	var gb := _lift_gravity(t) * k * k
+	var ab := Vector3.ZERO
+	if absf(vb.y) > AIR_FOLLOW_HELD_VY:
+		ab.y = -gb
+	var feet_end := t.global_position + vb * tau + 0.5 * ab * tau * tau
+	var vel_end := vb + ab * tau
+	if feet_end.y < _af_floor:
+		feet_end.y = _af_floor  # it lands first: meet it on the floor
+		vel_end.y = 0.0
+	var dir := _flat_to(feet_end, _af_dir)
+	_af_dir = dir
+	var end := feet_end - dir * AIR_FOLLOW_STOP
+	end.y = feet_end.y + _chest_height(t) - _chest_height(fighter)
+	end.y = maxf(end.y, _af_floor)
+	_af_end = end
+	# Exit rising: at least AIR_FOLLOW_EXIT_VY; under a body still rising, fast
+	# enough to peak where it peaks (v x sqrt(our gravity / its gravity)).
+	var vy := AIR_FOLLOW_EXIT_VY
+	if vel_end.y > 0.0 and gb > 0.0:
+		vy = maxf(vy, vel_end.y * sqrt(Tuning.PLAYER_GRAVITY / gb))
+	_af_end_vel = Vector3(vel_end.x, vy, vel_end.z)
+
+## End the leap in the air: plain air physics from the planned velocity.
+func _af_finish() -> void:
+	if not _af_active:
+		return
+	_af_active = false
+	_af_target = null
+	_mode = Mode.AIR
+	_jumping = false
+	var hv := Vector3(_af_vel.x, 0.0, _af_vel.z)
+	_free_hv = hv
+	_air_speed = hv.length()
+	if hv.length_squared() > 1e-4:
+		_heading = hv.normalized()
+	fighter.velocity = _af_vel
+	fighter.face_dir = fighter.get_forward()  # keep facing the body after the leap
+
+## Drop the leap (a hit, a hang, a teleport): whoever takes over sets the motion.
+func _af_stop() -> void:
+	_af_active = false
+	_af_target = null
+
+## m/s^2 of a lifted body's arc in its own time (Fighter's lift gravity, from
+## Tuning.R7_LIFT_HEIGHT / R7_LIFT_PEAK_TIME unless the body reports its own).
+func _lift_gravity(t: Fighter) -> float:
+	var g = t.get(&"_lift_g")
+	if typeof(g) == TYPE_FLOAT and g > 0.0:
+		return g
+	return 2.0 * Tuning.R7_LIFT_HEIGHT / (Tuning.R7_LIFT_PEAK_TIME * Tuning.R7_LIFT_PEAK_TIME)
+
+## m from a fighter's feet up to its chest bone (its pose as it is now).
+func _chest_height(f: Fighter) -> float:
+	if f.rig != null and f.rig.is_inside_tree() and not f.is_body_simulating():
+		return f.rig.get_bone_global_position(Bones.CHEST).y - f.global_position.y
+	return f.get_height() * CHEST_SHARE
+
+## Flat unit direction from the player to `pos` (`fallback` when right above).
+func _flat_to(pos: Vector3, fallback: Vector3) -> Vector3:
+	var to := pos - fighter.global_position
+	to.y = 0.0
+	return to.normalized() if to.length_squared() > 1e-4 else fallback

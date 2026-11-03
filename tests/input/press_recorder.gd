@@ -30,3 +30,17 @@ func pairs() -> Array:
 	for e: Array in calls:
 		out.append([e[0], e[1]])
 	return out
+
+# --- Round 8 doubles: what PlayerController reads from B ---------------------------
+var follow_target: Fighter = null   ## get_air_follow_target()
+var charging := false               ## is_charging()
+var charge_target: Fighter = null   ## get_charge_target()
+
+func get_air_follow_target() -> Fighter:
+	return follow_target
+
+func is_charging() -> bool:
+	return charging
+
+func get_charge_target() -> Fighter:
+	return charge_target

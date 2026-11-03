@@ -73,6 +73,13 @@ var chain_index := 0                 ## 1-based hit number in the attacker's cha
 var counter := false                 ## the counter move
 var drive := false                   ## a drive slam / bowl / break (Carry)
 
+# Round 8 (Charge and pressure).
+var charged := false                 ## a charged strike (false = a tap or not a Round 8 strike)
+var charge := 0.0                    ## c at the release, 0..1 (charged strikes)
+var pressure := 0.0                  ## pressure this hit added to the victim (after multipliers)
+var broken_bonus := false            ## the victim was broken open: x R8_BREAK_DAMAGE_MULT / PUSH_MULT applied
+var air := false                     ## an air strike (air combo)
+
 static func tier_name(t: int) -> StringName:
 	return TIER_NAMES.get(t, &"none")
 

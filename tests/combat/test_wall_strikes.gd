@@ -3,7 +3,8 @@ extends "res://tests/combat/combat_test_base.gd"
 ## receive_strike on the wall under the striking limb, once per move, with no
 ## target in reach (the strike goes along the facing). Round 7: power =
 ## CombatController.WALL_POWER_PER_WEIGHT x the move's R7 weight (a front kick
-## 62, about Round 3's 60); the floor is never struck; a fighter in reach wins;
+## 62, about Round 3's 60; Round 8: a charged strike's own weight at its c when
+## that is more); the floor is never struck; a fighter in reach wins;
 ## the feel (no whiff, no chain credit, recoil off a wall that holds).
 
 const FakeWall := preload("res://tests/combat/fake_wall.gd")
@@ -37,9 +38,13 @@ func _strike(p: Fighter, action: int, hold := 0.0) -> void:
 func run() -> void:
 	var per := CombatController.WALL_POWER_PER_WEIGHT
 	var w := func(id: StringName) -> float: return per * float(Tuning.R7_MOVES[id]["weight"])
+	# A roundhouse held 0.6 s charges to c = (0.6 - R8_TAP_MAX) / (debug_charge_full - R8_TAP_MAX).
+	var hold_c := (0.6 - Tuning.R8_TAP_MAX) / (Tuning.debug_charge_full - Tuning.R8_TAP_MAX)
+	var rw: Vector2 = Tuning.R8_MOVES[&"roundhouse"]["charged"]["weight"]
+	var charged_rh := per * maxf(float(Tuning.R7_MOVES[&"roundhouse"]["weight"]), lerpf(rw.x, rw.y, hold_c))
 	print("power per move (%.0f x weight)" % per)
 	var cases := [["jab", L, 0.0, w.call(&"jab")], ["front kick", K, 0.0, w.call(&"front_kick")],
-		["heavy roundhouse (held)", CombatController.Action.ROUNDHOUSE, 0.3, w.call(&"heavy_roundhouse")]]
+		["charged roundhouse (held 0.6 s)", CombatController.Action.ROUNDHOUSE, 0.6, charged_rh]]
 	for c: Array in cases:
 		var lw: Array = await _wall_lane(0.75)
 		var p: Fighter = lw[0]
@@ -51,7 +56,8 @@ func run() -> void:
 			continue
 		var rc: Array = wall.calls[0]
 		check(rc[0] == p, "%s: attacker is the player" % c[0])
-		check(is_equal_approx(rc[3], c[3]), "%s: power %.1f (want %.1f)" % [c[0], rc[3], c[3]])
+		check(absf(float(rc[3]) - float(c[3])) <= per * 0.03 if String(c[0]).begins_with("charged") else is_equal_approx(rc[3], c[3]),
+			"%s: power %.1f (want %.1f)" % [c[0], rc[3], c[3]])
 		var hp: Vector3 = rc[1]
 		check(absf(hp.z - (-0.75)) < 0.12 and absf(hp.x - _x) < 0.6, "%s: hit point on the wall face %s" % [c[0], hp])
 		check((rc[2] as Vector3).dot(Vector3.FORWARD) > 0.9, "%s: direction into the wall" % c[0])

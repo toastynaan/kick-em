@@ -1,17 +1,19 @@
 extends "res://tests/combat/combat_test_base.gd"
 ## Round 7 acceptance check 1 (docs/Round 7 — Freeflow Combat.md: Controls,
-## Moves), through the real input path (Input.action_press -> PlayerController
+## Moves), rewritten for Round 8 (docs/Round 8 — Charge and Pressure.md:
+## Charge), through the real input path (Input.action_press -> PlayerController
 ## -> InputInterpreter -> CombatController):
 ## - each button fires its move: punch (LMB) the jab, leg_kick (RMB), gut_punch
 ##   (Q), uppercut (E), front_kick (F), roundhouse (R); counter (Space) inside
 ##   an enemy's counter window plays the counter;
-## - LMB tapped counts jab -> cross -> hook and wraps; held it gives the heavy of
-##   that position; a heavy's startup counts from the press; a tap fires on its
-##   own frame data;
+## - LMB tapped counts jab -> cross -> hook and wraps; held (past R8_TAP_MAX) it
+##   charges that position's punch; every one of the eight strikes charges when
+##   held (input and press()/release()); a tap fires on its own frame data; a
+##   charged strike goes active R8_RELEASE_STARTUP frames after its release;
 ## - the string resets to the jab on a whiff and on a dropped chain.
 
 const PRESS := 0.05   ## s a tap holds the button
-const HOLD := 0.3     ## s a hold holds it (past Tuning.R7_HOLD_THRESHOLD)
+const HOLD := 0.35    ## s a hold holds it (past Tuning.R8_TAP_MAX: a charge)
 
 var _p: Fighter
 var _moves: Array[StringName] = []
@@ -22,10 +24,11 @@ func _init() -> void:
 
 func run() -> void:
 	_p = spawn_player(Vector3.ZERO)
-	# The move each press became (attack_active: a held punch has turned into its heavy by then).
+	# The move each press became (attack_active), with "+" for a charged one.
 	_p.combat.attack_active.connect(func(id: StringName) -> void:
-		_active_at[id] = TimeDirector.now()
-		_moves.append(id))
+		var tag := StringName(String(id) + ("+" if _p.combat.get_strike_debug()["charged"] else ""))
+		_active_at[tag] = TimeDirector.now()
+		_moves.append(tag))
 	await ticks(20)
 
 	print("each button fires its move (no enemy near: they whiff along the facing)")
@@ -56,55 +59,63 @@ func run() -> void:
 	await ticks(15)
 
 	await _idle()
-	var want: Array[StringName] = [&"jab", &"heavy_cross", &"hook", &"jab", &"cross", &"heavy_hook"]
+	var want: Array[StringName] = [&"jab", &"cross+", &"hook", &"jab", &"cross", &"hook+"]
 	_moves.clear()
 	for id: StringName in want:
-		await _press_in_chain(id.begins_with("heavy"))
+		await _press_in_chain(String(id).ends_with("+"))
 	await _idle()
-	print("  pressed tap, hold, tap, tap, tap, hold -> %s" % [_moves])
-	check(_moves == want, "LMB string: jab, heavy cross, hook, then wraps to jab, cross, heavy hook")
+	print("  pressed tap, hold, tap, tap, tap, hold -> %s (+ = charged)" % [_moves])
+	check(_moves == want, "LMB string: jab, charged cross, hook, then wraps to jab, cross, charged hook")
 	var lands := hits_on(g)
 	check(lands.size() == want.size(), "every one of them landed on the grunt (%d)" % lands.size())
+	check(lands.size() == want.size() and lands.map(func(h: HitInfo) -> bool: return h.charged) == [false, true, false, false, false, true],
+		"HitInfo.charged on the held ones only")
 
-	print("hold for heavy: the punch and the three kicks, through the input path and press()/release()")
+	print("hold to charge: every strike, through the input path and press()/release()")
 	var plain := spawn_dummy_player()
 	await ticks(10)
-	for spec: Array in [[&"punch", A.LIGHT, &"heavy_jab"], [&"leg_kick", A.LEG_KICK, &"heavy_leg_kick"],
-			[&"front_kick", A.FRONT_KICK, &"heavy_front_kick"], [&"roundhouse", A.ROUNDHOUSE, &"heavy_roundhouse"]]:
+	for spec: Array in [[&"punch", A.LIGHT, &"jab"], [&"leg_kick", A.LEG_KICK, &"leg_kick"],
+			[&"gut_punch", A.GUT_PUNCH, &"gut_punch"], [&"uppercut", A.UPPERCUT, &"uppercut"],
+			[&"front_kick", A.FRONT_KICK, &"front_kick"], [&"roundhouse", A.ROUNDHOUSE, &"roundhouse"]]:
 		await _fresh_chain()
 		_moves.clear()
+		clear_events()
 		Input.action_press(spec[0])
 		await wait_real(HOLD)
 		Input.action_release(spec[0])
 		await wait_until(func() -> bool: return not _moves.is_empty(), 1.0)
-		check(_moves.size() == 1 and _moves[0] == spec[2], "%s held %.2f s (input): %s (%s)" % [spec[0], HOLD, spec[2], _moves])
+		var cs: Array = events_of(&"charge_started")
+		check(_moves.size() == 1 and _moves[0] == StringName(String(spec[2]) + "+") and cs.size() == 1 and cs[0][2] == spec[2],
+			"%s held %.2f s (input): a charged %s (%s)" % [spec[0], HOLD, spec[2], _moves])
 		await _fresh_chain()
-		var got: Array[StringName] = []
-		var cb := func(id: StringName) -> void: got.append(id)
+		var got: Array = []
+		var cb := func(id: StringName) -> void: got.append([id, plain.combat.get_strike_debug()["charged"]])
 		plain.combat.attack_active.connect(cb)
 		plain.combat.press(spec[1])
-		await wait_real(0.35)
+		await wait_real(HOLD)
 		plain.combat.release(spec[1])
 		await wait_until(func() -> bool: return not got.is_empty(), 1.0)
 		plain.combat.attack_active.disconnect(cb)
-		check(got.size() == 1 and got[0] == spec[2], "press()/release() held 0.35 s on a player with no PlayerController: %s (%s)" % [spec[2], got])
+		check(got.size() == 1 and got[0][0] == spec[2] and got[0][1],
+			"press()/release() held %.2f s on a player with no PlayerController: a charged %s (%s)" % [HOLD, spec[2], got])
 		await wait_until(func() -> bool: return not plain.combat.is_attacking(), 2.0)
 	plain.queue_free()
 
-	print("startup timing: a tap fires on its frame data, a heavy's startup counts from the press")
+	print("startup timing: a tap fires on its frame data, a charged strike R8_RELEASE_STARTUP after its release")
 	g.queue_free()
 	await _fresh_chain()
 	var t0 := await _press_timed(false)
 	var tap_su := float(_active_at.get(&"jab", INF)) - t0
 	await _idle()
 	await _fresh_chain()
-	var t1 := await _press_timed(true)
-	var heavy_su := float(_active_at.get(&"heavy_jab", INF)) - t1
-	print("  jab tap: active %.3f s after the press (%.3f); heavy jab hold: %.3f s (%.3f)" % [tap_su,
-		Tuning.frames(7), heavy_su, Tuning.frames(20)])
-	check(absf(tap_su - Tuning.frames(Tuning.R7_MOVES[&"jab"]["f"].x)) <= 0.011, "the tapped jab's startup is its own")
-	check(absf(heavy_su - Tuning.frames(Tuning.R7_MOVES[&"heavy_jab"]["f"].x)) <= 0.011,
-		"the heavy jab's startup counts from the press (not after the %.1f s hold)" % Tuning.R7_HOLD_THRESHOLD)
+	await _press_timed(true)
+	var t_rel := first_time(&"charge_released")
+	var charged_su := float(_active_at.get(&"jab+", INF)) - t_rel
+	print("  jab tap: active %.3f s after the press (%.3f); charged jab: active %.3f s after the release (%.3f)" % [tap_su,
+		Tuning.frames(7), charged_su, Tuning.frames(Tuning.R8_RELEASE_STARTUP)])
+	check(absf(tap_su - Tuning.frames(Tuning.R8_MOVES[&"jab"]["tap"]["f"].x)) <= 0.011, "the tapped jab's startup is its own")
+	check(absf(charged_su - Tuning.frames(Tuning.R8_RELEASE_STARTUP)) <= 0.011,
+		"the charged jab goes active R8_RELEASE_STARTUP after its release (no target: no glide)")
 
 	print("the string resets on a whiff and on a dropped chain")
 	await _idle()
@@ -168,9 +179,11 @@ func _press_timed(hold: bool) -> float:
 	var at := [INF]
 	var cb := func(_id: StringName) -> void: at[0] = minf(at[0], TimeDirector.now())
 	_p.combat.attack_started.connect(cb)
+	clear_events()
 	Input.action_press(&"punch")
 	await wait_real(HOLD if hold else PRESS)
 	Input.action_release(&"punch")
+	await ticks(1)
 	await wait_until(func() -> bool: return _p.combat.is_attack_active() or not _p.combat.is_attacking(), 1.0)
 	_p.combat.attack_started.disconnect(cb)
 	return at[0]

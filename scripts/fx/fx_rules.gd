@@ -260,3 +260,69 @@ static func forward_of(f: Node3D) -> Vector3:
 		v = f.call(&"get_forward") if f.has_method(&"get_forward") else -f.global_basis.z
 	v.y = 0.0
 	return v.normalized() if v.length_squared() > 1e-6 else Vector3.FORWARD
+
+
+# =============================================================================
+# Round 8: Charge and pressure (docs/Round 8 — Charge and Pressure.md). The
+# charge glow and hum follow the charge amount c; pressure and the break are
+# read from the victim's CombatController. Every read is duck-typed so a
+# CombatController mid-rewrite (or the contract stub) never stops the effects.
+# =============================================================================
+
+## The fighter's CombatController (its `combat` member), or null.
+static func combat_of(f: Node) -> Object:
+	if f == null or not is_instance_valid(f):
+		return null
+	var c = f.get(&"combat")
+	return c if c is Object and is_instance_valid(c) else null
+
+## A bool query on a fighter's CombatController: 1 true, 0 false, -1 when it
+## has no such method.
+static func combat_flag(f: Node, method: StringName) -> int:
+	var c := combat_of(f)
+	if c == null or not c.has_method(method):
+		return -1
+	return 1 if c.call(method) else 0
+
+## The doc's charge ramp `t` real s after charge_started (which B emits at
+## R8_TAP_MAX): 0 there, 1 at Tuning.debug_charge_full s after the press.
+static func charge_ramp(t: float) -> float:
+	return clampf(t / maxf(Tuning.debug_charge_full - Tuning.R8_TAP_MAX, 0.05), 0.0, 1.0)
+
+## Charge amount c (0..1) of a charging fighter: CombatController.get_charge()
+## while it reports is_charging(); else the doc's ramp from the real time `t`
+## since charge_started (a CombatController that does not report it yet).
+static func charge_amount(f: Node, t: float) -> float:
+	var c := combat_of(f)
+	if c != null and c.has_method(&"is_charging") and c.call(&"is_charging") and c.has_method(&"get_charge"):
+		return clampf(float(c.call(&"get_charge")), 0.0, 1.0)
+	return charge_ramp(t)
+
+## Pressure fraction (0..1) of a fighter's CombatController (0 when unknown).
+static func pressure_fraction(f: Node) -> float:
+	var c := combat_of(f)
+	if c == null or not c.has_method(&"get_pressure_fraction"):
+		return 0.0
+	return clampf(float(c.call(&"get_pressure_fraction")), 0.0, 1.0)
+
+## A Round 8 charged strike: HitInfo.charged, c = HitInfo.charge.
+static func is_charged(info: HitInfo) -> bool:
+	return info != null and info.charged
+
+## The upper body of a fighter (the chest), for the break burst.
+static func upper_body(f: Node3D) -> Vector3:
+	if f == null or not is_instance_valid(f):
+		return Vector3.ZERO
+	var rig = f.get(&"rig")
+	if rig is Node3D and is_instance_valid(rig) and (rig as Node3D).has_method(&"get_bone_global_position"):
+		return rig.call(&"get_bone_global_position", Bones.CHEST)
+	return f.global_position + Vector3.UP * 1.35
+
+## The head of a fighter (the dazed loop orbits above it).
+static func head_of(f: Node3D) -> Vector3:
+	if f == null or not is_instance_valid(f):
+		return Vector3.ZERO
+	var rig = f.get(&"rig")
+	if rig is Node3D and is_instance_valid(rig) and (rig as Node3D).has_method(&"get_bone_global_position"):
+		return rig.call(&"get_bone_global_position", Bones.HEAD)
+	return f.global_position + Vector3.UP * 1.72

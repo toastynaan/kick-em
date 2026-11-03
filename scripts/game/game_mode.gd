@@ -18,6 +18,12 @@ extends Node3D
 ##   logged (get_persistence_report()). Round 6 adds clutter, collapses and floor.
 ## - The player's upgrades are the pause menu's Debug settings (Tuning.debug_*,
 ##   loaded from user://settings.cfg at start; every reader takes them live).
+##   Waves use them as they are. Round 8: the Duel plays fully upgraded: its
+##   start sets the player's own values aside and applies every upgrade at
+##   Tuning.R8_UPGRADE_MAX (GameMenus.apply_max_upgrades, before the fighters
+##   spawn); the round's end, leaving the Duel (teardown, the title, a lab) or
+##   this node leaving the tree puts them back. A restart rebuilds the Duel at
+##   max. Saves never write the max (GameMenus.save_debug_settings).
 ## - Results: kills, time, the biggest single hit (damage, move, reaction) and
 ##   the destruction counts.
 ## Restart (Backspace / Back, the pause menu, the results) and "main menu"
@@ -145,6 +151,11 @@ func _ready() -> void:
 	elif show_title:
 		_show_title()
 
+## A reload (restart, main menu), a lab or a test freeing this node: never
+## leave the Duel's max upgrades applied behind it.
+func _exit_tree() -> void:
+	GameMenus.restore_own_upgrades()
+
 # --- Public API -------------------------------------------------------------------
 ## &"duel" (1v1 vs Duelist) or &"waves" (endless waves in The Yard).
 ## Idempotent: a running or finished round is torn down first (fighters,
@@ -153,6 +164,8 @@ func _ready() -> void:
 func start_round(round_mode: StringName) -> void:
 	_teardown_round(not _arena_used)
 	mode = round_mode if round_mode in [&"duel", &"waves"] else &"duel"
+	if mode == &"duel":
+		GameMenus.apply_max_upgrades()  # Round 8: the Duel is fully upgraded (restored at the end)
 	_ensure_arena()
 	_arena_used = true
 	fighters_root = Node3D.new()
@@ -210,6 +223,7 @@ func start_round(round_mode: StringName) -> void:
 ## round; pending _after() callbacks are invalidated by bumping _gen.
 func _teardown_round(keep_arena: bool) -> void:
 	_gen += 1
+	GameMenus.restore_own_upgrades()  # leaving a Duel: the player's own upgrades again
 	get_tree().paused = false
 	menus.hide_all()
 	menus.can_pause = false
@@ -698,6 +712,7 @@ func _end_round(won: bool) -> void:
 	phase = Phase.ENDING
 	_won = won
 	_round_time = TimeDirector.now() - _round_started_at
+	GameMenus.restore_own_upgrades()  # the Duel's max ends with the round
 	if camera_rig:
 		camera_rig.input_enabled = false  # no camera input once the round is decided
 	_wave_queue.clear()

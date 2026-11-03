@@ -26,6 +26,19 @@ extends Node
 ## hit (auto_face: the same Targeting.pick_freeflow_target pick B makes).
 ## Removed in Round 7: crouch, Focus mode, block, lock-on (strafing, turn
 ## caps), zone aiming.
+##
+## Round 8 (docs/Round 8 — Charge and Pressure.md):
+## - Charging is CombatController's: a held strike button stays held here (only
+##   its real release reaches combat.release()). While combat.is_charging(), the
+##   stick walks but does not turn the body: it tracks the target B picked at
+##   the press (combat.get_charge_target(); B also faces it in its own charge
+##   tick, which runs after this); with no target the stick turns it as usual.
+## - Jump with combat.get_air_follow_target() set (or right after the current
+##   charged uppercut's hit lifted a body) is the launcher jump
+##   (traversal.start_air_follow). If Traversal cannot start it yet (the
+##   uppercut's active frames or hitstop), the press waits and retries every
+##   tick until it starts or Tuning.R8_AIR_FOLLOW_WINDOW runs out, with no
+##   normal jump meanwhile. With no body to follow, Jump is a normal jump.
 
 const STICK_DEADZONE := 0.15
 ## Player s a jump press waits for the fighter to be able to jump (landing
@@ -56,6 +69,8 @@ var interpreter: InputInterpreter
 
 var _layered := {}  ## raw action -> the action its accepted press resolved to (kick layer)
 var _jump_until := -INF  ## interpreter clock until which a buffered jump may fire
+var _follow_body: Fighter = null  ## Round 8: a launcher jump waiting to start (the uppercut's active frames, hitstop)
+var _follow_until := -INF         ## interpreter clock after which that press is dropped
 
 func _ready() -> void:
 	fighter = get_parent() as Fighter
@@ -85,20 +100,26 @@ func _physics_process(delta: float) -> void:
 				c.release(a)  # nothing stays held while input is off
 		_layered.clear()
 		_jump_until = -INF
+		_follow_body = null
 		return
 	var stick := get_stick_world()
 	fighter.move_input = stick
-	if stick.length() > STICK_DEADZONE:
+	if c.is_charging():
+		_face_charge_target(stick)
+	elif stick.length() > STICK_DEADZONE:
 		fighter.face_dir = stick.normalized()
 	# Jump first: attacks on this tick see the take-off.
 	var holding_body := fighter.carry != null and fighter.carry.is_holding_body()
 	for ev in events:
 		if ev.pressed and ev.action == &"jump" and not _layered_now(ev.action) and not holding_body:
 			_jump_until = -INF
-			if fighter.traversal != null and fighter.traversal.on_jump_pressed():
+			if _air_follow_press():
+				pass  # the launcher jump to the lifted body (Traversal): started or waiting
+			elif fighter.traversal != null and fighter.traversal.on_jump_pressed():
 				pass  # Traversal took it
 			elif not fighter.is_traversal_driving():
 				_jump_until = interpreter.now() + JUMP_BUFFER
+	_retry_air_follow()
 	if _jump_until >= interpreter.now() and not holding_body and fighter.jump():
 		_jump_until = -INF
 	for ev in events:
@@ -154,6 +175,83 @@ func _face(dir: Vector3) -> void:
 	if dir.length_squared() < 1e-4:
 		return
 	fighter.snap_facing(dir)
+
+# --- Round 8 ----------------------------------------------------------------------
+## A Jump press right after a charged uppercut's lift: the launcher jump to
+## the lifted body. true when the press is taken for it (the leap started, or
+## waits for the uppercut's active frames and hitstop to end: _retry_air_follow
+## tries every tick); false when there is no body to follow (a normal jump).
+func _air_follow_press() -> bool:
+	if fighter.traversal == null:
+		return false
+	var t := _air_follow_target()
+	if t == null:
+		return false
+	_follow_body = t
+	_follow_until = interpreter.now() + Tuning.R8_AIR_FOLLOW_WINDOW
+	_retry_air_follow()
+	return true
+
+## The waiting launcher jump: start it as soon as Traversal accepts (the
+## uppercut's active frames are over); drop it once there is no body to follow
+## any more (CombatController's follow window ran out, the body landed) or
+## R8_AIR_FOLLOW_WINDOW after the press.
+func _retry_air_follow() -> void:
+	if _follow_body == null:
+		return
+	var t := _air_follow_target()
+	if t == null or interpreter.now() > _follow_until:
+		_follow_body = null
+		return
+	_follow_body = t
+	if fighter.traversal.start_air_follow(t):
+		_follow_body = null
+
+## The body a Jump would follow: combat.get_air_follow_target(), else the body
+## the current charged uppercut's hit has just lifted (its active frames or
+## hitstop, before B's window opens), else null. Only a body still lifted.
+func _air_follow_target() -> Fighter:
+	var c := fighter.combat
+	var t := c.get_air_follow_target()
+	if t != null and is_instance_valid(t) and _followable(t):
+		return t
+	var hit := c.last_dealt
+	if hit == null or not c.is_attacking() or c.current_move_id() != &"uppercut":
+		return null
+	if not hit.charged or hit.react != &"lift" or not is_instance_valid(hit.victim) or not (hit.victim is Fighter):
+		return null
+	var v := hit.victim as Fighter
+	return v if _followable(v) else null
+
+static func _followable(f: Fighter) -> bool:
+	return f.is_lifted() and not f.is_dead() and not f.is_down() and not f.is_held()
+
+## While a strike charges, the body turns (at its normal turn rate; B's
+## can_turn() decides) toward the target B picked at the press; with no target
+## the stick turns it as usual.
+func _face_charge_target(stick: Vector3) -> void:
+	var t := get_charge_target()
+	if t != null:
+		var d := t.get_ground_position() - fighter.global_position
+		d.y = 0.0
+		if d.length_squared() > 1e-4:
+			fighter.face_dir = d.normalized()
+			return
+	if stick.length() > STICK_DEADZONE:
+		fighter.face_dir = stick.normalized()
+
+## The target the charging strike tracks: combat.get_charge_target() (null
+## when not charging, none, or B does not expose it: B's own charge tick then
+## does the facing).
+func get_charge_target() -> Fighter:
+	var c := fighter.combat
+	if c == null or not c.is_charging() or not c.has_method(&"get_charge_target"):
+		return null
+	var v: Variant = c.call(&"get_charge_target")
+	if v == null or not is_instance_valid(v) or not (v is Fighter):
+		return null
+	var t := v as Fighter
+	return null if t.is_dead() else t
 
 ## Stick/WASD direction in world XZ (camera-relative), length 0..1.
 func get_stick_world() -> Vector3:

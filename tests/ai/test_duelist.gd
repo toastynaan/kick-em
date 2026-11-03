@@ -7,12 +7,15 @@ extends Node
 ##    tapped punches, and he never parries (no GameEvents.parried with him as
 ##    defender) and never teleports (no &"counter" tell, no jump in position,
 ##    combat.start_counter never used);
-## 2. answers a broken guard with a quick hook (e_hook): a guard breaker (the
-##    gut punch through the real input when B lands it, else a guard-breaking
-##    hit through Fighter.take_hit) gets through his raised guard, and once he
-##    can act again an e_hook starts within ANSWER_LIMIT s; he never starts it
-##    while reacting or in hitstun;
+## 2. answers a broken guard with a quick hook (e_hook): a guard breaker (Round
+##    8: a charged gut punch, held CHARGE_HOLD s, through the real press and
+##    release; else a guard-breaking hit through Fighter.take_hit) gets through
+##    his raised guard, and once he can act again an e_hook starts within
+##    ANSWER_LIMIT s; he never starts it while reacting or in hitstun;
 ## 3. punishes a whiffed strike and a whiffed Counter with an e_kick within 1 s.
+## Round 8: every hit fills his pressure meter (blocked ones too), and under
+## pressure he backs off instead of answering; each step starts with his
+## meter drained (_wait_idle), as a fresh Duelist.
 ## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
@@ -20,6 +23,9 @@ const Util := preload("res://tests/ai/ai_test_util.gd")
 const ANSWER_LIMIT := 1.0
 ## m: a jump of the Duelist's position in one tick larger than this is a teleport.
 const TELEPORT_JUMP := 0.6
+## s the gut punch is held: past Tuning.R8_TAP_MAX, a charged strike (Round 8:
+## only charged strikes break a guard), far from full (no outright pressure break).
+const CHARGE_HOLD := 0.35
 
 var failures := 0
 var player: Fighter
@@ -213,12 +219,12 @@ func _physics_process(_delta: float) -> void:
 ## a read (his guard up). Returns the path used.
 func _break_guard() -> String:
 	var b0 := brain.guard_breaks
-	await _press(CombatController.Action.GUT_PUNCH)
+	await _press(CombatController.Action.GUT_PUNCH, CHARGE_HOLD)
 	var t0 := Util.game_now()
-	while Util.game_now() - t0 < 0.6 and brain.guard_breaks == b0:
+	while Util.game_now() - t0 < 0.8 and brain.guard_breaks == b0:
 		await get_tree().physics_frame
 	if brain.guard_breaks > b0:
-		return "real gut punch"
+		return "real charged gut punch"
 	# Fallback: the read (as B's attack_incoming would send it), then a hit B's
 	# guard cannot stop.
 	await _wait_idle()
@@ -244,16 +250,25 @@ func _break_guard() -> String:
 	duelist.take_hit(info)
 	return "guard-break hit (guard up %s)" % up
 
-func _press(action: int) -> void:
+## Press `action` and release it after one tick (a tap) or `hold` s (charged).
+func _press(action: int, hold := 0.0) -> void:
 	_face(player, duelist)
 	player.combat.press(action)
 	await get_tree().physics_frame
+	var t0 := Util.game_now()
+	while Util.game_now() - t0 < hold:
+		_face(player, duelist)
+		_keep_player()
+		await get_tree().physics_frame
 	player.combat.release(action)
 
+## Both idle and the Duelist's pressure meter drained (Round 8: under
+## pressure he backs off, broken he does nothing).
 func _wait_idle() -> void:
 	var tw := Util.game_now()
 	while (duelist.combat.is_attacking() or not duelist.can_act() or duelist.is_down() or player.is_down()
-			or player.is_in_hitstun() or not player.can_act()) and Util.game_now() - tw < 5.0:
+			or player.is_in_hitstun() or not player.can_act() or duelist.combat.get_pressure() > 0.0
+			or duelist.combat.is_broken()) and Util.game_now() - tw < 8.0:
 		_keep_player()
 		await get_tree().physics_frame
 	brain._guard_until = 0.0

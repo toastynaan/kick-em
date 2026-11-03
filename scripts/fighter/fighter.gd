@@ -44,6 +44,20 @@ extends CharacterBody3D
 ## - Removed from the player: Focus mode and the Focus meter (focus reads 0,
 ##   add_focus / spend_focus are no-ops while callers remain), crouch, lock-on
 ##   strafing and zone aiming.
+##
+## Round 8 (agent H, docs/Round 8 — Charge and Pressure.md):
+## - react() kinds: flinch (a physical kick on the struck bone through
+##   RagdollController.limp_chain, a short stun and a small slide; the body
+##   stays animated and in control, so it walks and attacks right after),
+##   sweep (a knockdown onto the back with the legs thrown forward and up) and
+##   broken (dazed for the break: it cannot act or block; CombatController's
+##   is_broken() is the status, and the daze comes back after any reaction
+##   that plays on top of it). A fold shorter than FOLD_QUICK_MAX is a quick
+##   half-keel; longer folds are the full keel.
+## - air_hang() holds a lifted body still in the air for B's air combo; while
+##   the combo runs, B (not the Round 7 re-pop cap) decides when it falls.
+## - hang() begun during an attack (B's landed air strike) lasts its whole
+##   time: the next strike does not end it.
 
 signal hp_changed(hp: float, max_hp: float)
 signal died(fighter: Fighter)
@@ -73,7 +87,8 @@ const NUDGE_MAX := 1.4          ## ...at most (m/s), so a pile is shoved, never 
 const NUDGE_UP := 0.25          ## m/s upward part, so limbs roll over the feet instead of scraping
 const NUDGE_COOLDOWN := 0.2     ## real s between nudges of the same bone
 ## Round 7 reactions (Fighter.react). Numbers that are not in Tuning:
-const REACT_KINDS: Array[StringName] = [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop"]
+const REACT_KINDS: Array[StringName] = [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop",
+	&"flinch", &"sweep", &"broken"]
 const REACT_SPIN_TURN := 100.0  ## degrees the body turns away over a spin's slide (the half-turn stumble)
 const REACT_POSE_BLEND := 0.06  ## s: a held reaction pose (fold, buckle, lift) blends in...
 const REACT_POSE_RELEASE := 0.15 ## ...and back out to locomotion
@@ -83,8 +98,27 @@ const LIFT_LAND_GRACE := 0.05   ## own s after a pop before a floor contact coun
 ## spin and push (spin picks the side), holds for fold, buckle and lift.
 const REACT_POSE_FALLBACK := {&"snap": [&"stumble_back"], &"push": [&"stumble_back"],
 	&"spin": [&"stumble_side_l", &"stumble_side_r"], &"fold": [&"limp_hunch", &"stagger"],
-	&"buckle": [&"crouch"], &"lift": [&"fall", &"jump_fall"]}
+	&"buckle": [&"crouch"], &"lift": [&"fall", &"jump_fall"], &"broken": [&"dazed", &"stagger"]}
 const LIFT_ARMS: Array[StringName] = [Bones.L_UPPER_ARM, Bones.L_LOWER_ARM, Bones.R_UPPER_ARM, Bones.R_LOWER_ARM]
+## Round 8 reactions. Numbers that are not in Tuning:
+const FLINCH_SLIDE_SHARE := 0.75 ## a flinch's push slides over this share of its stun (a jolt, no step)
+const FLINCH_STRENGTH := 1.0     ## x the Round 5 flinch kick on the struck bone (RagdollProfile.flinch_impulse)
+const FLINCH_CHAIN_SHARE := 0.4  ## the rest of the struck chain gets this share of the kick
+## A fold shorter than this (the gut punch tap's 0.3 s) plays P's react_fold
+## timed (its "quick" half-keel, back up by the end of the stun) instead of
+## holding the full keel. PoseLibrary's own "quick" threshold wins when it has one.
+const FOLD_QUICK_MAX := 0.45
+## Sweep: after the knockdown (upper body tipped back), the legs get this
+## velocity change (m/s) along the victim's facing and up, so it falls onto its
+## back legs first. Mostly up: the attacker stands right in front, and bones
+## collide with capsules...
+const SWEEP_LEG_FWD := 1.0
+const SWEEP_LEG_UP := 6.5
+## ...feet x1, shins and thighs less; the leg that was not struck x SWEEP_OTHER_LEG.
+const SWEEP_LEG_SHARE := {Bones.L_FOOT: 1.0, Bones.R_FOOT: 1.0, Bones.L_LOWER_LEG: 0.75,
+	Bones.R_LOWER_LEG: 0.75, Bones.L_UPPER_LEG: 0.35, Bones.R_UPPER_LEG: 0.35}
+const SWEEP_OTHER_LEG := 0.8
+const SWEEP_POSE := &"react_sweep"  ## P's sweep fall: the knockdown's muscle target while it exists
 
 var archetype: StringName = &"player"
 var team: int = TEAM_PLAYER
@@ -168,6 +202,13 @@ var _lift_floor := 0.0               ## floor height at the first pop (heights a
 var _lift_since_pop := 0.0           ## s since the last pop
 var _repops := 0                     ## re-pops in this lift
 var _arms_loose := false
+# Round 8 reactions.
+var _broken_left := 0.0              ## own s of the break left (B's is_broken() wins once it reports one)
+var _broken_seen := false            ## B reported this break (its timer is the status from then on)
+var _air_hang_left := 0.0            ## own s the lifted body still hangs (air_hang)
+var _air_combo := false              ## air_hang() was called in this lift: B decides the combo, not R7_JUGGLE_MAX
+var _sweep_flight := false           ## the sweep set P's react_sweep as the fall's muscle target (cleared on landing)
+var _hang_keep := false              ## the hang began during an attack (an air strike): strikes do not end it
 
 ## Call before add_child(). Reads Tuning.ARCHETYPES[archetype_id].
 func setup(archetype_id: StringName, p_team: int) -> void:
@@ -419,7 +460,8 @@ func stagger(direction: Vector3, strength := 1.0) -> void:
 func launch(velocity_change: Vector3, hit_point: Vector3, hit_bone: StringName = &"Chest") -> void:
 	if combat:
 		combat.on_reaction(HitInfo.Reaction.LAUNCH, 0.0)
-	clear_react()  # a launch payoff ends any reaction (a lifted body keeps its arc speed)
+	_end_react()  # a launch payoff ends any reaction but not the break (a lifted body keeps its arc speed)
+	_sweep_flight = false
 	_leave_stance()
 	if is_launched():
 		flight_launches += 1
@@ -461,7 +503,8 @@ func knockdown(direction: Vector3, hit_bone: StringName = &"Chest") -> void:
 		return
 	if combat:
 		combat.on_reaction(HitInfo.Reaction.LAUNCH, 0.0)
-	clear_react()
+	_end_react()  # the break (broken) keeps running
+	_sweep_flight = false
 	_leave_stance()
 	if is_launched():
 		flight_launches += 1
@@ -612,10 +655,15 @@ func snap_facing(dir: Vector3) -> void:
 ## `duration_real` player s or until an attack starts. Fighter holds it itself
 ## (Traversal is skipped while it hangs), and tells Traversal so its own air
 ## state knows; the fall afterwards is whoever drives the player.
+## Round 8: a hang that begins during an attack (B's landed air strike,
+## Tuning.R8_AIR_HANG) lasts its whole time from the hit (its hitstop
+## included), so the next air strike starts while still hanging; only the
+## strike's own step moves the body (sideways).
 func hang(duration_real: float) -> void:
 	velocity = Vector3.ZERO
 	_land_left = 0.0
 	_hang_left = maxf(duration_real, 0.0)
+	_hang_keep = combat != null and combat.is_attacking()
 	_air_time = 0.0
 	_takeoff_speed = 0.0
 	if traversal != null:
@@ -626,6 +674,36 @@ func hang(duration_real: float) -> void:
 ## Hanging in the air for a pursuit follow-up.
 func is_hanging() -> bool:
 	return _hang_left > 0.0
+
+## Round 8: the air combo's hangs (air_hang on a lifted body, a hang begun
+## during an air strike) count from the hit, through the hitstop that follows
+## it, so each lasts Tuning.R8_AIR_HANG from the hit whatever the hitstop (the
+## pursuit hang and every stun still stop during hitstop).
+func _tick_frozen_hangs(delta: float) -> void:
+	var pdt := own_delta(delta)
+	if _air_hang_left > 0.0 and is_lifted():
+		_air_hang_left = maxf(_air_hang_left - pdt, 0.0)
+	if _hang_left > 0.0 and _hang_keep:
+		_hang_left = maxf(_hang_left - pdt, 0.0)
+
+## One tick of the hang: no gravity, no vertical motion. A kept hang (an air
+## strike's) moves sideways with the strike's own step toward its target
+## (CombatController's forced velocity) and turns toward face_dir.
+func _tick_hang(pdt: float, factor: float) -> void:
+	var hv := Vector3.ZERO
+	if _hang_keep and combat and combat.has_forced_velocity():
+		var f := combat.get_forced_velocity()
+		hv = Vector3(f.x, 0.0, f.z)
+	if hv.length_squared() > 1e-6:
+		velocity = hv * factor
+		move_and_slide()
+	velocity = hv
+	if _hang_keep and (combat == null or combat.can_turn()):
+		var fd := Vector3(face_dir.x, 0.0, face_dir.z)
+		if fd.length_squared() > 1e-4:
+			fd = fd.normalized()
+			var rate := Tuning.TURN_SPEED * (combat.get_turn_mult() if combat else 1.0)
+			rotation.y = rotate_toward(rotation.y, atan2(-fd.x, -fd.z), rate * pdt)
 
 ## Drop any jump, hang and landing state (a teleport puts the fighter on the floor).
 func reset_air_state() -> void:
@@ -848,7 +926,12 @@ func _physics_process(delta: float) -> void:
 		rig.position = _rig_rest_pos + Vector3(randf_range(-1, 1), randf_range(-0.5, 0.5),
 			randf_range(-1, 1)) * _jitter
 	# Round 7 reactions: the clock runs in own time and stops during hitstop;
-	# the reaction moves the capsule itself (slide, spin, lift arc).
+	# the reaction moves the capsule itself (slide, spin, lift arc). Round 8:
+	# the break's clock runs under any reaction (and while down).
+	if not frozen:
+		_tick_broken(delta)
+	else:
+		_tick_frozen_hangs(delta)
 	if not frozen and _react_kind != &"" and _tick_react(delta):
 		_nudge_bodies()
 		return
@@ -863,13 +946,14 @@ func _physics_process(delta: float) -> void:
 		return  # the grabber places us every tick
 	var pdt := own_delta(delta)
 	var factor := own_time_factor()
-	# Pursuit hang (Defence): held still in the air until it runs out or an attack starts.
+	# Pursuit hang (Defence): held still in the air until it runs out or an
+	# attack starts. An air strike's hang (begun during the attack) runs out.
 	if _hang_left > 0.0:
-		if combat and combat.is_attacking():
+		if combat and combat.is_attacking() and not _hang_keep:
 			_hang_left = 0.0  # the pursuit attack started: the hang ends
 		else:
 			_hang_left = maxf(_hang_left - pdt, 0.0)
-			velocity = Vector3.ZERO
+			_tick_hang(pdt, factor)
 			return
 	if _forced_stop and _forced_left <= 0.0:
 		_forced_stop = false  # a dead-stop slide just ended: no deceleration tail
@@ -1073,12 +1157,14 @@ func get_death_info() -> HitInfo:
 func _on_ragdoll_launched(v: Vector3) -> void:
 	velocity = Vector3.ZERO  # stale walk/dash velocity must not survive the flight
 	clear_forced_velocity()
-	clear_react()  # a stagger can tip into a launch too
+	_end_react()  # a stagger can tip into a launch too
 	_leave_stance()
 	GameEvents.fighter_launched.emit(self, v)
 
 func _on_ragdoll_landed() -> void:
-	pass
+	if _sweep_flight:
+		_sweep_flight = false
+		ragdoll.set_flight_pose(&"")  # down: the body relaxes like any knockdown
 
 func _on_ragdoll_grounded() -> void:
 	flight_launches = 0
@@ -1107,19 +1193,37 @@ func _on_ragdoll_recovered() -> void:
 # =============================================================================
 # Round 7: reactions (docs/Round 7 — Freeflow Combat.md: Reactions). Owner H.
 # B calls react() for player strikes (snap, spin, fold, lift, buckle, push,
-# repop) after applying the heavy and anti-infinite multipliers; knockdown and
-# launch go through knockdown() / launch().
+# repop; Round 8: flinch, sweep, broken) after applying the heavy and
+# anti-infinite multipliers; knockdown and launch go through knockdown() / launch().
 # =============================================================================
 
-## Apply a Round 7 reaction. kind: &"snap" | &"spin" | &"fold" | &"lift" |
-## &"buckle" | &"push" | &"repop". direction: world, attacker -> victim. push:
-## m. stun: own s the fighter cannot act (lift and repop: ignored, the arc decides).
+## Apply a Round 7 / Round 8 reaction. kind: &"snap" | &"spin" | &"fold" |
+## &"lift" | &"buckle" | &"push" | &"repop" | &"flinch" | &"sweep" | &"broken".
+## direction: world, attacker -> victim. push: m. stun: own s the fighter
+## cannot act (lift and repop: ignored, the arc decides; sweep: ignored).
 ## - snap, spin, push, fold, buckle: the body slides `push` m along the hit over
 ##   Tuning.R7_PUSH_SLIDE_SHARE of the stun, slowing evenly; from
 ##   Tuning.R7_PUSH_STEP_FROM the legs step with the slide (stumble steps).
 ##   A spin also turns REACT_SPIN_TURN degrees away over the slide. Poses:
 ##   P's react_<kind> (timed over the stun for snap, spin and push; held for
-##   fold and buckle), else REACT_POSE_FALLBACK.
+##   fold and buckle), else REACT_POSE_FALLBACK. A fold shorter than
+##   FOLD_QUICK_MAX is a quick half-keel that comes straight back up.
+## - flinch (Round 8 taps): the struck bone's chain (info.hit_bone,
+##   RagdollController.hit_chain) goes Tuning.REACT_FLINCH physical while the
+##   body stays animated, and the struck bone takes the Round 5 flinch kick
+##   along the hit; the body slides `push` m over FLINCH_SLIDE_SHARE of the
+##   stun with its feet planted. Nothing outlasts the stun: it walks and
+##   attacks right after (the chain finishes its fade under its control).
+## - sweep: a knockdown onto the back, legs first (the upper body tips back,
+##   the legs are thrown forward and up); reports &"down" at once.
+## - broken: dazed for `stun` s (Tuning.R8_BREAK_TIME): it cannot act or block
+##   (P's react_broken, else the dazed hold). CombatController.is_broken() is
+##   the status once B reports it: the daze lasts while B says broken. A
+##   reaction from a further hit plays on top (fold, lift, push, knockdown,
+##   launch...) and the daze comes back when it ends if the break is still on
+##   (a flinch on a dazed body is a bone kick and a slide; the daze stays). A
+##   break that starts during a longer reaction, a lift or a knockdown waits
+##   for the body to be back on its feet.
 ## - lift: a ballistic capsule arc (not a ragdoll launch) whose feet peak
 ##   info.lift_height (else Tuning.R7_LIFT_HEIGHT) above the floor, under the
 ##   gravity that takes R7_LIFT_HEIGHT to its peak in R7_LIFT_PEAK_TIME; `push`
@@ -1128,14 +1232,16 @@ func _on_ragdoll_recovered() -> void:
 ##   on a lifted body counts as a re-pop.
 ## - repop (lifted body): up Tuning.R7_REPOP_HEIGHT more from where it is, at
 ##   most Tuning.R7_JUGGLE_MAX times per lift; past that the body falls into a
-##   knockdown at once. On a body that is not lifted: a lift of R7_REPOP_HEIGHT.
+##   knockdown at once. Not during an air combo (air_hang): B decides when it
+##   falls. On a body that is not lifted: a lift of R7_REPOP_HEIGHT.
 ## Any other kind on a lifted body adds its push to the arc (it still lands
-## into a knockdown). A new reaction replaces the current one and cancels the
-## fighter's own move (so a hit on an armored tell must not call this). Held
-## and downed bodies are left to Carry / the ragdoll. Emits
+## into a knockdown; a flinch also kicks the struck bone). A new reaction
+## replaces the current one and cancels the fighter's own move (so a hit on an
+## armored tell must not call this). Held and downed bodies are left to Carry /
+## the ragdoll (a break still starts its clock). Emits
 ## GameEvents.react_started(self, kind, info.attacker).
 func react(kind: StringName, direction: Vector3, push: float, stun: float, info: HitInfo = null) -> void:
-	if is_dead() or is_held():
+	if is_dead():
 		return
 	if not REACT_KINDS.has(kind):
 		push_warning("Fighter.react: unknown kind %s" % kind)
@@ -1144,25 +1250,44 @@ func react(kind: StringName, direction: Vector3, push: float, stun: float, info:
 	if dir.length_squared() < 1e-6:
 		dir = -get_forward()
 	dir = dir.normalized()
-	var bone: StringName = info.hit_bone if info != null else Bones.CHEST
+	var bone: StringName = info.hit_bone if info != null and info.hit_bone != &"" else Bones.CHEST
 	var attacker: Node3D = info.attacker if info != null else null
+	push = maxf(push, 0.0)
+	stun = maxf(stun, 0.0)
+	if kind == &"broken":
+		_begin_broken(dir, push, stun, attacker)
+		return
+	if is_held():
+		return
 	if is_down():
 		ragdoll.flinch(dir, bone, 0.5)  # already falling: a nudge, no new state
 		return
-	push = maxf(push, 0.0)
-	stun = maxf(stun, 0.0)
+	if kind == &"sweep":
+		_sweep(dir, bone, attacker)
+		return
 	if is_lifted():
 		_react_attacker = attacker
 		if kind == &"repop" or kind == &"lift":
-			if _repops >= Tuning.R7_JUGGLE_MAX:
+			if _repops >= Tuning.R7_JUGGLE_MAX and not _air_combo:
 				knockdown(dir, bone)  # past the juggle cap: no re-pop, the body falls
 				return
 			_repops += 1
 			_pop(Tuning.R7_REPOP_HEIGHT, dir, push, true)
 			GameEvents.react_started.emit(self, &"repop", attacker)
 		else:
+			if kind == &"flinch":
+				_flinch_bone(dir, bone)
 			_pop(0.0, dir, push, true)
 			GameEvents.react_started.emit(self, kind, attacker)
+		return
+	if kind == &"flinch" and _react_kind == &"broken":
+		# Dazed: the tap lands on the body (bone kick, slide); the daze stays.
+		_react_attacker = attacker
+		_react_dir = dir
+		_react_t = 0.0
+		_start_slide(push, stun * FLINCH_SLIDE_SHARE)
+		_flinch_bone(dir, bone)
+		GameEvents.react_started.emit(self, kind, attacker)
 		return
 	_end_react_pose()
 	if combat:
@@ -1184,6 +1309,8 @@ func react(kind: StringName, direction: Vector3, push: float, stun: float, info:
 		_react_kind = &"lift"
 		_react_left = 0.0
 		_repops = 0
+		_air_hang_left = 0.0
+		_air_combo = false
 		_lift_g = 2.0 * Tuning.R7_LIFT_HEIGHT / (Tuning.R7_LIFT_PEAK_TIME * Tuning.R7_LIFT_PEAK_TIME)
 		_lift_floor = global_position.y
 		_lift_vy = 0.0
@@ -1196,9 +1323,7 @@ func react(kind: StringName, direction: Vector3, push: float, stun: float, info:
 		return
 	_react_kind = kind
 	_react_left = stun
-	_slide_time = maxf(stun * Tuning.R7_PUSH_SLIDE_SHARE, 1e-3)
-	_slide_v0 = 2.0 * push / _slide_time
-	_slide_steps = push >= Tuning.R7_PUSH_STEP_FROM - 1e-4
+	_start_slide(push, stun * (FLINCH_SLIDE_SHARE if kind == &"flinch" else Tuning.R7_PUSH_SLIDE_SHARE))
 	var side := 0
 	if kind == &"spin":
 		# The head and shoulders turn away with the hook: toward the side the
@@ -1207,25 +1332,37 @@ func react(kind: StringName, direction: Vector3, push: float, stun: float, info:
 		var lat := dir.dot(Vector3(right.x, 0.0, right.z).normalized())
 		side = 1 if lat > 0.1 or absf(lat) <= 0.1 else -1
 		_turn_rate = -float(side) * deg_to_rad(REACT_SPIN_TURN) / _slide_time
+	if kind == &"flinch":
+		_flinch_bone(dir, bone)
 	_play_react_pose(kind, stun, side)
 	GameEvents.react_started.emit(self, kind, attacker)
 
+## The push slide: `push` m along _react_dir over `time` own s, slowing evenly;
+## from Tuning.R7_PUSH_STEP_FROM the legs step with it.
+func _start_slide(push: float, time: float) -> void:
+	_slide_time = maxf(time, 1e-3)
+	_slide_v0 = 2.0 * push / _slide_time
+	_slide_steps = push >= Tuning.R7_PUSH_STEP_FROM - 1e-4
+
 ## The current reaction state: &"" | &"snap" | &"spin" | &"fold" | &"lift" |
-## &"buckle" | &"push" | &"down" (knocked down, launched, getting up or dead).
-## A re-popped body still reports &"lift".
+## &"buckle" | &"push" | &"flinch" | &"broken" | &"down" (knocked down,
+## launched, getting up or dead; a sweep reports &"down" at once). A re-popped
+## body still reports &"lift"; a reaction on top of a break reports its own kind.
 func get_react_state() -> StringName:
 	if is_down():
 		return &"down"
 	return _react_kind
 
 ## Own seconds left in the current reaction (0 when none). Lift: the time to
-## land from the arc as it is now.
+## land from the arc as it is now (plus any air hang). Broken: the break left.
 func get_react_time_left() -> float:
 	if _react_kind == &"":
 		return 0.0
 	if _react_kind == &"lift":
 		var h := maxf(global_position.y - _lift_floor, 0.0)
-		return (_lift_vy + sqrt(_lift_vy * _lift_vy + 2.0 * _lift_g * h)) / maxf(_lift_g, 0.01)
+		return _air_hang_left + (_lift_vy + sqrt(_lift_vy * _lift_vy + 2.0 * _lift_g * h)) / maxf(_lift_g, 0.01)
+	if _react_kind == &"broken":
+		return maxf(_broken_left, 0.0)
 	return maxf(_react_left, 0.0)
 
 func is_reacting() -> bool:
@@ -1249,9 +1386,18 @@ func get_react_attacker() -> Node3D:
 func get_lift_height() -> float:
 	return maxf(global_position.y - _lift_floor, 0.0) if is_lifted() else 0.0
 
-## End the current reaction now, with no knockdown (knockdown, launch, death,
-## a grab; tests). Safe to call any time.
+## End the current reaction now, with no knockdown, and any break's daze
+## (death, tests). Safe to call any time. B's own broken status is B's.
 func clear_react() -> void:
+	_broken_left = 0.0
+	_broken_seen = false
+	_end_react()
+
+## End the current reaction (knockdown, launch, a grab): the break's clock keeps
+## running, and its daze comes back once the body is on its feet.
+func _end_react() -> void:
+	_air_hang_left = 0.0
+	_air_combo = false
 	if _react_kind == &"":
 		return
 	_end_react_pose()
@@ -1270,7 +1416,7 @@ func clear_react() -> void:
 ## it moved the capsule (the caller skips normal movement).
 func _tick_react(delta: float) -> bool:
 	if is_dead() or is_down() or is_held():
-		clear_react()
+		_end_react()
 		return false
 	var pdt := own_delta(delta)
 	var factor := own_time_factor()
@@ -1281,11 +1427,17 @@ func _tick_react(delta: float) -> bool:
 		return free
 	var t0 := _react_t
 	_react_t += pdt
-	_react_left -= pdt
+	if _react_kind != &"broken":
+		_react_left -= pdt
 	if free:
 		_move_slide(t0, pdt, factor)
-	if _react_left <= 1e-6:
-		clear_react()
+	var over := _broken_left <= 1e-6 if _react_kind == &"broken" else _react_left <= 1e-6
+	if over:
+		var dazed_left := _react_kind != &"broken" and _broken_left > 1e-6
+		var last_dir := _react_dir
+		_end_react()
+		if dazed_left:
+			_enter_broken(last_dir, 0.0)  # the break is still on: back to the daze
 	return free
 
 ## The push slide: v(t) = v0 (1 - t / T) along the hit for T = the slide time,
@@ -1304,8 +1456,16 @@ func _move_slide(t0: float, pdt: float, factor: float) -> void:
 		animator.set_locomotion(global_basis.inverse() * legs, Tuning.WALK_SPEED)
 
 ## The lift arc: own-time gravity _lift_g, integrated exactly (trapezoid).
-## Landing (floor, falling) turns into a knockdown along the last hit.
+## Landing (floor, falling) turns into a knockdown along the last hit. During
+## an air hang the body holds still (no fall, no drift); the arc then goes on
+## from where it was.
 func _move_lift(pdt: float, factor: float) -> void:
+	if _air_hang_left > 1e-6:
+		_air_hang_left = maxf(_air_hang_left - pdt, 0.0)
+		velocity = Vector3.ZERO
+		if animator:
+			animator.set_locomotion(Vector3.ZERO, Tuning.WALK_SPEED)
+		return
 	_lift_since_pop += pdt
 	var vy := _lift_vy
 	var vy_end := vy - _lift_g * pdt
@@ -1352,10 +1512,12 @@ func _set_arms_loose(on: bool) -> void:
 	else:
 		ragdoll.restore_chain(LIFT_ARMS)
 
-## P's react_<kind> pose, else the first fallback the library has. Snap, spin
-## and push play as timed moves over `stun`; fold, buckle and lift hold until
-## the reaction ends. `side` (spin): 1 = turning right, which plays P's mirrored
-## react_spin_r (the torso leads the turn).
+## P's react_<kind> pose, else the first fallback the library has. Snap, spin,
+## push and flinch play as timed moves over `stun`; fold, buckle, lift and
+## broken hold until the reaction ends, except a fold under the quick
+## threshold, which plays P's react_fold timed (the quick half-keel). `side`
+## (spin): 1 = turning right, which plays P's mirrored react_spin_r (the torso
+## leads the turn).
 func _play_react_pose(kind: StringName, stun: float, side: int) -> void:
 	if animator == null:
 		return
@@ -1366,7 +1528,9 @@ func _play_react_pose(kind: StringName, stun: float, side: int) -> void:
 		ids.insert(0, &"react_spin_r")
 		ids.erase(&"stumble_side_r")
 		ids.insert(2, &"stumble_side_r")
-	var hold := kind == &"fold" or kind == &"buckle" or kind == &"lift"
+	var hold := kind == &"fold" or kind == &"buckle" or kind == &"lift" or kind == &"broken"
+	if kind == &"fold" and stun < fold_quick_max():
+		hold = false
 	for id in ids:
 		if hold and (PoseLibrary.HOLDS.has(id) or PoseLibrary.POSES.has(id)):
 			animator.hold_pose(id, REACT_POSE_BLEND)
@@ -1376,7 +1540,173 @@ func _play_react_pose(kind: StringName, stun: float, side: int) -> void:
 			animator.play_timed(id, maxf(stun if not hold else get_react_time_left(), 0.1))
 			return
 
+## Stun under which a fold is P's quick half-keel (react_fold's "quick"
+## threshold in PoseLibrary, else FOLD_QUICK_MAX).
+static func fold_quick_max() -> float:
+	var def: Dictionary = PoseLibrary.MOVES.get(&"react_fold", {})
+	var quick: Array = def.get("quick", [])
+	return float(quick[0]) if quick.size() >= 2 else FOLD_QUICK_MAX
+
 func _end_react_pose() -> void:
 	if _react_hold != &"" and animator and get_state() == RagdollController.State.ANIMATED:
 		animator.release_pose(REACT_POSE_RELEASE)
 	_react_hold = &""
+
+# --- Round 8 reactions --------------------------------------------------------------
+## The flinch's physical hit: the struck bone's chain (RagdollController.hit_chain)
+## goes Tuning.REACT_FLINCH "physics" for its "fade" through
+## RagdollController.limp_chain, so the fighter stays animated and in control;
+## the struck bone takes the Round 5 flinch kick along `dir`
+## (RagdollProfile.flinch_impulse / its mass, clamped to flinch_dv_min..max,
+## x FLINCH_STRENGTH), the rest of the chain FLINCH_CHAIN_SHARE of its own, and
+## a sideways head hit turns the head (RagdollController.HEAD_TWIST). A lost
+## limb's hit lands on the body.
+func _flinch_bone(dir: Vector3, bone: StringName) -> void:
+	if ragdoll == null or rig == null or ragdoll.is_full_ragdoll() \
+			or get_state() == RagdollController.State.GETUP:
+		return
+	var chain := RagdollController.hit_chain(bone)
+	if rig.is_bone_severed(chain[0]):
+		chain = RagdollController.hit_chain(Bones.CHEST)
+		bone = Bones.CHEST
+	# The struck body: the bone itself, else its nearest ancestor in the chain
+	# (a hand rides its forearm), else the chain's first bone.
+	var struck: StringName = chain[0]
+	var b := bone
+	while b != &"":
+		if chain.has(b):
+			struck = b
+			break
+		b = Bones.PARENT.get(b, &"")
+	var r: Dictionary = Tuning.REACT_FLINCH
+	ragdoll.limp_chain(chain, float(r["physics"]), float(r["fade"]))
+	var prof := ragdoll.profile
+	for cb: StringName in chain:
+		var pb := rig.get_physical_bone(cb)
+		if pb == null or rig.is_bone_severed(cb):
+			continue
+		var dv := FLINCH_STRENGTH
+		if prof != null:
+			dv *= clampf(prof.flinch_impulse / maxf(pb.mass, 0.1), prof.flinch_dv_min, prof.flinch_dv_max)
+		if cb != struck:
+			dv *= FLINCH_CHAIN_SHARE
+		var rid := pb.get_rid()
+		var lv: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, lv + dir * dv)
+		if cb == struck and cb == Bones.HEAD:
+			# The fist lands on the face, ahead of the neck: a sideways hit turns it.
+			var av: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY)
+			var twist := get_forward().cross(dir) * RagdollController.HEAD_TWIST * FLINCH_STRENGTH
+			PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY, av + twist)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_SLEEPING, false)
+	if _arms_loose and chain.any(func(x: StringName) -> bool: return LIFT_ARMS.has(x)):
+		ragdoll.limp_chain(LIFT_ARMS, LIFT_ARM_LIMP, 0.0)  # a lifted body's arms stay loose (held, no fade)
+
+## The sweep: a knockdown with the upper body tipped back (against the
+## victim's facing), then both legs thrown forward and up (SWEEP_LEG_*), the
+## struck leg most, so the body falls onto its back legs first. The struck leg
+## is the hit bone's, else the one on the side the sweep comes from.
+func _sweep(dir: Vector3, bone: StringName, attacker: Node3D) -> void:
+	var fwd := get_forward()
+	var left := bone in [Bones.L_UPPER_LEG, Bones.L_LOWER_LEG, Bones.L_FOOT]
+	var right := bone in [Bones.R_UPPER_LEG, Bones.R_LOWER_LEG, Bones.R_FOOT]
+	if not left and not right:
+		# Hit travelling toward the victim's right came from its left.
+		var rgt := Vector3(global_basis.x.x, 0.0, global_basis.x.z).normalized()
+		left = dir.dot(rgt) >= 0.0
+		bone = Bones.L_LOWER_LEG if left else Bones.R_LOWER_LEG
+	knockdown(-fwd, bone)
+	if ragdoll == null or rig == null or not ragdoll.is_full_ragdoll():
+		return
+	var kick := fwd * SWEEP_LEG_FWD + Vector3.UP * SWEEP_LEG_UP
+	for lb: StringName in SWEEP_LEG_SHARE:
+		var pb := rig.get_physical_bone(lb)
+		if pb == null or rig.is_bone_severed(lb):
+			continue
+		var same := (lb in [Bones.L_UPPER_LEG, Bones.L_LOWER_LEG, Bones.L_FOOT]) == left
+		var k: float = SWEEP_LEG_SHARE[lb] * (1.0 if same else SWEEP_OTHER_LEG)
+		ragdoll.nudge(pb.global_position, kick * k)
+	if PoseLibrary.HOLDS.has(SWEEP_POSE) or PoseLibrary.POSES.has(SWEEP_POSE):
+		ragdoll.set_flight_pose(SWEEP_POSE)  # P's sweep fall, until the body lands
+		_sweep_flight = true
+	GameEvents.react_started.emit(self, &"sweep", attacker)
+
+## A break starts: its clock (`stun`, else Tuning.R8_BREAK_TIME) runs from now,
+## the fighter's move stops, and the daze shows at once on a free body (or on
+## top of a flinch); during a longer reaction, a lift or a knockdown it waits
+## for the body to be back on its feet.
+func _begin_broken(dir: Vector3, push: float, stun: float, attacker: Node3D) -> void:
+	_broken_left = stun if stun > 0.0 else Tuning.R8_BREAK_TIME
+	_broken_seen = false
+	var waits := is_down() or is_held() or is_lifted() \
+		or not (_react_kind == &"" or _react_kind == &"flinch" or _react_kind == &"broken")
+	if not is_down() and not is_held() and combat:
+		combat.on_reaction(HitInfo.Reaction.STAGGER, 0.0)  # it cannot act: its move stops
+	GameEvents.react_started.emit(self, &"broken", attacker)
+	if waits:
+		return
+	_react_attacker = attacker
+	_enter_broken(dir, push)
+
+## Show the daze for the break's time left: state &"broken", P's react_broken
+## hold (else REACT_POSE_FALLBACK), `push` m of slide.
+func _enter_broken(dir: Vector3, push: float) -> void:
+	var attacker := _react_attacker
+	if _react_kind != &"":
+		_end_react()
+	clear_forced_velocity()
+	if rig:
+		rig.position = _rig_rest_pos
+	_react_kind = &"broken"
+	_react_attacker = attacker
+	_react_dir = dir
+	_react_t = 0.0
+	_react_left = 0.0
+	_turn_rate = 0.0
+	_start_slide(push, _broken_left * Tuning.R7_PUSH_SLIDE_SHARE)
+	_play_react_pose(&"broken", _broken_left, 0)
+
+## The break's clock (own time; not during hitstop): B's is_broken() /
+## get_broken_time_left() once B reports the break, else our own countdown.
+## A body back on its feet with the break still on goes back to the daze.
+func _tick_broken(delta: float) -> void:
+	if combat == null and _broken_left <= 0.0:
+		return
+	if combat != null and combat.is_broken():
+		if not _broken_seen and _broken_left <= 0.0:
+			return  # B's break without a react(&"broken") call: B's to show
+		_broken_seen = true
+		_broken_left = maxf(combat.get_broken_time_left(), 1e-4)
+	elif _broken_seen:
+		_broken_seen = false
+		_broken_left = 0.0  # B ended the break
+	elif _broken_left > 0.0:
+		_broken_left = maxf(_broken_left - own_delta(delta), 0.0)
+	if _broken_left > 0.0 and _react_kind == &"" and not is_dead() and not is_down() and not is_held() \
+			and get_state() == RagdollController.State.ANIMATED:
+		_enter_broken(-get_forward(), 0.0)
+
+
+# =============================================================================
+# Round 8 contract stubs (lead). Owner H implements; callers code against them now.
+# =============================================================================
+
+## Enemy level 1..3 (FighterFactory sets it at spawn from the wave; the player and the Duelist are 1).
+var level := 1
+
+## Air combo: freeze this lifted body's vertical motion and its drift for
+## `seconds` of its own time from now, hitstop included (its arc then goes on
+## from where it was: the same vertical speed and drift). Calls keep the
+## longest hang left and repeat as often as B calls. No effect unless
+## is_lifted(). Once called in a lift, the Round 7 re-pop cap no longer knocks
+## the body down: B decides the combo.
+func air_hang(seconds: float) -> void:
+	if not is_lifted() or seconds <= 0.0:
+		return
+	_air_hang_left = maxf(_air_hang_left, seconds)
+	_air_combo = true
+	velocity = Vector3.ZERO
+
+## Own seconds the lifted body still hangs (0 when not hanging). Tests, debug.
+func get_air_hang_left() -> float:
+	return _air_hang_left if is_lifted() else 0.0

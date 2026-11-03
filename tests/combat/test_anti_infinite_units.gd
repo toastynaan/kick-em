@@ -6,6 +6,9 @@ extends "res://tests/combat/combat_test_base.gd"
 ## the victim away (damage, no stun, pushed apart, a short auto-guard); the
 ## damage keeps the combo scaling (combo_scale) by the victim's count, shared
 ## by two attackers; enemy hits on the player keep the Round 5 decay.
+## Round 8: the strikes are taps (R8_MOVES "tap" stun and damage); pressure is
+## off here (Tuning.debug_pressure_mult 0), or the chain would break the grunt
+## open (no guard: no auto-guard to see). Pressure has its own test.
 
 const AimBrain := preload("res://tests/combat/aim_brain.gd")
 
@@ -13,6 +16,8 @@ func _init() -> void:
 	_timeout = 90.0
 
 func run() -> void:
+	var was_pm := Tuning.debug_pressure_mult
+	Tuning.debug_pressure_mult = 0.0
 	print("Round 7 stun decay per hit")
 	var d: Array = []
 	var want: Array = []
@@ -47,7 +52,7 @@ func run() -> void:
 		stuns.append(snappedf(h.stun, 0.001) if h else -1.0)
 		if esc[0]:
 			break
-	var base := float(Tuning.R7_MOVES[&"gut_punch"]["stun"])
+	var base := float(Tuning.R8_MOVES[&"gut_punch"]["tap"]["stun"])
 	print("  gut punch stuns: %s (base %.2f)" % [stuns, base])
 	var ok := stuns.size() == Tuning.R7_COMBO_ESCAPE_HITS
 	for i in mini(stuns.size(), Tuning.R7_COMBO_ESCAPE_HITS - 1):
@@ -81,7 +86,7 @@ func run() -> void:
 	check(hs.size() == 3 and g2.combat.hits_taken() == 3, "3 hits from two attackers: victim count %d" % g2.combat.hits_taken())
 	if hs.size() == 3:
 		check(is_equal_approx(hs[2].damage_scale, CombatController.combo_scale(3))
-			and is_equal_approx(hs[2].damage, float(Tuning.R7_MOVES[&"jab"]["dmg"]) * CombatController.combo_scale(3)),
+			and is_equal_approx(hs[2].damage, float(Tuning.R8_MOVES[&"jab"]["tap"]["dmg"]) * CombatController.combo_scale(3)),
 			"the 3rd hit (first attacker again) is scaled as hit 3: x%.1f" % hs[2].damage_scale)
 		check(hs[2].chain_index == 2 and hs[1].chain_index == 1, "the chain (HUD counter) stays per attacker")
 
@@ -91,4 +96,5 @@ func run() -> void:
 		r5.append(snappedf(CombatController.stun_decay(n), 0.001))
 	check(is_equal_approx(CombatController.stun_decay(Tuning.COMBO_STUN_DECAY_FROM - 1), 1.0)
 		and CombatController.stun_decay(Tuning.COMBO_STUN_DECAY_FROM) < 1.0, "Round 5 decay %s" % [r5])
+	Tuning.debug_pressure_mult = was_pm
 	done()

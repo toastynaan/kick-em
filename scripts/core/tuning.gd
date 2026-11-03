@@ -39,6 +39,7 @@ const ARCHETYPES := {
 		"reach": 2.2, "keep_distance": 3.0,
 		"drops_stick_at": HitInfo.Tier.STAGGER,  # a stagger or more makes him drop the stick (it becomes a prop)
 		"sidesteps_sprint": true,
+		"guard_chance": 0.12,          # Round 8: guards tapped strikes (x pressure and level, AIBrain.block_mult)
 	},
 	&"heavy": {
 		"hp": 160.0, "mass": 110.0, "ragdoll": "active",
@@ -47,6 +48,7 @@ const ARCHETYPES := {
 		"moves": [&"e_heavy", &"e_charge", &"e_grab_slam"],
 		"ignore_flinch": true,         # only a stagger or more interrupts him
 		"heavy": true,                 # launches at HEAVY_LAUNCH_MULT, never sidesteps, Battering Ram "heavy" column
+		"guard_chance": 0.1,           # Round 8: guards tapped strikes (x pressure and level, AIBrain.block_mult)
 	},
 	&"brawler": {
 		"hp": 130.0, "mass": 80.0, "ragdoll": "passive",  # legacy (not in Round 5 waves)
@@ -79,7 +81,9 @@ const ARCHETYPES := {
 		"damage_mult": 1.3,      # scales its move damage (round 2: 45-60 s duels)
 		"perfect_dodge": true,   # only the player and fighters with this flag can perfect-dodge
 		"focus": 2.0,            # starting Focus; its teleport counter costs 1, a dodge earns 0.5
-		"armor_bonus": 1,        # added to every enemy move's armor level
+		# Round 8: only his big swing is armored (taps don't interrupt it); taps
+		# interrupt his hook, kick and grab like any enemy's (doc: Taps).
+		"armor_moves": [&"e_heavy"],
 	},
 	&"thrower": {
 		"hp": 100.0, "mass": 70.0, "ragdoll": "passive",  # legacy
@@ -297,6 +301,10 @@ static var debug_speed_cap := 8.0     ## m/s sprint cap: 8 base; 10 and 12 are t
 static var debug_ram_level := 0       ## Battering Ram 0 (not earned) .. 3
 static var debug_teleport := true     ## Round 7: Dash just before a hit teleports behind the attacker
 static var debug_pursuit_max := 2     ## Round 7: pursuits that may chain off one launch (0 = no pursuit), 0..3
+static var debug_charge_full := 1.0   ## Round 8: s from the press to full charge (1.0 start .. 0.5 max)
+static var debug_pressure_mult := 1.0 ## Round 8: pressure per hit x this (1.0 .. 2.0)
+static var debug_launch_step := 1.0   ## Round 8: charged launches start at c >= min(launch_from, this) (1.0 .. 0.5)
+static var debug_air_hits := 4        ## Round 8: air hits that hang per air combo (4 .. 6)
 static var debug_start_focus := 1.0   ## SUPERSEDED (Round 7 removed the Focus meter); unread
 static var debug_overlay := false     ## debug overlay (HUD)
 
@@ -848,3 +856,132 @@ const R7_RAM_LAUNCH_SHARE := 1.3
 const R7_RAM_LAUNCH_ANGLE := 25.0
 ## Ground cracks at speed: sprinting at or above this cracks the floor under each footstep (WorldDamage.damage_floor).
 const R7_SPEED_CRACK_FROM := 10.0  ## m/s (the first upgraded cap)
+
+# =============================================================================
+# Round 8: Charge and pressure (docs/Round 8 — Charge and Pressure.md). Wins
+# over Round 7 for the player's STRIKES: tap vs continuous charge, per-move tap
+# and charged results, the enemy pressure meter, enemy levels, the air combo.
+# Counter, dodge, grab, drive, throw and the god path keep their Round 7 numbers.
+# Contract: docs/ARCHITECTURE.md "Round 8".
+# =============================================================================
+
+# --- Charge ------------------------------------------------------------------------------
+## A press released before this (real s) is a tap. Still held: charging, c 0 -> 1
+## from here to debug_charge_full s after the press.
+const R8_TAP_MAX := 0.25
+const R8_CHARGE_HOLD_AT_FULL := 0.5   ## real s the full meter holds before the strike fires itself
+const R8_CHARGE_WALK_MULT := 0.5      ## walk speed while charging
+const R8_CHARGE_LUNGE := Vector2(3.0, 6.0)  ## m the release may glide: at c = 0, at c = 1
+const R8_RELEASE_STARTUP := 5.0       ## frames from the release (after any glide) to the first active frame
+const R8_CHARGED_EXTRA_RECOVERY := 6.0 ## frames added to the tap's recovery for a charged strike
+## Upgrade maxima (pause menu > Debug; the Duel uses all of them).
+const R8_UPGRADE_MAX := {"speed_cap": 12.0, "ram_level": 3, "teleport": true, "pursuit_max": 3,
+	"charge_full": 0.5, "pressure_mult": 2.0, "launch_step": 0.5, "air_hits": 6}
+
+# --- Moves: tap and charged ---------------------------------------------------------------
+## R8_MOVES[move] = {"tap": {...}, "charged": {...}}.
+## tap: "f" Vector3(startup, active, recovery) frames (the Round 7 numbers), "dmg",
+##   "react" (Fighter.react kind, or &"knockdown" / &"launch"), "push" m, "stun" s,
+##   "hitstop" real s, "weight" 0..1, "pressure", "tier" (listener tier name).
+## charged: Vector2 values are [at c = 0, at c = 1], lerped by c: "dmg", "push",
+##   "stun", "hitstop", "weight", "pressure", "lift" (uppercut). "react" below
+##   launch_from. "launch_from" c (absent = never launches; capped by
+##   debug_launch_step), "launch_speed" Vector2 m/s lerped by c, "launch_angle"
+##   degrees up. "full_react": the reaction at c = 1 (leg kick &"sweep").
+##   "full_break": a full charge breaks the victim's pressure outright (gut punch).
+##   "sideways": pushes and launches go across the attacker's facing, toward the
+##   side the strike came from (hook). "payoff_id": the R7_PAYOFFS row the
+##   charged strike uses (taps use their own id).
+const R8_MOVES := {
+	&"jab": {
+		"tap": {"f": Vector3(7, 3, 14), "dmg": 4.0, "react": &"flinch", "push": 0.3, "stun": 0.2,
+			"hitstop": 0.06, "weight": 0.2, "pressure": 1.0, "tier": &"flinch"},
+		"charged": {"dmg": Vector2(8, 14), "react": &"push", "push": Vector2(1.5, 4.0), "stun": Vector2(0.5, 0.8),
+			"hitstop": Vector2(0.10, 0.14), "weight": Vector2(0.5, 0.75), "pressure": Vector2(3, 4),
+			"tier": &"stagger", "payoff_id": &"heavy_jab"}},
+	&"cross": {
+		"tap": {"f": Vector3(9, 3, 16), "dmg": 5.0, "react": &"flinch", "push": 0.35, "stun": 0.2,
+			"hitstop": 0.07, "weight": 0.25, "pressure": 1.0, "tier": &"flinch"},
+		"charged": {"dmg": Vector2(10, 18), "react": &"push", "push": Vector2(2.0, 3.5), "stun": Vector2(0.6, 0.8),
+			"hitstop": Vector2(0.11, 0.15), "weight": Vector2(0.55, 0.85), "pressure": Vector2(3, 4),
+			"launch_from": 1.0, "launch_speed": Vector2(10, 14), "launch_angle": 12.0,
+			"tier": &"stagger", "payoff_id": &"heavy_cross"}},
+	&"hook": {
+		"tap": {"f": Vector3(11, 4, 18), "dmg": 6.0, "react": &"spin", "push": 0.3, "stun": 0.25,
+			"hitstop": 0.08, "weight": 0.3, "pressure": 1.0, "tier": &"flinch"},
+		"charged": {"dmg": Vector2(12, 18), "react": &"knockdown", "push": Vector2(1.0, 1.5), "stun": Vector2(0, 0),
+			"hitstop": Vector2(0.12, 0.15), "weight": Vector2(0.6, 0.85), "pressure": Vector2(3, 4),
+			"launch_from": 1.0, "launch_speed": Vector2(10, 13), "launch_angle": 20.0, "sideways": true,
+			"tier": &"knockdown", "payoff_id": &"heavy_hook"}},
+	&"leg_kick": {
+		"tap": {"f": Vector3(10, 4, 18), "dmg": 4.0, "react": &"flinch", "push": 0.1, "stun": 0.15,
+			"hitstop": 0.06, "weight": 0.2, "pressure": 1.0, "tier": &"flinch"},
+		"charged": {"dmg": Vector2(8, 14), "react": &"buckle", "push": Vector2(0.2, 0.3), "stun": Vector2(0.6, 1.5),
+			"hitstop": Vector2(0.10, 0.14), "weight": Vector2(0.5, 0.75), "pressure": Vector2(3, 4),
+			"full_react": &"sweep", "tier": &"stagger", "payoff_id": &"heavy_leg_kick"}},
+	&"gut_punch": {
+		"tap": {"f": Vector3(10, 4, 20), "dmg": 5.0, "react": &"fold", "push": 0.2, "stun": 0.3,
+			"hitstop": 0.07, "weight": 0.3, "pressure": 1.5, "tier": &"flinch"},
+		"charged": {"dmg": Vector2(9, 15), "react": &"fold", "push": Vector2(0.3, 0.4), "stun": Vector2(0.6, 1.8),
+			"hitstop": Vector2(0.11, 0.15), "weight": Vector2(0.55, 0.8), "pressure": Vector2(5, 8),
+			"full_break": true, "tier": &"stagger", "payoff_id": &"gut_punch"}},
+	&"uppercut": {
+		"tap": {"f": Vector3(12, 4, 20), "dmg": 6.0, "react": &"snap", "push": 0.2, "stun": 0.25,
+			"hitstop": 0.08, "weight": 0.3, "pressure": 1.0, "tier": &"flinch"},
+		"charged": {"dmg": Vector2(10, 16), "react": &"lift", "lift": Vector2(0.8, 2.5), "push": Vector2(0.3, 0.3),
+			"stun": Vector2(0, 0), "hitstop": Vector2(0.11, 0.15), "weight": Vector2(0.6, 0.85),
+			"pressure": Vector2(3, 4), "tier": &"stagger", "payoff_id": &"uppercut"}},
+	&"front_kick": {
+		"tap": {"f": Vector3(14, 4, 22), "dmg": 6.0, "react": &"push", "push": 1.75, "stun": 0.4,
+			"hitstop": 0.09, "weight": 0.45, "pressure": 1.5, "tier": &"stagger"},
+		"charged": {"dmg": Vector2(10, 16), "react": &"push", "push": Vector2(2.5, 4.5), "stun": Vector2(0.6, 0.9),
+			"hitstop": Vector2(0.12, 0.15), "weight": Vector2(0.65, 0.85), "pressure": Vector2(3, 4),
+			"launch_from": 1.0, "launch_speed": Vector2(11, 15), "launch_angle": 20.0,
+			"tier": &"stagger", "payoff_id": &"heavy_front_kick"}},
+	&"roundhouse": {
+		"tap": {"f": Vector3(18, 5, 26), "dmg": 14.0, "react": &"knockdown", "push": 1.5, "stun": 0.0,
+			"hitstop": 0.14, "weight": 0.85, "pressure": 2.0, "tier": &"knockdown"},
+		"charged": {"dmg": Vector2(16, 22), "react": &"launch", "push": Vector2(0, 0), "stun": Vector2(0, 0),
+			"hitstop": Vector2(0.15, 0.17), "weight": Vector2(0.9, 1.0), "pressure": Vector2(4, 4),
+			"launch_from": 0.0, "launch_speed": Vector2(11, 16), "launch_angle": 18.0,
+			"tier": &"launch", "payoff_id": &"heavy_roundhouse"}},
+}
+
+# --- Pressure ----------------------------------------------------------------------------------
+## Break capacity by archetype and level (1..3). Archetypes not listed use R8_PRESSURE_CAP_DEFAULT.
+const R8_PRESSURE_CAP := {&"grunt": [2.5, 5.0, 8.0], &"stick": [3.0, 6.0, 9.0], &"heavy": [6.0, 10.0, 14.0],
+	&"duelist": [16.0, 16.0, 16.0]}
+const R8_PRESSURE_CAP_DEFAULT := 5.0
+const R8_BLOCKED_PRESSURE_MULT := 1.0 ## a blocked hit adds this x its pressure (guards break this way)
+const R8_PRESSURE_DECAY_DELAY := 1.5  ## s with no hit before it drains
+const R8_PRESSURE_DECAY := 0.35       ## of max per s
+const R8_BREAK_TIME := 1.5            ## s broken open (can't block or attack)
+const R8_BREAK_DAMAGE_MULT := 1.5     ## player hits on a broken enemy
+const R8_BREAK_PUSH_MULT := 1.3       ## push and launch speed on a broken enemy
+const R8_BREAK_IMMUNE := 2.0          ## s after a break in which pressure fills at R8_BREAK_IMMUNE_RATE
+const R8_BREAK_IMMUNE_RATE := 0.5
+const R8_PRESSURE_TELL_SLOW := 0.15   ## s added to an enemy's tell at full pressure (x fraction)
+const R8_PRESSURE_BACK_OFF := 0.6     ## fraction from which a free enemy backs off instead of trading
+## Enemy level by wave index (0-based; the last entry repeats). The Duelist is level 1.
+const R8_LEVEL_BY_WAVE: Array[int] = [1, 1, 2, 2, 3]
+const R8_LEVEL_BLOCK_MULT: Array[float] = [1.0, 1.4, 1.8]  ## block chance x this at level 1, 2, 3
+
+static func r8_level_for_wave(wave_index: int) -> int:
+	return R8_LEVEL_BY_WAVE[clampi(wave_index, 0, R8_LEVEL_BY_WAVE.size() - 1)]
+
+static func r8_pressure_cap(archetype: StringName, level: int) -> float:
+	var caps: Array = R8_PRESSURE_CAP.get(archetype, [])
+	if caps.is_empty():
+		return R8_PRESSURE_CAP_DEFAULT
+	return float(caps[clampi(level - 1, 0, caps.size() - 1)])
+
+# --- Air combo ------------------------------------------------------------------------------------
+const R8_AIR_FOLLOW_WINDOW := 0.6     ## real s after a charged uppercut's lift in which Jump follows
+const R8_AIR_FOLLOW_MIN_LIFT := 1.2   ## m the lift must reach
+const R8_AIR_FOLLOW_RANGE := 4.0      ## m from the player to the lifted body
+const R8_AIR_FOLLOW_TIME := 0.25      ## s the launcher jump takes to reach the body's height
+const R8_AIR_STRIKE_RANGE := 2.0      ## m: an airborne press with a lifted body this close is an air strike
+const R8_AIR_FRAMES := Vector3(4, 3, 8)  ## air strike startup, active, recovery
+const R8_AIR_HANG := 0.35             ## s both hang per landed air hit (up to debug_air_hits)
+const R8_AIR_KICK_LAUNCH := 14.0      ## m/s: any kick in the air sends the body away
+const R8_AIR_KICK_ANGLE := 10.0       ## degrees up

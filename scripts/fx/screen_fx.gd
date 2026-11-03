@@ -22,7 +22,9 @@ extends CanvasLayer
 ##   launch payoff gets the full HIT_FLASH_ALPHA); a counter flashes it too. A
 ##   dodge leaves a short after-image where it started. A glide pulses the
 ##   speed blur and draws speed streaks on both hands and feet, both scaled by
-##   the glide's distance. Focus mode and its tint are gone (Round 7); the god
+##   the glide's distance. Round 8: a pressure break flashes the screen
+##   (BREAK_FLASH_ALPHA); the launcher jump (air_follow_started) pulses the
+##   speed blur. Focus mode and its tint are gone (Round 7); the god
 ##   path (amendment) keeps the teleport after-image, the pursuit teleport's
 ##   full blur and the air dash's.
 ## - Layer 5: above the 3D view, below the HUD (10) and menus (20), so the blur
@@ -45,6 +47,10 @@ const PLAYER_POLL := 0.5         ## s between player lookups
 const R7_FLASH_FROM := 0.7
 const R7_FLASH_ALPHA := Vector2(0.07, 0.12)
 const COUNTER_FLASH_ALPHA := 0.1  ## the player's counter lands: a small white flash
+## Round 8: the pressure break flashes the screen (never refused by the budget);
+## the launcher jump pulses the speed blur.
+const BREAK_FLASH_ALPHA := 0.16
+const AIR_FOLLOW_PULSE := 0.5
 const DODGE_AFTERIMAGE_FADE := 0.18  ## s (world time) the dodge's after-image takes to fade
 ## Glide: speed-level pulse from a short glide to FXRules.GLIDE_FULL (blur
 ## 0.12 .. 0.43, speed lines only on the longest glides), held for the glide's
@@ -109,6 +115,8 @@ func _ready() -> void:
 	GameEvents.countered.connect(_on_countered)
 	GameEvents.dodged.connect(_on_dodged)
 	GameEvents.glide_started.connect(_on_glide_started)
+	GameEvents.pressure_broken.connect(_on_pressure_broken)
+	GameEvents.air_follow_started.connect(_on_air_follow_started)
 	GameEvents.round_started.connect(func(_m: StringName) -> void: reset())
 
 func _full_rect(node_name: String) -> ColorRect:
@@ -174,9 +182,10 @@ func pulse_speed(level: float, seconds := PULSE_TIME) -> void:
 
 ## A white screen flash for Tuning.HIT_FLASH_FRAMES frames at `alpha`. Budget:
 ## one per Tuning.FX_FLASH_GAP real seconds. Returns false when refused.
-func flash(alpha := Tuning.HIT_FLASH_ALPHA) -> bool:
+## `force` (Round 8: the pressure break) ignores the budget.
+func flash(alpha := Tuning.HIT_FLASH_ALPHA, force := false) -> bool:
 	var now := _real_now()
-	if now - _last_flash < Tuning.FX_FLASH_GAP - 1e-4:
+	if not force and now - _last_flash < Tuning.FX_FLASH_GAP - 1e-4:
 		return false
 	_last_flash = now
 	_flash_rect.color = Color(1, 1, 1, alpha)
@@ -406,3 +415,18 @@ func _update_ghosts(world_delta: float) -> void:
 		for c in _ghosts[i].get_children():
 			if (c as Node3D).visible:
 				(c as MeshInstance3D).set_instance_shader_parameter(&"fade", f)
+
+
+# =============================================================================
+# Round 8 (Charge and pressure)
+# =============================================================================
+
+## An enemy's guard broke open: a clear white flash, whatever flashed just before.
+func _on_pressure_broken(fighter: Node3D, _attacker: Node3D) -> void:
+	if is_instance_valid(fighter):
+		flash(BREAK_FLASH_ALPHA, true)
+
+## The launcher jump: a pulse of speed blur as the player leaps after the body.
+func _on_air_follow_started(fighter: Node3D, _target: Node3D) -> void:
+	if is_instance_valid(fighter) and fighter.is_in_group(&"player"):
+		pulse_speed(AIR_FOLLOW_PULSE, Tuning.R8_AIR_FOLLOW_TIME + PULSE_TIME)

@@ -4,7 +4,7 @@ extends "res://tests/combat/combat_test_base.gd"
 ## PlayerController -> InputInterpreter -> CombatController):
 ## - presses during a move's glide and startup are dropped; from its first
 ##   active frame on (hitstop and recovery included) the latest press is
-##   buffered (one press only), held it becomes the heavy;
+##   buffered (one press only); still held when it starts, it charges (Round 8);
 ## - on a hit the buffered press starts after R7_CHAIN_CUT of the recovery; on a
 ##   whiff only after the full recovery, and the punch string resets;
 ## - mashing LMB at 20 Hz never makes a 3-hit string faster than pressing once
@@ -25,7 +25,8 @@ func _init() -> void:
 
 func run() -> void:
 	_p = spawn_player(Vector3.ZERO)
-	_p.combat.attack_active.connect(func(id: StringName) -> void: _moves.append([id, TimeDirector.now()]))
+	_p.combat.attack_active.connect(func(id: StringName) -> void:
+		_moves.append([id, TimeDirector.now(), _p.combat.get_strike_debug()["charged"]]))
 	_p.combat.attack_started.connect(func(id: StringName) -> void: _starts.append([id, TimeDirector.now()]))
 	await ticks(20)
 
@@ -47,10 +48,10 @@ func run() -> void:
 	var ids := _moves.map(func(m: Array) -> StringName: return m[0])
 	var rh := _start_of(&"roundhouse")
 	print("  moves %s; the roundhouse started %.3f s after the whiff's recovery began (full recovery %.3f)" % [ids,
-		rh - rec_t, Tuning.frames(Tuning.R7_MOVES[&"front_kick"]["f"].z)])
+		rh - rec_t, Tuning.frames(Tuning.R8_MOVES[&"front_kick"]["tap"]["f"].z)])
 	check(in_startup and active_still, "the gut punch fell in the startup, the roundhouse in the active frames")
 	check(ids == [&"front_kick", &"roundhouse"], "the startup press was dropped, the active-frame press came out")
-	check(absf(rh - rec_t - Tuning.frames(Tuning.R7_MOVES[&"front_kick"]["f"].z)) <= SLACK * 2.0,
+	check(absf(rh - rec_t - Tuning.frames(Tuning.R8_MOVES[&"front_kick"]["tap"]["f"].z)) <= SLACK * 2.0,
 		"on a whiff the buffered press waits for the full recovery")
 	await _idle()
 
@@ -68,16 +69,19 @@ func run() -> void:
 	print("  moves %s" % [ids])
 	check(ids == [&"front_kick", &"leg_kick"], "only the latest press (leg kick) came out")
 
-	print("a buffered press still held when its move starts is the heavy")
+	print("a buffered press still held when its move starts charges (Round 8)")
 	await _idle()
 	_clear()
 	await tap_input(&"front_kick")
 	await wait_until(func() -> bool: return _p.combat.is_attack_active(), 1.0)
 	Input.action_press(&"leg_kick")       # active frames, held through the recovery
-	await wait_until(func() -> bool: return _moves.size() >= 2, 1.5)
+	var charging := await wait_until(func() -> bool: return _p.combat.is_charging(), 1.5)
+	var charge_move := _p.combat.get_charge_move()
 	Input.action_release(&"leg_kick")
+	await wait_until(func() -> bool: return _moves.size() >= 2, 1.0)
 	ids = _moves.map(func(m: Array) -> StringName: return m[0])
-	check(ids.size() == 2 and ids[1] == &"heavy_leg_kick", "held: the buffered leg kick comes out as the heavy (%s)" % [ids])
+	check(charging and charge_move == &"leg_kick" and ids.size() == 2 and ids[1] == &"leg_kick" and bool(_moves[1][2]),
+		"held: the buffered leg kick charges, then comes out charged (%s)" % [_moves])
 	await _idle()
 
 	print("a press during a glide is dropped")
@@ -85,6 +89,7 @@ func run() -> void:
 	await _fresh()
 	_clear()
 	await tap_input(&"punch")
+	await ticks(1)  # Round 8: a held press glides once it turns out a tap (its release)
 	var glid := _p.combat.is_gliding()
 	await tap_input(&"uppercut", 0.03)  # still gliding: dropped
 	var still_gliding := _p.combat.is_gliding()
@@ -104,9 +109,9 @@ func run() -> void:
 	await tap_input(&"punch")
 	await wait_until(func() -> bool: return _starts.size() >= 2, 1.0)
 	var cross_after := _start_of(&"cross") - r_hit
-	var cut := Tuning.frames(Tuning.R7_MOVES[&"jab"]["f"].z * Tuning.R7_CHAIN_CUT)
+	var cut := Tuning.frames(Tuning.R8_MOVES[&"jab"]["tap"]["f"].z * Tuning.R7_CHAIN_CUT)
 	print("  jab hit: the buffered cross started %.3f s into the recovery (cut %.3f, full %.3f)" % [cross_after, cut,
-		Tuning.frames(Tuning.R7_MOVES[&"jab"]["f"].z)])
+		Tuning.frames(Tuning.R8_MOVES[&"jab"]["tap"]["f"].z)])
 	check(hits_on(g).size() >= 1 and absf(cross_after - cut) <= SLACK * 2.0, "on a hit the next move starts after %.0f%% of the recovery" % (Tuning.R7_CHAIN_CUT * 100.0))
 	g.queue_free()
 	await _fresh()
@@ -117,7 +122,7 @@ func run() -> void:
 	await tap_input(&"punch")
 	await wait_until(func() -> bool: return _starts.size() >= 2, 1.0)
 	var next_after: float = _starts[1][1] - r_miss
-	var full := Tuning.frames(Tuning.R7_MOVES[&"jab"]["f"].z)
+	var full := Tuning.frames(Tuning.R8_MOVES[&"jab"]["tap"]["f"].z)
 	print("  jab whiff: the next press started %.3f s into the recovery (full %.3f) as a %s" % [next_after, full, _starts[1][0]])
 	check(absf(next_after - full) <= SLACK * 2.0, "on a whiff it waits for the full recovery")
 	check(_starts[1][0] == &"jab", "and the string reset: the press after the whiffed jab is a jab, not a cross")
@@ -155,9 +160,9 @@ func run() -> void:
 	var mash := await _string_time(true)
 	var theory := 0.0
 	for id: StringName in [&"jab", &"cross"]:
-		var f: Vector3 = Tuning.R7_MOVES[id]["f"]
-		theory += Tuning.frames(f.x + f.y + f.z * Tuning.R7_CHAIN_CUT) + float(Tuning.R7_MOVES[id]["hitstop"])
-	theory += Tuning.frames(Tuning.R7_MOVES[&"hook"]["f"].x)
+		var f: Vector3 = Tuning.R8_MOVES[id]["tap"]["f"]
+		theory += Tuning.frames(f.x + f.y + f.z * Tuning.R7_CHAIN_CUT) + float(Tuning.R8_MOVES[id]["tap"]["hitstop"])
+	theory += Tuning.frames(Tuning.R8_MOVES[&"hook"]["tap"]["f"].x)
 	print("DATA first press -> the hook's first active frame: one press per move %.3f s, mashing at 20 Hz %.3f s, frame data %.3f s" % [
 		ideal, mash, theory])
 	check(ideal > 0.0 and mash > 0.0, "both strings landed three hits")

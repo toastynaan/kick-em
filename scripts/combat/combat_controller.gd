@@ -53,9 +53,49 @@ extends Node
 ## - Effects, camera shake and slow time listen to GameEvents; this file never
 ##   spawns contact effects or shakes the screen for hits.
 ##
+## Round 8 (docs/Round 8 — Charge and Pressure.md; wins over Round 7 for strikes):
+## - Charge: every strike button (the punch string's jab, cross, hook and the
+##   five specials) is a tap or a charge. A press released before
+##   Tuning.R8_TAP_MAX is the tap (its "tap" entry, its own frame data; a tap
+##   whose target needs a glide waits for the release before gliding). Still
+##   held at R8_TAP_MAX it charges (Phase.CHARGE): c goes 0 -> 1 from
+##   R8_TAP_MAX to Tuning.debug_charge_full s after the press, the player walks
+##   at R8_CHARGE_WALK_MULT turning to the target picked at the press, the
+##   heavy_<move>_load pose deepens (PoseAnimator.set_charge_amount). At full
+##   it holds R8_CHARGE_HOLD_AT_FULL, then fires itself. The meter's steps
+##   (get_charge_steps) are the c values where the result changes, padded to
+##   at least two ending at 1.0 (lead's rule: [0.5, 1.0] when there is none). The release re-picks
+##   the target along a pushed stick, glides up to R8_CHARGE_LUNGE (lerped by
+##   c), then R8_RELEASE_STARTUP frames, the tap's active frames and its
+##   recovery + R8_CHARGED_EXTRA_RECOVERY (MoveLibrary.charged_move). A hit on
+##   the charging player cancels it. Events: charge_started,
+##   charge_level_changed (the move's steps passed), charge_full,
+##   charge_released, charge_cancelled.
+## - Hits: a tap from R8_MOVES[move].tap, a charged strike from .charged lerped
+##   by c; a launch from c >= min(launch_from, debug_launch_step), full_react
+##   and full_break at c = 1; a sideways move (the hook) pushes and launches
+##   across the facing. Payoffs from R7_PAYOFFS (taps by id, charged strikes by
+##   payoff_id; they do not scale with c; a non-launch payoff never replaces a
+##   charged launch). Taps never break guards or tell armor; charged strikes do.
+## - Pressure (victim side, every fighter): player hits add their pressure x
+##   debug_pressure_mult (blocked hits x R8_BLOCKED_PRESSURE_MULT); at
+##   Tuning.r8_pressure_cap(archetype, level) the fighter breaks open for
+##   R8_BREAK_TIME (react &"broken": no block, no attack; hits on it x
+##   R8_BREAK_DAMAGE_MULT damage, x R8_BREAK_PUSH_MULT push and launch); then it
+##   is empty and fills at R8_BREAK_IMMUNE_RATE for R8_BREAK_IMMUNE. It drains
+##   after R8_PRESSURE_DECAY_DELAY. Events: pressure_broken, pressure_recovered.
+## - Air combo: a charged uppercut lifting a body R8_AIR_FOLLOW_MIN_LIFT or
+##   more makes it the air follow target (get_air_follow_target) for
+##   R8_AIR_FOLLOW_WINDOW. An attack press in the air with a lifted body within
+##   R8_AIR_STRIKE_RANGE (or during Traversal's launcher jump) is an air strike
+##   (MoveLibrary.air_move: R8_AIR_FRAMES, never charged). Each landed one up to
+##   debug_air_hits hangs the player and the body R8_AIR_HANG; a kick launches
+##   the body at R8_AIR_KICK_LAUNCH, a punch with the stick pulled back spikes it.
+##
 ## Timing: move phases run in the fighter's own time (the player's in player
 ## time, full speed in any slow motion) and stop during its hitstop. Input
-## windows (the hold, the chain grace) use TimeDirector.now() (real time).
+## windows (the tap, the charge, the chain grace) use TimeDirector.now() (real
+## time). Pressure runs in the victim's own time.
 
 ## Round 7: LIGHT is the punch button (string + hold for heavy); the specials
 ## and COUNTER are appended so older ints stay stable. Legacy entries: HEAVY =
@@ -63,8 +103,10 @@ extends Node
 ## LEG_KICK (bots and old tests); BLOCK stays the AI's guard.
 enum Action { LIGHT, HEAVY, KICK, SWEEP, GRAB, BLOCK, DASH, LEG_KICK, GUT_PUNCH, UPPERCUT,
 	FRONT_KICK, ROUNDHOUSE, COUNTER }
-## GLIDE: a strike closing on its target before its startup.
-enum Phase { IDLE, GLIDE, STARTUP, ACTIVE, RECOVERY }
+## GLIDE: a strike closing on its target before its startup. Round 8 (appended):
+## HOLD: a held press whose target needs a glide, waiting for the tap/charge
+## decision (the tap glides at the release); CHARGE: charging (is_charging()).
+enum Phase { IDLE, GLIDE, STARTUP, ACTIVE, RECOVERY, HOLD, CHARGE }
 enum Stun { NONE, HIT, BLOCK, STUMBLE, DAZE }
 
 signal attack_started(move_id: StringName)
@@ -116,12 +158,16 @@ const ARMOR_SNAP := 0.5
 ## m: the follow step never closes the gap to its victim below this (two capsules + a little).
 const FOLLOW_MIN_GAP := 0.65
 ## Reactions that slide the victim on its feet: the follow step goes after them.
-const FOLLOW_REACTS: Array[StringName] = [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop"]
+const FOLLOW_REACTS: Array[StringName] = [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop", &"flinch"]
 ## HitInfo.tier listeners see for a Round 7 reaction (doc: Reactions).
 const REACT_TIER := {&"snap": HitInfo.Tier.FLINCH, &"spin": HitInfo.Tier.STAGGER,
 	&"push": HitInfo.Tier.STAGGER, &"fold": HitInfo.Tier.STAGGER, &"buckle": HitInfo.Tier.STAGGER,
 	&"lift": HitInfo.Tier.STAGGER, &"repop": HitInfo.Tier.STAGGER, &"knockdown": HitInfo.Tier.KNOCKDOWN,
-	&"launch": HitInfo.Tier.LAUNCH, &"spike": HitInfo.Tier.LAUNCH}
+	&"launch": HitInfo.Tier.LAUNCH, &"spike": HitInfo.Tier.LAUNCH,
+	&"flinch": HitInfo.Tier.FLINCH, &"sweep": HitInfo.Tier.KNOCKDOWN, &"broken": HitInfo.Tier.STAGGER}
+## Round 8 reaction kinds and the Round 7 kind played while agent H's
+## Fighter.react does not know them yet (Fighter.REACT_KINDS); &"" = none.
+const R8_REACT_FALLBACK := {&"flinch": &"snap", &"sweep": &"knockdown", &"broken": &""}
 ## s: phase ends compare with this slack, so float sums of 1/120 s ticks end a
 ## 7-frame startup on its 14th tick, not the 15th.
 const PHASE_EPS := 1e-5
@@ -149,6 +195,13 @@ const DROP_ACTIVE_LIMIT := 3.0
 const VAULT_PRESS_KEEP := 1.0
 ## Pose played while gliding (agent P's), else the closest existing one.
 const GLIDE_ANIMS: Array[StringName] = [&"glide", &"dash"]
+# Round 8 (local; candidates for Tuning)
+## Hold shown while charging when P has no heavy_<move>_load for the move.
+const CHARGE_HOLD_FALLBACK: Array[StringName] = [&"power_charge"]
+## s added to a charged glide's time limit beyond lunge / R7_GLIDE_SPEED (it stops on distance first).
+const CHARGE_GLIDE_SLACK := 0.1
+## s of break left below which a broken fighter's daze is not shown again after a hit reaction.
+const BROKEN_SHOW_MIN := 0.1
 
 var fighter: Fighter
 var blocking := false
@@ -162,7 +215,7 @@ var last_dealt: HitInfo
 ## Last wall strike {target, position, normal, power, result} (tests, debug HUD).
 var last_wall_strike: Dictionary = {}
 ## Tests and the lab: read press/release like the player's buttons (a held
-## punch becomes the heavy) even without a PlayerController.
+## press charges: Round 8) even without a PlayerController.
 var force_hold_charge := false
 ## Chance a killing launch takes a limb (Tuning.R7_SEVER_ON_KILL; tests set 0 or 1).
 var sever_on_kill_chance := Tuning.R7_SEVER_ON_KILL
@@ -192,7 +245,7 @@ var _committed := false         ## strike_started sent for this move
 var _btn_down := {}             ## Action -> held
 var _press_action := -1         ## button that started the current move
 var _press_t := 0.0             ## its press time (real)
-var _hold_pending := false      ## a punch press still held: heavy at R7_HOLD_THRESHOLD
+var _hold_pending := false      ## a strike press still held: it charges at R8_TAP_MAX
 var _waited := false            ## a held tap reached the end of its startup and waits
 var _carry_took := {}           ## Action -> the Carry action that took its press
 # Sprint strikes, dropping strikes, the teleport counter
@@ -248,6 +301,31 @@ var _dash_velocity := Vector3.ZERO
 var _dash_cooldown_until := 0.0
 
 var _carried: RigidBody3D       ## debris chunk in the right hand (Thrower)
+
+# Round 8: the charge (player side)
+var _charge_id: StringName = &""  ## the strike being charged (&"" when not charging)
+var _charge_action := -1        ## its button
+var _charge_t0 := 0.0           ## real time of its press
+var _charge_c := 0.0            ## c now (0..1)
+var _charge_full := false       ## c reached 1 (charge_full sent)
+var _charge_level := 0          ## steps passed (charge_level_changed)
+var _charge_steps: Array[float] = []
+var _charge_target: Fighter     ## the target picked at the press
+var _strike_c := 0.0            ## c of the charged strike in progress
+var _glide_limit := INF         ## m the current glide may cover (a charged release: R8_CHARGE_LUNGE)
+var _glide_dist := 0.0          ## m it covered
+# Round 8: pressure (victim side)
+var _pressure := 0.0
+var _pressure_idle := 0.0       ## own s since the last pressure hit
+var _broken_left := 0.0         ## own s of the break left
+var _immune_left := 0.0         ## own s of the half-rate refill left
+var _presser: Fighter           ## who filled it last
+var _break_dir := Vector3.ZERO
+# Round 8: the air combo (player side)
+var _air_follow_body: Fighter   ## the charged uppercut's lifted body
+var _air_follow_t := -INF       ## real time it was lifted
+var _air_hits := 0              ## air hits landed in this air combo
+var _air_spike := false         ## the current air strike spikes (stick pulled back at the press)
 
 var _q_sphere := SphereShape3D.new()
 var _q_capsule := CapsuleShape3D.new()
@@ -330,7 +408,9 @@ func release(action: int) -> void:
 				if fighter.carry != null:
 					fighter.carry.on_attack_released(ca, now)
 				return
-			if action == _press_action and _hold_pending:
+			if is_charging() and action == _charge_action:
+				_release_charge()
+			elif action == _press_action and _hold_pending:
 				_release_hold()
 
 ## While holding: the punch throws (hold to wind up) and the leg kick knees
@@ -382,9 +462,13 @@ func _strike_press(action: int, now: float) -> void:
 			_buffer_action = action
 			_buffer_time = now
 
-## A strike starting from idle: a dropping strike in the air, else the move.
+## A strike starting from idle: an air strike at a lifted body (Round 8), a
+## dropping strike in the air, else the move.
 func _start_from_idle(action: int, press_t: float) -> void:
-	if _drop_ok():
+	var air := _air_strike_target(action)
+	if air != null:
+		_start_air(action, press_t, air)
+	elif _drop_ok():
 		_start_drop(action, press_t)
 	else:
 		_start_strike(action, press_t)
@@ -490,9 +574,9 @@ func is_attack_active() -> bool:
 func is_in_recovery() -> bool:
 	return _phase == Phase.RECOVERY
 
-## Round 7: no charge levels. Kept for callers (always false).
+## Round 8: a strike is charging (held past R8_TAP_MAX, not yet released).
 func is_charging() -> bool:
-	return false
+	return _phase == Phase.CHARGE and _charge_id != &""
 
 ## The player's own glide, startup or recovery (or nothing) is running: a
 ## dodge (M) or a counter (H) may cancel() it. Never during active frames.
@@ -518,18 +602,21 @@ func time_to_active() -> float:
 			return maxf(_startup - _t, 0.0) / scale + frozen
 		Phase.ACTIVE:
 			return 0.0
-	return INF
+	return INF  # idle, recovery, a held press or a charge (no strike decided yet)
 
 ## Debug overlay (F3): the current move, phase (&"idle", &"startup" (a glide
-## included: see "gliding"), &"active", &"recovery"), string position, chain,
-## the buffered press (its Action name, "" when none), glide and the target's
-## reaction state.
+## and a held press waiting for its glide included: see "gliding"), &"charge",
+## &"active", &"recovery"), string position, chain, the buffered press (its
+## Action name, "" when none), glide, the charge (c, charged strike in
+## progress), the air combo and the target's reaction state and pressure.
 func get_strike_debug() -> Dictionary:
 	var tgt := get_attack_target()
 	var phase: StringName = &"idle"
 	match _phase:
-		Phase.GLIDE, Phase.STARTUP:
+		Phase.GLIDE, Phase.STARTUP, Phase.HOLD:
 			phase = &"startup"
+		Phase.CHARGE:
+			phase = &"charge"
 		Phase.ACTIVE:
 			phase = &"active"
 		Phase.RECOVERY:
@@ -539,7 +626,10 @@ func get_strike_debug() -> Dictionary:
 		"buffered": String(Action.keys()[_buffer_action]).to_lower() if _buffer_action >= 0 else "",
 		"hold_pending": _hold_pending, "gliding": is_gliding(), "sprint": _p_sprint, "speed": _p_speed,
 		"pursuit": _pursuit_victim() != null,
-		"target": tgt, "target_state": tgt.get_react_state() if tgt != null else &""}
+		"charge": get_charge(), "charged": _move != null and _move.charged and _phase != Phase.IDLE,
+		"strike_c": _strike_c, "air": _move != null and _move.air and _phase != Phase.IDLE, "air_hits": _air_hits,
+		"target": tgt, "target_state": tgt.get_react_state() if tgt != null else &"",
+		"target_pressure": tgt.combat.get_pressure_fraction() if tgt != null and tgt.combat != null else 0.0}
 
 ## The Duelist's teleport counter is briefly untouchable (Fighter.is_invulnerable
 ## adds the player's dodge and counter).
@@ -571,9 +661,10 @@ func is_stunned() -> bool:
 func is_hit_stunned() -> bool:
 	return _stun_left > 0.0 and _stun_kind in [Stun.HIT, Stun.STUMBLE, Stun.DAZE]
 
-## The AI's guard (Block held), not while acting, reacting or off balance.
+## The AI's guard (Block held), not while acting, reacting, off balance or
+## broken open (Round 8 pressure).
 func is_blocking() -> bool:
-	if fighter == null or fighter.is_dead() or _held() or _holding_body():
+	if fighter == null or fighter.is_dead() or _held() or _holding_body() or is_broken():
 		return false
 	if _phase != Phase.IDLE or fighter.is_down() or fighter.is_reacting():
 		return false
@@ -590,6 +681,8 @@ func is_dashing() -> bool:
 func get_move_speed_mult() -> float:
 	if _held():
 		return 0.0
+	if is_charging() and _stun_left <= 0.0:
+		return Tuning.R8_CHARGE_WALK_MULT  # Round 8: walking while charging
 	if _phase != Phase.IDLE or _stun_left > 0.0:
 		return 0.0
 	if is_blocking():
@@ -612,10 +705,12 @@ func _forced_velocity_or_inf() -> Vector3:
 		return _dash_velocity
 	if _move == null:
 		return Vector3.INF
-	if _move.r7 and not _move.drop:  # a dropping strike keeps Traversal's fall
+	if _move.r7 and not _move.drop and not _move.air:  # dropping and air strikes keep Traversal's air motion
 		match _phase:
 			Phase.GLIDE:
 				return _glide_velocity
+			Phase.HOLD:
+				return Vector3.ZERO  # a held press waits for its glide with the feet planted
 			Phase.STARTUP, Phase.ACTIVE, Phase.RECOVERY:
 				# The lunge, the follow step, else the feet stay planted (no slide).
 				return _lunge_velocity if _has_lunge else Vector3.ZERO
@@ -654,8 +749,12 @@ func physics_tick(delta: float) -> void:
 		delta = TimeDirector.player_delta(delta)
 	_tick_victim(now)
 	_tick_chain(now)
+	_tick_air_combo()
+	if is_charging():
+		_check_charge_interrupts()
 	if now < _freeze_until or fighter.is_frozen():
 		return
+	_tick_pressure(delta)
 	if _slide_left > 0.0:
 		_slide_left -= delta
 	if _stun_left > 0.0:
@@ -683,23 +782,22 @@ func freeze_until(real_time: float) -> void:
 # Starting moves
 # =============================================================================
 
+## Free to start a move: idle, able to act, not broken open (Round 8).
 func _can_start() -> bool:
-	return _phase == Phase.IDLE and fighter.can_act()
+	return _phase == Phase.IDLE and fighter.can_act() and not is_broken()
 
-## A held punch or kick becomes its heavy for the player's buttons (through
+## A held strike press charges (Round 8) for the player's buttons (through
 ## PlayerController or press()/release() directly) and for tests and the lab
 ## (force_hold_charge). Other scripted presses (enemy bots) are taps.
 func _hold_enabled() -> bool:
 	return force_hold_charge or fighter.is_player
 
-## The move a strike button means now: the punch string's next punch (Heavy:
-## its heavy version), else the button's own move. &"" for non-strikes.
+## The move a strike button means now: the punch string's next punch (legacy
+## Heavy too: it fires charged), else the button's own move. &"" for non-strikes.
 func _move_for(action: int) -> StringName:
 	match action:
-		Action.LIGHT:
+		Action.LIGHT, Action.HEAVY:
 			return graph.punch_at(_string_index_now())
-		Action.HEAVY:
-			return graph.heavy_of(graph.punch_at(_string_index_now()))
 		Action.LEG_KICK, Action.SWEEP:
 			return &"leg_kick"
 		Action.GUT_PUNCH:
@@ -719,23 +817,21 @@ func _string_index_now() -> int:
 		return 0
 	return _string_next
 
-## A strike press that can start now: the move (the punch string and the
-## hold), the freeflow target, the glide or the startup.
+## A strike press that can start now: the move (the punch string), the
+## freeflow target, then the tap (glide or startup) with the charge decision
+## pending while the button is held (Round 8). A buffered press already held
+## past R8_TAP_MAX charges at once (c counts from its press); legacy Heavy
+## fires the string punch charged to full.
 func _start_strike(action: int, press_t: float) -> void:
 	var now := TimeDirector.now()
 	_tick_chain(now)  # a chain past its grace drops first (the punch string back to the jab)
 	var punch := action == Action.LIGHT or action == Action.HEAVY
 	var idx := _string_index_now()
 	var id := _move_for(action)
-	# The punch and the kicks have heavy versions (R7_HEAVY_OF): a held press becomes one.
-	var hold := action != Action.HEAVY and graph.heavy_of(id) != &"" and _hold_enabled() \
-		and bool(_btn_down.get(action, false))
-	if hold and now - press_t >= Tuning.R7_HOLD_THRESHOLD:
-		id = graph.heavy_of(id)  # held past the threshold before it could start
-		hold = false
 	var m := MoveLibrary.get_move(id)
 	if m == null:
 		return
+	var hold := m.r8 and action != Action.HEAVY and _hold_enabled() and bool(_btn_down.get(action, false))
 	_press_action = action
 	_press_t = press_t
 	_hold_pending = hold
@@ -744,7 +840,22 @@ func _start_strike(action: int, press_t: float) -> void:
 		_string_next = graph.next_index(idx)
 	else:
 		_cur_string = -1
-	_launch_move(m, _pick_freeflow_target())
+	var tgt := _pick_freeflow_target()
+	if action == Action.HEAVY and m.r8:
+		_hold_pending = false
+		_fire_charged(id, 1.0, tgt, true)
+		return
+	if hold and now - press_t >= Tuning.R8_TAP_MAX:
+		# Held past the tap before it could start (a buffered press): it charges now.
+		_setup_move(m)
+		_target = tgt
+		_seq_id = m.id
+		attack_started.emit(m.id)
+		if tgt != null:
+			fighter.snap_facing(tgt.get_ground_position() - fighter.global_position)
+		_begin_charge()
+		return
+	_launch_move(m, tgt)
 
 ## Any strike in the air (a jump, a fall, a kick-off) or late in a vault is a
 ## dropping strike at the freeflow target (no glide, no lunge): active until
@@ -828,8 +939,9 @@ func _is_pursuit_target(f: Variant) -> bool:
 
 ## Scripted move (tests, the lab, bots): start the Round 7 move `id` now, at
 ## `target` (null: the freeflow pick), exactly as its button would (glide,
-## lunge, auto-connect; a string punch moves the string on). False when the
-## fighter is not free to start it.
+## lunge, auto-connect; a string punch moves the string on). A Round 8 strike
+## id is its tap; the Round 7 heavy ids keep their Round 7 entries. False when
+## the fighter is not free to start it.
 func play_move(id: StringName, target: Fighter = null) -> bool:
 	var m := MoveLibrary.get_move(id)
 	if m == null or not m.r7 or not _can_start() or _held() or _holding_body():
@@ -845,24 +957,47 @@ func play_move(id: StringName, target: Fighter = null) -> bool:
 	_launch_move(m, tgt, Tuning.R7_COUNTER_GLIDE if id == &"counter" else INF)
 	return true
 
+## Scripted charged strike (tests, the lab, bots): fire the Round 8 strike
+## `id` charged to `c` now, at `target` (null: the release's pick), exactly as a
+## release at c would (the lunge glide, the release startup). No charge
+## events. False when the fighter is not free or `id` has no charged version.
+func play_charged(id: StringName, c: float, target: Fighter = null) -> bool:
+	var m := MoveLibrary.get_move(id)
+	if m == null or not m.r8 or not _can_start() or _held() or _holding_body():
+		return false
+	_tick_chain(TimeDirector.now())
+	_press_action = -1
+	_press_t = TimeDirector.now()
+	_hold_pending = false
+	_cur_string = graph.index_of(id)
+	if _cur_string >= 0:
+		_string_next = graph.next_index(_cur_string)
+	_fire_charged(id, clampf(c, 0.0, 1.0), target if _alive(target) else null, true)
+	return true
+
 ## Start a Round 7 move at `tgt` (null: along the stick, else facing). A target
 ## farther than reach + R7_GLIDE_FROM (and within `max_glide` m) is glided to
-## first; closer ones get the short lunge in the startup.
-func _launch_move(m: MoveData, tgt: Fighter, max_glide := INF) -> void:
+## first, at most `glide_limit` m (a charged release's lunge); closer ones get
+## the short lunge in the startup. A held press (Round 8) whose target needs a
+## glide waits in Phase.HOLD: the glide starts if it turns out a tap.
+## `announce`: attack_started (false: a charge's release, the same sequence).
+func _launch_move(m: MoveData, tgt: Fighter, max_glide := INF, glide_limit := INF, announce := true) -> void:
 	_setup_move(m)
 	_target = tgt
 	_seq_id = m.id
+	_glide_limit = glide_limit
 	# Sprint strike: the speed toward the target, sampled before Traversal drops
 	# a sprinting player to walk; the strike carries the run.
 	_sample_speed()
 	var t := fighter.traversal
 	if t != null and t.has_method(&"on_strike_started"):
 		t.on_strike_started(_p_sprint)
-	if _p_sprint and tgt != null and not m.drop:
+	if _p_sprint and tgt != null and not m.drop and not m.air:
 		_sprint_excepted = tgt
 		fighter.add_collision_exception_with(tgt)
 		tgt.add_collision_exception_with(fighter)
-	attack_started.emit(m.id)
+	if announce:
+		attack_started.emit(m.id)
 	_pursuit_spike = false
 	if _is_pursuit_target(tgt):
 		_locked_target = tgt  # the pursuit body: struck wherever it flies
@@ -870,9 +1005,12 @@ func _launch_move(m: MoveData, tgt: Fighter, max_glide := INF) -> void:
 	if tgt != null:
 		fighter.snap_facing(tgt.get_ground_position() - fighter.global_position)
 		var d := _flat_dist(tgt)
-		if not m.drop and _locked_target == null and d > m.reach * fighter.get_height_scale() + Tuning.R7_GLIDE_FROM \
-				and d <= max_glide:
-			_start_glide(tgt, d)
+		if not m.drop and not m.air and _locked_target == null \
+				and d > m.reach * fighter.get_height_scale() + Tuning.R7_GLIDE_FROM and d <= max_glide:
+			if _hold_pending:
+				_enter_hold()
+			else:
+				_start_glide(tgt, d)
 			return
 	else:
 		var stick := _stick_dir()
@@ -900,6 +1038,11 @@ func _setup_move(m: MoveData) -> void:
 	_locked_target = null
 	_glide_t = 0.0
 	_glide_velocity = Vector3.ZERO
+	_glide_limit = INF
+	_glide_dist = 0.0
+	_air_spike = false
+	if not m.charged:
+		_strike_c = 0.0
 	_lunge_left = Tuning.LUNGE_MAX
 	_lunge_velocity = Vector3.ZERO
 	_has_lunge = false
@@ -949,7 +1092,10 @@ func _end_sprint_exception() -> void:
 func _start_glide(tgt: Fighter, d: float) -> void:
 	_phase = Phase.GLIDE
 	_glide_t = 0.0
+	_glide_dist = 0.0
 	GameEvents.glide_started.emit(fighter, tgt, d)
+	if _move.charged and fighter.animator != null and fighter.animator.is_charge_load_held():
+		return  # a charged release glides in its held load (the strike then skips its wind-up)
 	if fighter.animator and _move.id == &"counter" and PoseLibrary.HOLDS.has(&"counter_catch"):
 		fighter.animator.hold_pose(&"counter_catch")  # the lead hand catches through the glide
 	elif fighter.animator:
@@ -972,21 +1118,27 @@ func _enter_startup(startup := -1.0) -> void:
 		_commit()
 	_update_aim()
 
-## The move is decided (a tap released, a heavy reached, a special): tell
-## Traversal's fallback, the AI (guards) and the whoosh (GameEvents.strike_started).
+## The move is decided (a tap released, a charge released, a special): tell
+## Traversal's fallback, the AI (guards) and the whoosh (GameEvents.strike_started;
+## charge_level: 0 a tap, 1 + the steps passed for a charged strike, 1 a Round 7 heavy).
 func _commit() -> void:
 	if _committed or _move == null:
 		return
 	_committed = true
 	if _move.kind == &"strike":
-		var heavy := 1 if graph.is_heavy(_move.id) else 0
-		GameEvents.strike_started.emit(fighter, get_attack_target(), _move.id, _p_sprint, heavy)
+		var level := 1 if graph.is_heavy(_move.id) else 0
+		if _move.charged:
+			level = 1 + _steps_passed(_steps_for(_move.id), _strike_c)
+		GameEvents.strike_started.emit(fighter, get_attack_target(), _move.id, _p_sprint, level)
 
-## The punch button came up before the hold threshold: a tap. A tap that waited
-## at the end of its startup goes active now (its pose snaps to the hit).
+## The button came up before R8_TAP_MAX: a tap. A tap waiting for its glide
+## (Phase.HOLD) glides now (or starts, its target having come close); one that
+## waited at the end of its startup goes active now (its pose snaps to the hit).
 func _release_hold() -> void:
 	_hold_pending = false
-	if _phase == Phase.STARTUP:
+	if _phase == Phase.HOLD:
+		_tap_from_hold()
+	elif _phase == Phase.STARTUP:
 		if _t >= _startup:
 			_t = _startup
 		if _waited and fighter.animator:
@@ -994,24 +1146,200 @@ func _release_hold() -> void:
 		_waited = false
 	_commit()
 
-## Still held at R7_HOLD_THRESHOLD: the heavy version of the string punch. Its
-## startup counts from the start of the move (the press, unless it glided).
-func _to_heavy() -> void:
+## A held press whose target needs a glide: stand in the charge pose until the
+## tap/charge decision (the release, or R8_TAP_MAX).
+func _enter_hold() -> void:
+	_phase = Phase.HOLD
+	_t = 0.0
+	_update_aim()
+	_hold_charge_pose()
+
+## The held press turned out a tap: the glide (re-measured), else the startup.
+func _tap_from_hold() -> void:
+	if fighter.animator:
+		fighter.animator.release_pose(0.05)
+	var tgt: Fighter = _target if _alive(_target) and not _target.is_down() else null
+	if tgt != null:
+		var d := _flat_dist(tgt)
+		fighter.snap_facing(tgt.get_ground_position() - fighter.global_position)
+		if d > _move.reach * fighter.get_height_scale() + Tuning.R7_GLIDE_FROM:
+			_start_glide(tgt, d)
+			return
+	_enter_startup()
+
+# --- Round 8: the charge ---------------------------------------------------------
+## Still held at R8_TAP_MAX: the strike charges (Phase.CHARGE). The tap is
+## dropped; c counts from the press. The target picked at the press is kept.
+func _begin_charge() -> void:
+	var id := _move.id
+	_phase = Phase.CHARGE
 	_hold_pending = false
-	var m := MoveLibrary.get_move(graph.heavy_of(_move.id))
-	if m == null:
-		_commit()
-		return
-	_move = m
-	_startup = m.startup_s()
-	_active = m.active_s()
-	_recovery = m.recovery_s(false)
 	_waited = false
-	if _phase == Phase.STARTUP:
-		if fighter.animator:
-			fighter.animator.play_move(m.anim, maxf(_startup - _t, Tuning.frames(1)), _active, _recovery)
-		attack_incoming.emit(m.id, time_to_active())
-	_commit()
+	_t = 0.0
+	_has_lunge = false
+	_glide_velocity = Vector3.ZERO
+	_lunge_velocity = Vector3.ZERO
+	_charge_id = id
+	_charge_action = _press_action
+	_charge_t0 = _press_t
+	_charge_c = 0.0
+	_charge_full = false
+	_charge_level = 0
+	_charge_steps = _steps_for(id)
+	_charge_target = _target if _alive(_target) else null
+	_hold_charge_pose()
+	GameEvents.charge_started.emit(fighter, id)
+	_tick_charge(TimeDirector.now())
+
+## The pose held while charging: P's charge load (MoveData.charge_hold:
+## PoseLibrary.charge_load_of), else a fallback hold. PoseAnimator's
+## set_charge_amount(c) deepens it every charge tick.
+func _hold_charge_pose() -> void:
+	if fighter.animator == null or _move == null or fighter.animator.is_charge_load_held():
+		return
+	var load := _move.charge_hold
+	if load == &"" or not PoseLibrary.HOLDS.has(load):
+		load = &""
+		for h: StringName in CHARGE_HOLD_FALLBACK:
+			if PoseLibrary.HOLDS.has(h):
+				load = h
+				break
+	if load != &"":
+		fighter.animator.hold_pose(load)
+
+## c of a charge pressed at real time `t0`, now: 0 at R8_TAP_MAX, 1 at
+## Tuning.debug_charge_full s after the press.
+static func charge_at(t0: float, now: float) -> float:
+	var span := maxf(Tuning.debug_charge_full - Tuning.R8_TAP_MAX, 1e-3)
+	return clampf((now - t0 - Tuning.R8_TAP_MAX) / span, 0.0, 1.0)
+
+## The charge meter's colour steps of strike `id` (ascending, each in (0, 1],
+## always at least two; lead's rule, 2026-11-03): the c values where its
+## charged result changes (its launch step: launch_from capped by
+## Tuning.debug_launch_step; 1.0 for full_react and full_break; for a lifting
+## move the c whose lift reaches R8_AIR_FOLLOW_MIN_LIFT, where the air combo
+## opens; a step at 0 is not shown), then 1.0 appended if the last is below it,
+## 0.5 inserted before a lone 1.0, and [0.5, 1.0] for a move with none (pure
+## scaling: jab, roundhouse). The HUD goes orange at the first, red at the last.
+static func _steps_for(id: StringName) -> Array[float]:
+	var out: Array[float] = []
+	var row: Dictionary = Tuning.R8_MOVES.get(id, {})
+	if row.is_empty():
+		return out
+	var ch: Dictionary = row["charged"]
+	var cand: Array[float] = []
+	if ch.has("launch_from"):
+		cand.append(minf(float(ch["launch_from"]), Tuning.debug_launch_step))
+	if ch.has("full_react") or bool(ch.get("full_break", false)):
+		cand.append(1.0)
+	if ch.has("lift"):
+		var lift: Vector2 = ch["lift"]
+		if lift.y > lift.x:
+			cand.append(clampf((Tuning.R8_AIR_FOLLOW_MIN_LIFT - lift.x) / (lift.y - lift.x), 0.0, 1.0))
+	cand.sort()
+	for c: float in cand:
+		if c > 1e-4 and (out.is_empty() or c - out[-1] > 1e-4):
+			out.append(c)
+	if out.is_empty() or out[-1] < 1.0 - 1e-4:
+		out.append(1.0)
+	if out.size() == 1:
+		out.insert(0, 0.5)
+	return out
+
+static func _steps_passed(steps: Array[float], c: float) -> int:
+	var n := 0
+	for st: float in steps:
+		if c >= st - 1e-4:
+			n += 1
+	return n
+
+## One charge tick (real time): c, the animator, the steps, full, the facing
+## toward the charge's target, and the fire-itself at full + R8_CHARGE_HOLD_AT_FULL.
+func _tick_charge(now: float) -> void:
+	if not is_charging():
+		return
+	var c := charge_at(_charge_t0, now)
+	_charge_c = c
+	if fighter.animator != null:
+		fighter.animator.set_charge_amount(c)
+	var level := _steps_passed(_charge_steps, c)
+	if level > _charge_level:
+		_charge_level = level
+		GameEvents.charge_level_changed.emit(fighter, level)
+	if c >= 1.0 and not _charge_full:
+		_charge_full = true
+		GameEvents.charge_full.emit(fighter, _charge_id)
+	if not _alive(_charge_target) or _charge_target.is_down():
+		_charge_target = null
+	_target = _charge_target
+	if _charge_target != null:
+		var to := _charge_target.get_ground_position() - fighter.global_position
+		to.y = 0.0
+		if to.length_squared() > 1e-4:
+			fighter.face_dir = to.normalized()
+		_update_aim()
+	if now - _charge_t0 >= Tuning.debug_charge_full + Tuning.R8_CHARGE_HOLD_AT_FULL - PHASE_EPS:
+		_release_charge()
+
+## A charge ends without a strike: grabbed, knocked down, holding something.
+func _check_charge_interrupts() -> void:
+	if _held():
+		_cancel_charge(&"grabbed")
+	elif fighter.is_down():
+		_cancel_charge(&"down")
+	elif fighter.carry != null and (fighter.carry.is_holding() or fighter.carry.is_busy()):
+		_cancel_charge(&"cancel")
+
+## The charge ends without a strike (charge_cancelled; reason &"hit" | &"cancel" |
+## &"grabbed" | &"down"), then the move is cancelled.
+func _cancel_charge(reason: StringName) -> void:
+	if not is_charging():
+		return
+	var id := _charge_id
+	_end_charge()
+	if fighter.animator != null:
+		fighter.animator.set_charge_amount(0.0)
+	GameEvents.charge_cancelled.emit(fighter, id, reason)
+	cancel()
+
+func _end_charge() -> void:
+	_charge_id = &""
+	_charge_action = -1
+	_charge_target = null
+	_charge_steps = []
+
+## The release (or the fire-itself at full): charge_released, then the charged
+## strike at the c reached. The load stays held through the glide: the strike
+## plays from it and skips its own wind-up (PoseAnimator).
+func _release_charge() -> void:
+	if not is_charging():
+		return
+	var now := TimeDirector.now()
+	var id := _charge_id
+	var c := charge_at(_charge_t0, now)
+	var level := _steps_passed(_charge_steps, c)
+	var tgt := _charge_target
+	_end_charge()
+	GameEvents.charge_released.emit(fighter, id, level)
+	_fire_charged(id, c, tgt, false)
+
+## The charged strike of `id` at charge `c`: the target re-picked along a
+## pushed stick (else `keep`, else the pick along camera forward), within the
+## lunge's reach; a glide of at most R8_CHARGE_LUNGE (lerped by c), then
+## R8_RELEASE_STARTUP frames. `announce`: a new sequence (attack_started).
+func _fire_charged(id: StringName, c: float, keep: Fighter, announce: bool) -> void:
+	var m := MoveLibrary.charged_move(id)
+	if m == null:
+		cancel()
+		return
+	var lunge := lerpf(Tuning.R8_CHARGE_LUNGE.x, Tuning.R8_CHARGE_LUNGE.y, c)
+	var reach := maxf(Tuning.R7_TARGET_RANGE, lunge + m.reach * fighter.get_height_scale())
+	var tgt := _pursuit_victim()
+	if tgt == null:
+		var current: Fighter = keep if _alive(keep) else get_combat_target()
+		tgt = Targeting.pick_freeflow_target(fighter, _stick_dir(), current, _camera_forward(), reach)
+	_strike_c = c
+	_launch_move(m, tgt, INF, lunge, announce)
 
 # --- Freeflow targeting --------------------------------------------------------
 ## The target of a press: Targeting.pick_freeflow_target along the stick, else
@@ -1069,10 +1397,19 @@ func _glide_left() -> float:
 	if _phase != Phase.GLIDE or _move == null or not _alive(_target):
 		return 0.0
 	var gap := _flat_dist(_target) - _move.reach * fighter.get_height_scale() * LUNGE_GAP
-	return clampf(gap / Tuning.R7_GLIDE_SPEED, 0.0, maxf(Tuning.R7_GLIDE_MAX_TIME - _glide_t, 0.0))
+	gap = minf(gap, _glide_limit - _glide_dist)
+	return clampf(gap / Tuning.R7_GLIDE_SPEED, 0.0, maxf(_glide_max_time() - _glide_t, 0.0))
+
+## s a glide may last: R7_GLIDE_MAX_TIME, or a charged release's lunge at
+## R7_GLIDE_SPEED (+ CHARGE_GLIDE_SLACK; it stops on its distance first).
+func _glide_max_time() -> float:
+	if is_finite(_glide_limit):
+		return maxf(Tuning.R7_GLIDE_MAX_TIME, _glide_limit / Tuning.R7_GLIDE_SPEED + CHARGE_GLIDE_SLACK)
+	return Tuning.R7_GLIDE_MAX_TIME
 
 ## Glide tick: close on the target at R7_GLIDE_SPEED, facing it; the startup
-## begins at reach x LUNGE_GAP or after R7_GLIDE_MAX_TIME.
+## begins at reach x LUNGE_GAP, after _glide_limit m (a charged release's
+## lunge) or after the glide's time limit.
 func _tick_glide(delta: float) -> void:
 	_glide_t += delta
 	_glide_velocity = Vector3.ZERO
@@ -1083,13 +1420,16 @@ func _tick_glide(delta: float) -> void:
 	to.y = 0.0
 	var d := to.length()
 	var gap := d - _move.reach * fighter.get_height_scale() * LUNGE_GAP
-	if gap <= 0.01 or _glide_t > Tuning.R7_GLIDE_MAX_TIME:
+	var left := _glide_limit - _glide_dist
+	if gap <= 0.01 or left <= 0.005 or _glide_t > _glide_max_time():
 		_enter_startup()
 		return
 	var dir := to / d
 	fighter.snap_facing(dir)
 	var speed := maxf(Tuning.R7_GLIDE_SPEED, _p_speed) if _p_sprint else Tuning.R7_GLIDE_SPEED
-	_glide_velocity = dir * minf(speed, gap / maxf(delta, 1e-4))
+	var step := minf(speed * delta, minf(gap, left))
+	_glide_dist += step
+	_glide_velocity = dir * step / maxf(delta, 1e-4)
 
 ## Per tick: the startup lunge toward the target (up to Tuning.LUNGE_MAX,
 ## stopping at reach x LUNGE_GAP) and the follow step during recovery. Once
@@ -1116,7 +1456,7 @@ func _update_motion(delta: float) -> void:
 ## A sprint strike carries its run speed instead, through the active frames,
 ## and stops Tuning.SPRINT_LUNGE_STOP short. A dropping strike falls as it is.
 func _update_lunge(tgt: Fighter, delta: float) -> void:
-	if _move.drop:
+	if _move.drop or _move.air:
 		return
 	_has_lunge = true
 	if _phase == Phase.ACTIVE and (_hit_any or not _p_sprint):
@@ -1193,9 +1533,15 @@ static func _bone_pos(f: Fighter, bone: StringName) -> Vector3:
 # =============================================================================
 
 func _advance(delta: float) -> void:
-	if _hold_pending and _phase in [Phase.GLIDE, Phase.STARTUP] \
-			and TimeDirector.now() - _press_t >= Tuning.R7_HOLD_THRESHOLD:
-		_to_heavy()
+	if _phase == Phase.CHARGE:
+		_tick_charge(TimeDirector.now())
+		return
+	if _hold_pending and _phase in [Phase.HOLD, Phase.GLIDE, Phase.STARTUP] \
+			and TimeDirector.now() - _press_t >= Tuning.R8_TAP_MAX:
+		_begin_charge()  # still held at R8_TAP_MAX: it charges
+		return
+	if _phase == Phase.HOLD:
+		return  # a held press waits for the tap/charge decision before its glide
 	if _phase == Phase.GLIDE:
 		_tick_glide(delta)
 		return
@@ -1204,13 +1550,10 @@ func _advance(delta: float) -> void:
 		if _t < _startup - PHASE_EPS:
 			return
 		if _hold_pending:
-			if not _waited and fighter.animator:
-				# Held past its startup: the heavy's load pose while the hold is decided.
-				var load := StringName(String(graph.heavy_of(_move.id)) + "_load")
-				if PoseLibrary.HOLDS.has(load):
-					fighter.animator.hold_pose(load)
+			if not _waited:
+				_hold_charge_pose()  # held past its startup: the charge's load pose while it is decided
 			_waited = true
-			return  # a held tap waits for the hold decision (its time keeps counting)
+			return  # a held tap waits for the tap/charge decision (its time keeps counting)
 		_t -= _startup
 		_enter_active()
 		if _phase != Phase.ACTIVE:
@@ -1317,9 +1660,12 @@ func _end_sequence() -> void:
 ## on_reaction); a punch cancelled before its active frames gives its string
 ## position back.
 func cancel() -> void:
+	if is_charging():
+		_cancel_charge(&"cancel")  # charge_cancelled, then back here
+		return
 	var was_busy := _phase != Phase.IDLE
 	var was_r7 := was_busy and _move != null and _move.r7
-	if was_busy and _cur_string >= 0 and (_phase == Phase.GLIDE or _phase == Phase.STARTUP):
+	if was_busy and _cur_string >= 0 and _phase in [Phase.GLIDE, Phase.STARTUP, Phase.HOLD, Phase.CHARGE]:
 		_string_next = _cur_string
 	_close_window()
 	_phase = Phase.IDLE
@@ -1362,6 +1708,9 @@ func on_reaction(reaction: int, stun: float) -> void:
 
 func on_death() -> void:
 	cancel()
+	if is_broken():
+		_broken_left = 0.0
+		GameEvents.pressure_recovered.emit(fighter)  # the daze ends with the fighter
 	_end_chain()
 	drop_debris()
 	_clear_aim()
@@ -1626,11 +1975,17 @@ func _detect_hits() -> void:
 	# 4. Round 7 auto-connect: the chosen target is always hit when it is within
 	# reach + R7_CONNECT_MARGIN on the first active frame (not invulnerable,
 	# dodging or down), even if the limb sweep missed.
+	# An air strike's target (Round 8) connects within R8_AIR_STRIKE_RANGE +
+	# R7_CONNECT_MARGIN in 3D (it is up in the air with the player).
 	var tgt: Fighter = _target if _alive(_target) else null
 	if _first_active and m.r7 and tgt != null and not found.has(tgt) and _valid_victim(tgt) \
-			and not tgt.is_invulnerable() and not _is_dodging(tgt) \
-			and _flat_dist(tgt) <= m.reach * hs + Tuning.R7_CONNECT_MARGIN:
-		found[tgt] = [0.0, m.target_bone, _bone_pos(tgt, m.target_bone), true]
+			and not tgt.is_invulnerable() and not _is_dodging(tgt):
+		var near := _flat_dist(tgt) <= m.reach * hs + Tuning.R7_CONNECT_MARGIN
+		if m.air:
+			near = tgt.global_position.distance_to(fighter.global_position) \
+				<= Tuning.R8_AIR_STRIKE_RANGE + Tuning.R7_CONNECT_MARGIN
+		if near:
+			found[tgt] = [0.0, m.target_bone, _bone_pos(tgt, m.target_bone), true]
 	for victim: Fighter in found:
 		if not is_instance_valid(victim) or _registry.has(victim.get_instance_id()):
 			continue
@@ -1684,11 +2039,16 @@ func _try_wall_strike(space: PhysicsDirectSpaceState3D) -> void:
 	last_wall_strike = {"target": target, "position": pos, "normal": normal, "power": power, "result": res}
 	_wall_feel(res, normal)
 
-## Strike power on a wall: WALL_POWER_PER_WEIGHT x the move's Round 7 weight.
+## Strike power on a wall: WALL_POWER_PER_WEIGHT x the move's Round 7 weight
+## (Round 8: a strike's own weight when that is more: a charged one's at its c),
+## so the wall tables keep holding for taps.
 func strike_power() -> float:
 	if _move == null:
 		return 0.0
-	return WALL_POWER_PER_WEIGHT * float(_move.r7_entry().get("weight", 0.0))
+	var w := float(_move.r7_entry().get("weight", 0.0))
+	if _move.r8:
+		w = maxf(w, float(_r8_values(_move.id, _move.charged, _strike_c)["weight"]))
+	return WALL_POWER_PER_WEIGHT * w
 
 func _wall_feel(result: StringName, normal: Vector3) -> void:
 	var broke := result == &"break" or result == &"hole"
@@ -1869,6 +2229,14 @@ func _deliver(victim: Fighter, bone: StringName, pos: Vector3, auto := false) ->
 		_spiked[victim.get_instance_id()] = [victim, TimeDirector.now()]  # its floor impact is a shockwave
 	if _move.r7:
 		_on_r7_landed(victim, info)
+	if _move.air:
+		_on_air_hit(victim, info)
+	elif _move.charged and _move.id == &"uppercut" and info.react == &"lift" \
+			and info.lift_height >= Tuning.R8_AIR_FOLLOW_MIN_LIFT - 1e-3:
+		# A charged uppercut's lift: Jump follows it (get_air_follow_target).
+		_air_follow_body = victim
+		_air_follow_t = TimeDirector.now()
+		_air_hits = 0
 
 # --- The hit an attack deals -------------------------------------------------------
 ## Attacker side of the hit pipeline: a Round 7 move from R7_MOVES / R7_PAYOFFS
@@ -1895,10 +2263,17 @@ func _build_hit(victim: Fighter, bone: StringName, pos: Vector3) -> HitInfo:
 	info.zone = BodyZones.of_bone(info.hit_bone)
 	info.level = m.hit_level
 	info.unblockable = m.unblockable
-	if m.r7:
+	if m.r8:
+		if m.air:
+			_fill_air(info, victim)
+		else:
+			_fill_r8(info, victim)
+	elif m.r7:
 		_fill_r7(info, victim)
 	else:
 		_fill_preset(info, victim)
+	if m.r7 and fighter.is_player:
+		_apply_break_bonus(info, victim)
 	return info
 
 ## World direction the strike pushes `victim`: MoveData.push_dir in the frame
@@ -1951,7 +2326,7 @@ func _fill_r7(info: HitInfo, victim: Fighter) -> void:
 	info.speed_bonus = Power.speed_bonus(_p_speed, _p_cap)
 	info.sprint = _p_speed >= Tuning.SPEED_BONUS_FROM and not info.counter
 	if info.sprint:
-		var sprint_launch := _apply_sprint(info, id)
+		var sprint_launch := _apply_sprint(info, id, graph.is_heavy(id))
 		if sprint_launch > 0.0:
 			launch_speed = maxf(launch_speed if info.react == &"launch" else 0.0, sprint_launch)
 			launch_angle = Tuning.R7_SPRINT_LAUNCH_ANGLE if launch_speed == sprint_launch else launch_angle
@@ -1984,13 +2359,208 @@ func _fill_r7(info: HitInfo, victim: Fighter) -> void:
 	info.damage_scale = scale
 	if victim.is_fleeing() or Targeting.is_crawling(victim):
 		info.damage = maxf(info.damage, victim.hp)  # any hit finishes a fleeing or crawling enemy
+	_sever_on_kill(info, victim)
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.energy = _energy_of(info, victim.get_total_mass())
+
+## A Round 8 strike (docs/Round 8 — Charge and Pressure.md: Moves): a tap from
+## R8_MOVES[id].tap, a charged strike from .charged at the c of its release
+## (_r8_values). The R7_PAYOFFS row for the victim's react state replaces the
+## result (taps by their id, charged strikes by payoff_id; payoffs never scale
+## with c), except that a non-launch payoff never replaces a charged launch.
+## A sideways move (the hook) pushes, knocks down and launches across the
+## facing, toward the side its strike travels (MoveData.push_dir; meta
+## "push_dir"). Then Round 7's rules: sprint strikes (charged strikes launch
+## like Round 7's heavies), heavy enemies, combo scaling, the pursuit hit,
+## fleeing and crawling enemies, the sever on a killing launch. The hit's
+## pressure is its entry's x Tuning.debug_pressure_mult (the victim applies its
+## own multipliers); a charged strike breaks guards and tell armor.
+func _fill_r8(info: HitInfo, victim: Fighter) -> void:
+	var id := _move.id
+	var charged := _move.charged
+	var e := _r8_values(id, charged, _strike_c)
+	var state := victim.get_react_state()
+	info.victim_state = state
+	var pay: Dictionary = (Tuning.R7_PAYOFFS.get(e["payoff_id"], {}) as Dictionary).get(state, {})
+	if bool(e["launched"]) and StringName(pay.get("react", &"")) != &"launch":
+		pay = {}  # the charged launch outranks a non-launch payoff
+	info.payoff = not pay.is_empty()
+	var heavy := victim.is_heavy()
+	info.react = pay.get("react", e["react"])
+	info.push = float(pay.get("push", e["push"]))
+	info.stun = float(pay.get("stun", e["stun"]))
+	info.weight = float(e["weight"])
+	info.hitstop = float(e["hitstop"])
+	info.charged = charged
+	info.charge = _strike_c if charged else 0.0
+	info.charge_level = (1 + _steps_passed(_steps_for(id), _strike_c)) if charged else 0
+	info.pressure = float(e["pressure"]) * Tuning.debug_pressure_mult
+	info.counter = false
+	info.chain_index = (_chain_count if _chain_alive(TimeDirector.now()) else 0) + 1
+	info.combo_index = info.chain_index
+	info.set_meta(&"guard_break", charged)
+	if bool(e["full_break"]):
+		info.set_meta(&"full_break", true)
+	var launch_speed := float(pay.get("launch_speed", e.get("launch_speed", 9.0)))
+	var launch_angle := float(pay.get("launch_angle", e.get("launch_angle", 20.0)))
+	# Sprint strikes (god path): at speed they push harder or launch.
+	info.speed_bonus = Power.speed_bonus(_p_speed, _p_cap)
+	info.sprint = _p_speed >= Tuning.SPEED_BONUS_FROM
+	if info.sprint:
+		var sprint_launch := _apply_sprint(info, id, charged)
+		if sprint_launch > 0.0:
+			launch_speed = maxf(launch_speed if info.react == &"launch" else 0.0, sprint_launch)
+			launch_angle = Tuning.R7_SPRINT_LAUNCH_ANGLE if launch_speed == sprint_launch else launch_angle
+			info.react = &"launch"
+	info.lift_height = 0.0
+	if info.react == &"lift":
+		info.lift_height = float(pay.get("lift", e.get("lift", Tuning.R7_LIFT_HEIGHT)))
+	elif info.react == &"repop":
+		info.lift_height = Tuning.R7_REPOP_HEIGHT
+	if heavy:
+		info.push *= Tuning.R7_HEAVY_PUSH_MULT
+		info.stun *= Tuning.R7_HEAVY_STUN_MULT
+		info.lift_height *= Tuning.R7_HEAVY_LIFT_MULT
+	var dir := info.hit_direction
+	if bool(e["sideways"]):
+		dir = _sideways_dir(victim)
+		info.set_meta(&"push_dir", dir)
+	info.launch_velocity = Vector3.ZERO
+	if info.react == &"launch":
+		var speed := minf(launch_speed * (Tuning.HEAVY_LAUNCH_MULT if heavy else 1.0), Tuning.LAUNCH_SPEED_MAX)
+		var a := deg_to_rad(launch_angle)
+		info.launch_velocity = (dir * cos(a) + Vector3.UP * sin(a)) * speed
+	info.tier = _tier_named(e["tier"]) if (not info.payoff and info.react == e["base_react"]) \
+		else REACT_TIER.get(info.react, HitInfo.Tier.STAGGER)
+	var vc := victim.combat
+	var n := vc.next_taken_index() if vc != null else 1
+	var scale := combo_scale(n)
+	var base := float(e["dmg"]) * float(pay.get("dmg_mult", 1.0))
+	if _is_pursuit_target(victim):
+		base = _fill_pursuit(info, victim)
+	info.damage = base * scale * _damage_mult()
+	info.damage_scale = scale
+	if victim.is_fleeing() or Targeting.is_crawling(victim):
+		info.damage = maxf(info.damage, victim.hp)  # any hit finishes a fleeing or crawling enemy
+	_sever_on_kill(info, victim)
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.energy = _energy_of(info, victim.get_total_mass())
+
+## The resolved Round 8 entry of strike `id`: its "tap" entry, or its
+## "charged" entry at c (Vector2 pairs lerped; "react" &"launch" from
+## min(launch_from, Tuning.debug_launch_step), "full_react" at c = 1). Adds
+## "base_react" (the entry's own react), "launched", "full_break" (c = 1),
+## "sideways" and "payoff_id" (the tap's own id, or the charged entry's).
+static func _r8_values(id: StringName, charged: bool, c: float) -> Dictionary:
+	var row: Dictionary = Tuning.R8_MOVES[id]
+	if not charged:
+		var t: Dictionary = (row["tap"] as Dictionary).duplicate()
+		t["base_react"] = t["react"]
+		t["launched"] = false
+		t["full_break"] = false
+		t["sideways"] = false
+		t["payoff_id"] = id
+		return t
+	var ch: Dictionary = row["charged"]
+	var out := {}
+	for k: String in ch:
+		var v: Variant = ch[k]
+		out[k] = lerpf((v as Vector2).x, (v as Vector2).y, c) if v is Vector2 else v
+	out["base_react"] = ch["react"]
+	out["launched"] = false
+	var full := c >= 1.0 - 1e-4
+	if ch.has("launch_from") and c >= minf(float(ch["launch_from"]), Tuning.debug_launch_step) - 1e-4:
+		out["react"] = &"launch"
+		out["launched"] = true
+	elif full and ch.has("full_react"):
+		out["react"] = ch["full_react"]
+	out["full_break"] = full and bool(ch.get("full_break", false))
+	out["sideways"] = bool(ch.get("sideways", false))
+	out["payoff_id"] = ch.get("payoff_id", id)
+	return out
+
+## Across the attacker's facing, toward the side the strike travels
+## (MoveData.push_dir.x: the left hook sweeps to the attacker's right).
+func _sideways_dir(victim: Fighter) -> Vector3:
+	var base := victim.get_ground_position() - fighter.get_ground_position()
+	base.y = 0.0
+	base = base.normalized() if base.length() > 0.05 else fighter.get_forward()
+	var side := 1.0 if _move == null or _move.push_dir.x >= 0.0 else -1.0
+	return base.cross(Vector3.UP).normalized() * side
+
+## An air strike (docs/Round 8: Air combo): the tap's damage, weight, hitstop
+## and pressure. A kick launches the body away at R8_AIR_KICK_LAUNCH
+## (R8_AIR_KICK_ANGLE up, along the hit; heavies x HEAVY_LAUNCH_MULT); a punch
+## with the stick pulled back at the press spikes it (Round 7's spike:
+## R7_SPIKE_SPEED straight down, R7_SPIKE_DAMAGE, the floor shockwave); any
+## other punch keeps it floating (its tap reaction with no push or stun: the
+## hang holds it, no re-pop cap). Never a payoff, never charged.
+func _fill_air(info: HitInfo, victim: Fighter) -> void:
+	var id := _move.id
+	var t: Dictionary = Tuning.R8_MOVES[id]["tap"]
+	info.air = true
+	info.charged = false
+	info.victim_state = victim.get_react_state()
+	info.payoff = false
+	info.weight = float(t["weight"])
+	info.hitstop = float(t["hitstop"])
+	info.pressure = float(t["pressure"]) * Tuning.debug_pressure_mult
+	info.push = 0.0
+	info.stun = 0.0
+	info.lift_height = 0.0
+	info.counter = false
+	info.chain_index = (_chain_count if _chain_alive(TimeDirector.now()) else 0) + 1
+	info.combo_index = info.chain_index
+	info.set_meta(&"guard_break", false)
+	info.launch_velocity = Vector3.ZERO
+	var dmg := float(t["dmg"])
+	if _move.is_kick:
+		info.react = &"launch"
+		var speed := minf(Tuning.R8_AIR_KICK_LAUNCH * (Tuning.HEAVY_LAUNCH_MULT if victim.is_heavy() else 1.0),
+			Tuning.LAUNCH_SPEED_MAX)
+		var a := deg_to_rad(Tuning.R8_AIR_KICK_ANGLE)
+		info.launch_velocity = (info.hit_direction * cos(a) + Vector3.UP * sin(a)) * speed
+		info.tier = HitInfo.Tier.LAUNCH
+	elif _air_spike:
+		var d := deg_to_rad(SPIKE_DRIFT)
+		info.react = &"spike"
+		info.launch_velocity = (_camera_forward() * sin(d) + Vector3.DOWN * cos(d)) * Tuning.R7_SPIKE_SPEED
+		info.tier = HitInfo.Tier.LAUNCH
+		dmg = Tuning.R7_SPIKE_DAMAGE
+	else:
+		info.react = t["react"]
+		info.tier = _tier_named(t["tier"])
+	var vc := victim.combat
+	var n := vc.next_taken_index() if vc != null else 1
+	var scale := combo_scale(n)
+	info.damage = dmg * scale * _damage_mult()
+	info.damage_scale = scale
+	if victim.is_fleeing() or Targeting.is_crawling(victim):
+		info.damage = maxf(info.damage, victim.hp)
+	_sever_on_kill(info, victim)
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.energy = _energy_of(info, victim.get_total_mass())
+
+## A killing launch or spike may take a limb (sever_on_kill_chance).
+func _sever_on_kill(info: HitInfo, victim: Fighter) -> void:
 	if info.react in [&"launch", &"spike"] and info.damage >= victim.hp and randf() < sever_on_kill_chance:
 		var cut := _sever_cut(victim, info)
 		if cut != &"":
 			info.sever_cut = cut
 			info.tier = HitInfo.Tier.SEVER
 			info.is_finisher = true
-	info.reaction = HitInfo.reaction_for_tier(info.tier)
+
+## Round 8: a player hit on a broken-open victim (CombatController.is_broken):
+## x R8_BREAK_DAMAGE_MULT damage, x R8_BREAK_PUSH_MULT push and launch speed
+## (cap LAUNCH_SPEED_MAX), HitInfo.broken_bonus.
+func _apply_break_bonus(info: HitInfo, victim: Fighter) -> void:
+	if victim.combat == null or not victim.combat.is_broken():
+		return
+	info.broken_bonus = true
+	info.damage *= Tuning.R8_BREAK_DAMAGE_MULT
+	info.push *= Tuning.R8_BREAK_PUSH_MULT
+	if info.launch_velocity.length_squared() > 1e-6:
+		info.launch_velocity = (info.launch_velocity * Tuning.R8_BREAK_PUSH_MULT).limit_length(Tuning.LAUNCH_SPEED_MAX)
 	info.energy = _energy_of(info, victim.get_total_mass())
 
 ## The move whose R7 entry this hit uses: a dropping strike hits with its
@@ -2003,16 +2573,17 @@ func _entry_of(id: StringName) -> Dictionary:
 	return m.r7_entry() if m != null else _move.r7_entry()
 
 ## Sprint strike at v = _p_speed >= SPEED_BONUS_FROM (doc: God path): the
-## heavies, the front kick, the roundhouse and the uppercut launch (returns the
-## launch speed: R7_SPRINT_LAUNCH_BASE + R7_SPRINT_LAUNCH_PER_MS (v - 6), cap
-## LAUNCH_SPEED_MAX); punches and the leg kick push x (1 + R7_SPRINT_PUSH_PER_MS
-## (v - 6)) and are at least a push (returns 0).
-func _apply_sprint(info: HitInfo, id: StringName) -> float:
+## heavies (Round 8: every charged strike), the front kick, the roundhouse and
+## the uppercut launch (returns the launch speed: R7_SPRINT_LAUNCH_BASE +
+## R7_SPRINT_LAUNCH_PER_MS (v - 6), cap LAUNCH_SPEED_MAX); punches and the leg
+## kick push x (1 + R7_SPRINT_PUSH_PER_MS (v - 6)) and are at least a push
+## (returns 0).
+func _apply_sprint(info: HitInfo, id: StringName, heavy: bool) -> float:
 	var over := _p_speed - Tuning.SPEED_BONUS_FROM
-	if graph.is_heavy(id) or SPRINT_LAUNCHERS.has(id):
+	if heavy or SPRINT_LAUNCHERS.has(id):
 		return minf(Tuning.R7_SPRINT_LAUNCH_BASE + Tuning.R7_SPRINT_LAUNCH_PER_MS * over, Tuning.LAUNCH_SPEED_MAX)
 	info.push *= 1.0 + Tuning.R7_SPRINT_PUSH_PER_MS * over
-	if info.react in [&"snap", &"spin", &"fold", &"buckle"]:
+	if info.react in [&"snap", &"spin", &"fold", &"buckle", &"flinch"]:
 		info.react = &"push"
 	return 0.0
 
@@ -2219,6 +2790,8 @@ func _ignored(info: HitInfo) -> int:
 func _blocks(info: HitInfo) -> bool:
 	if not (info.kind == &"strike" or info.kind == &"projectile"):
 		return false
+	if is_broken():
+		return false  # Round 8: broken open, no guard at all
 	# Break-away auto-guard: frontal strikes count as blocked (grabs still work).
 	if TimeDirector.now() < _escape_guard_until and _attacker_in_front(info, GUARD_FRONT_DOT) \
 			and not fighter.is_down():
@@ -2258,13 +2831,20 @@ func _attacker_in_front(info: HitInfo, min_dot: float) -> bool:
 		return true
 	return fighter.get_forward().dot(to_attacker.normalized()) > min_dot
 
-## Tell armor of the move in progress (0 when not in startup/active).
+## Tell armor of the move in progress (0 when not in startup/active): the
+## move's own, + the archetype's "armor_bonus" (legacy: every move, the brute),
+## and at least 1 on the moves the archetype lists in "armor_moves" (Round 8:
+## the Duelist's big swing; his other wind-ups are interrupted by taps).
 func get_armor_level() -> int:
 	if _move == null or not (_phase == Phase.STARTUP or _phase == Phase.ACTIVE):
 		return 0
 	if fighter.is_player:
 		return _move.armor
-	return _move.armor + int(fighter.config.get("armor_bonus", 0))
+	var a := _move.armor + int(fighter.config.get("armor_bonus", 0))
+	var listed: Variant = fighter.config.get("armor_moves", [])
+	if listed is Array and (listed as Array).has(_move.id):
+		a = maxi(a, 1)
+	return a
 
 ## Round 7 tell armor: an enemy in an armored tell (the heavy archetype, a
 ## move's armor) takes tapped punches with damage and a small snap and keeps
@@ -2279,6 +2859,7 @@ func _armored(info: HitInfo) -> bool:
 ## Guard (the AI's): Tuning.GUARD_DAMAGE_MULT of the damage; a stagger-tier or
 ## heavier hit pushes the guard back Tuning.GUARD_PUSH m.
 func _apply_block(info: HitInfo) -> int:
+	_cancel_charge(&"hit")
 	info.result = HitInfo.Result.BLOCKED
 	last_result = info.result
 	var m := MoveLibrary.get_move(info.move_id)
@@ -2309,6 +2890,7 @@ func _apply_block(info: HitInfo) -> int:
 			fighter.animator.play_move(&"block_hit", Tuning.frames(2), Tuning.frames(2), maxf(stun - Tuning.frames(4), 0.05))
 		blocking = false  # re-held when blockstun ends
 	_freeze_pair(info.attacker as Fighter, Power.hitstop_for(HitInfo.Tier.FLINCH), true)
+	_add_pressure(info, true)  # Round 8: blocked hits fill pressure too (guards break this way)
 	fighter.apply_damage(chip, &"block", info)
 	GameEvents.hit_blocked.emit(info)
 	hit_received.emit(info)
@@ -2331,6 +2913,7 @@ func _freeze_pair(att: Fighter, duration: float, victim_too: bool) -> void:
 			att.combat.freeze_until(now + ha)
 
 func _apply_hit(info: HitInfo) -> int:
+	_cancel_charge(&"hit")  # Round 8: a hit on the charging player cancels the charge
 	info.result = HitInfo.Result.HIT
 	last_result = info.result
 	_end_chain()  # this fighter was hit: its own chain drops
@@ -2386,7 +2969,7 @@ func _apply_r7_hit(info: HitInfo) -> int:
 	var lethal := info.damage >= fighter.hp
 	var n := next_taken_index()
 	var decay := r7_stun_decay(n)
-	var downs := info.react in [&"knockdown", &"launch", &"spike"]
+	var downs := info.react in [&"knockdown", &"launch", &"spike", &"sweep"]
 	var escape := not lethal and not downs and n >= Tuning.R7_COMBO_ESCAPE_HITS and not fighter.is_down()
 	_register_taken()
 	info.stun *= decay
@@ -2396,6 +2979,8 @@ func _apply_r7_hit(info: HitInfo) -> int:
 		info.stun = 0.0
 	elif not lethal or info.react == &"launch" or info.react == &"spike":
 		_react_r7(info)
+	if not lethal:
+		_add_pressure(info, false)  # Round 8 (may break it open: the daze after this reaction)
 	_fighter_call(&"set_hitstop_jitter", [_jitter_for(info.tier)])
 	_freeze_pair(att, info.hitstop, true)
 	fighter.apply_damage(info.damage, info.move_id, info)
@@ -2413,18 +2998,29 @@ func _react_r7(info: HitInfo) -> void:
 		return
 	cancel()
 	drop_debris()
+	var pdir: Vector3 = info.get_meta(&"push_dir", info.hit_direction)  # a sideways move: across the facing
 	match info.react:
 		&"knockdown":
-			fighter.knockdown(info.hit_direction, info.hit_bone)
+			fighter.knockdown(pdir, info.hit_bone)
 			_set_getup(Tuning.REACT_KNOCKDOWN["ground"])
 		&"launch", &"spike":
 			_launch_body(info)
 			_set_getup(Tuning.REACT_LAUNCH["ground"])
+		&"sweep":
+			# Round 8: the legs taken out (H's sweep), else a knockdown.
+			if _react_kind_ok(fighter, &"sweep"):
+				fighter.react(&"sweep", pdir, info.push, info.stun, info)
+			else:
+				fighter.knockdown(pdir, info.hit_bone)
+			_set_getup(Tuning.REACT_KNOCKDOWN["ground"])
 		_:
-			var sdir: Vector3 = info.get_meta(&"strike_dir", info.hit_direction)
+			var sdir: Vector3 = info.get_meta(&"push_dir", info.get_meta(&"strike_dir", info.hit_direction))
 			var flat := Vector3(sdir.x, 0.0, sdir.z)
 			flat = flat.normalized() if flat.length_squared() > 1e-4 else info.hit_direction
-			fighter.react(info.react, flat, info.push, info.stun, info)
+			var kind := info.react
+			if not _react_kind_ok(fighter, kind):
+				kind = R8_REACT_FALLBACK.get(kind, kind)  # flinch -> snap until H's react knows it
+			fighter.react(kind, flat, info.push, info.stun, info)
 
 ## Mesh jitter for a tier (Tuning.HITSTOP_JITTER_RANGE, flinch to sever).
 static func _jitter_for(tier: int) -> float:
@@ -2509,6 +3105,7 @@ func _leg_bone_for(info: HitInfo) -> StringName:
 ## (ignore_flinch) and tell armor. The hit still lands (hit_landed: flash,
 ## sound) and the attacker feels it.
 func _apply_armor(info: HitInfo) -> int:
+	_cancel_charge(&"hit")
 	info.result = HitInfo.Result.HIT
 	last_result = info.result
 	_register_taken()
@@ -2528,6 +3125,8 @@ func _apply_armor(info: HitInfo) -> int:
 		if fighter.ragdoll != null and not fighter.is_body_simulating():
 			fighter.ragdoll.flinch(sdir, info.hit_bone, ARMOR_SNAP)
 	_freeze_pair(info.attacker as Fighter, stop, true)
+	if info.damage < fighter.hp:
+		_add_pressure(info, false)  # Round 8: armored hits fill pressure (a break cancels the wind-up)
 	fighter.apply_damage(info.damage, info.move_id, info)
 	GameEvents.hit_landed.emit(info)
 	GameEvents.armor_absorbed.emit(info)
@@ -2698,7 +3297,7 @@ func is_stumbling() -> bool:
 func start_counter(target: Fighter, tell_time: float) -> bool:
 	if fighter == null or fighter.is_dead() or fighter.is_down() or _held() or _holding_body():
 		return false
-	if not _alive(target) or target.is_down():
+	if not _alive(target) or target.is_down() or is_broken():
 		return false
 	if not (_phase == Phase.IDLE or _phase == Phase.RECOVERY) or is_hit_stunned() or fighter.is_reacting():
 		return false
@@ -2933,3 +3532,236 @@ func _damage_mult() -> float:
 	if fighter.brain != null and fighter.brain.has_method(&"get_damage_mult"):
 		m *= float(fighter.brain.call(&"get_damage_mult"))
 	return m
+
+
+# =============================================================================
+# Round 8: the charge, pressure and the air combo (contract API; agent B)
+# =============================================================================
+
+## The charge amount c (0..1) of the strike being charged; 0 when not charging
+## (is_charging() tells the two apart).
+func get_charge() -> float:
+	return _charge_c if is_charging() else 0.0
+
+## The move being charged (&"jab", &"front_kick", ...), &"" when not charging.
+func get_charge_move() -> StringName:
+	return _charge_id if is_charging() else &""
+
+## The target picked at the charge's press (the body turns to it while
+## charging; PlayerController faces it), null when not charging or none.
+func get_charge_target() -> Fighter:
+	return _charge_target if is_charging() and _alive(_charge_target) else null
+
+## The c values where the charged move's result changes (the meter's colour
+## steps), ascending, each in (0, 1]. Empty when not charging.
+func get_charge_steps() -> Array[float]:
+	if not is_charging():
+		return []
+	return _charge_steps.duplicate()
+
+func is_charge_full() -> bool:
+	return is_charging() and _charge_full
+
+## Victim side: current pressure and the break capacity (Tuning.r8_pressure_cap).
+func get_pressure() -> float:
+	return _pressure
+
+func get_pressure_max() -> float:
+	if fighter == null:
+		return Tuning.R8_PRESSURE_CAP_DEFAULT
+	return Tuning.r8_pressure_cap(fighter.archetype, fighter.level)
+
+## get_pressure() / get_pressure_max(), 0..1 (1 while broken).
+func get_pressure_fraction() -> float:
+	if is_broken():
+		return 1.0
+	return clampf(_pressure / maxf(get_pressure_max(), 1e-3), 0.0, 1.0)
+
+## Broken open: dazed, can't block or attack.
+func is_broken() -> bool:
+	return _broken_left > 0.0
+
+func get_broken_time_left() -> float:
+	return maxf(_broken_left, 0.0)
+
+## Player side: the body a Jump press would follow right now (a charged
+## uppercut's lift inside R8_AIR_FOLLOW_WINDOW and range), else null. H reads it
+## on Jump and calls traversal.start_air_follow(target).
+func get_air_follow_target() -> Fighter:
+	var b: Fighter = _air_follow_body if _alive(_air_follow_body) else null
+	if b == null or TimeDirector.now() - _air_follow_t > Tuning.R8_AIR_FOLLOW_WINDOW:
+		return null
+	if not b.is_lifted() or b.is_down() or b.is_held():
+		return null
+	var to := b.global_position - fighter.global_position
+	if Vector2(to.x, to.z).length() > Tuning.R8_AIR_FOLLOW_RANGE:
+		return null
+	return b
+
+## Air hits landed in the current air combo (0 when none).
+func get_air_hits() -> int:
+	return _air_hits
+
+# --- Pressure (victim side) ---------------------------------------------------------
+## A player hit adds its pressure (HitInfo.pressure: the move's x
+## debug_pressure_mult) x R8_BLOCKED_PRESSURE_MULT when blocked, x
+## R8_BREAK_IMMUNE_RATE in the immunity after a break; a full charged gut
+## punch (meta "full_break") fills it outright. HitInfo.pressure becomes what
+## was added. Nothing is added while broken. Full: broken open.
+func _add_pressure(info: HitInfo, blocked: bool) -> void:
+	var att := info.attacker as Fighter
+	if info.pressure <= 0.0 or att == null or not is_instance_valid(att) or not att.is_player \
+			or fighter.is_player or fighter.is_dead() or is_broken():
+		info.pressure = 0.0
+		return
+	var cap := get_pressure_max()
+	var add := info.pressure * (Tuning.R8_BLOCKED_PRESSURE_MULT if blocked else 1.0)
+	if _immune_left > 0.0:
+		add *= Tuning.R8_BREAK_IMMUNE_RATE
+	elif bool(info.get_meta(&"full_break", false)):
+		add = maxf(add, cap - _pressure)  # the full charged gut punch breaks it outright
+	info.pressure = add
+	_pressure_idle = 0.0
+	_presser = att
+	_pressure = minf(_pressure + add, cap)
+	if _pressure >= cap - 1e-4:
+		var d := info.hit_direction
+		_break_open(att, Vector3(d.x, 0.0, d.z))
+
+## Broken open for R8_BREAK_TIME: the guard drops, no attacks, the daze
+## (Fighter.react &"broken": H's Fighter shows it once a reaction, a lift or a
+## knockdown from the breaking hit is over, and again after later hits while
+## is_broken() holds).
+func _break_open(att: Fighter, dir: Vector3) -> void:
+	_pressure = get_pressure_max()
+	_broken_left = Tuning.R8_BREAK_TIME
+	_immune_left = 0.0
+	_break_dir = dir
+	_block_held = false
+	if _stun_left > 0.0 and _stun_kind == Stun.BLOCK:
+		_stun_left = 0.0  # out of blockstun into the daze
+		_stun_kind = Stun.NONE
+		_slide_plant = false
+	_update_block_state()
+	GameEvents.pressure_broken.emit(fighter, att)
+	_show_broken()
+
+## The daze for the rest of the break: H's react &"broken" (it waits for the
+## body to be free), else the dazed stun once the body is free. Cancels any wind-up.
+func _show_broken() -> void:
+	if fighter.is_dead():
+		return
+	if _react_kind_ok(fighter, &"broken"):
+		var info := HitInfo.new()
+		info.attacker = _presser if is_instance_valid(_presser) else null
+		info.victim = fighter
+		info.hit_bone = Bones.CHEST
+		fighter.react(&"broken", _break_dir, 0.0, _broken_left, info)
+	elif not fighter.is_reacting() and not fighter.is_down() and not fighter.is_held():
+		apply_daze(_broken_left)
+
+## Per tick (own time, not in hitstop): the break runs out (pressure_recovered,
+## the meter empty, the immunity starts; without H's &"broken" the dazed stun
+## comes back after a hit's reaction); otherwise the meter drains
+## R8_PRESSURE_DECAY of its capacity per s once R8_PRESSURE_DECAY_DELAY passed
+## without a hit.
+func _tick_pressure(delta: float) -> void:
+	if _broken_left > 0.0:
+		_broken_left -= delta
+		if _broken_left <= 0.0:
+			_recover_pressure()
+		elif _broken_left > BROKEN_SHOW_MIN and not _react_kind_ok(fighter, &"broken") and not fighter.is_reacting() \
+				and not is_dazed() and not fighter.is_down() and not fighter.is_held():
+			apply_daze(_broken_left)
+		return
+	if _immune_left > 0.0:
+		_immune_left = maxf(_immune_left - delta, 0.0)
+	if _pressure > 0.0:
+		_pressure_idle += delta
+		if _pressure_idle >= Tuning.R8_PRESSURE_DECAY_DELAY:
+			_pressure = maxf(_pressure - Tuning.R8_PRESSURE_DECAY * get_pressure_max() * delta, 0.0)
+
+func _recover_pressure() -> void:
+	_broken_left = 0.0
+	_pressure = 0.0
+	_pressure_idle = 0.0
+	_immune_left = Tuning.R8_BREAK_IMMUNE  # H's daze ends itself once is_broken() is false
+	if is_dazed():
+		_stun_left = 0.0
+		_on_stun_end()
+	GameEvents.pressure_recovered.emit(fighter)
+
+## H's Fighter.react knows `kind` (Fighter.REACT_KINDS; the Round 8 kinds land
+## there when H implements them).
+static func _react_kind_ok(f: Fighter, kind: StringName) -> bool:
+	var sc: Script = f.get_script() if f != null else null
+	while sc != null:
+		var cm := sc.get_script_constant_map()
+		if cm.has("REACT_KINDS"):
+			return (cm["REACT_KINDS"] as Array).has(kind)
+		sc = sc.get_base_script()
+	return false
+
+# --- The air combo (player side) -----------------------------------------------------
+## In the air by choice: a jump, a hang, Traversal's air state or its launcher jump.
+func _player_airborne() -> bool:
+	return _fighter_bool(&"is_airborne") or _traversal_bool(&"is_airborne") \
+		or _traversal_bool(&"is_air_following")
+
+## The lifted body an attack press in the air strikes (Round 8): Traversal's
+## launcher-jump target, else the nearest lifted opponent within
+## R8_AIR_STRIKE_RANGE. null on the ground, for non-strikes, or when none.
+func _air_strike_target(action: int) -> Fighter:
+	if not fighter.is_player or not Tuning.R8_MOVES.has(_move_for(action)) or not _player_airborne():
+		return null
+	var t := fighter.traversal
+	if t != null and t.has_method(&"get_air_follow_target"):
+		var af: Variant = t.call(&"get_air_follow_target")
+		if _alive(af) and (af as Fighter).team != fighter.team:
+			return af
+	var best: Fighter = null
+	var best_d := Tuning.R8_AIR_STRIKE_RANGE
+	for f in Targeting.opponents_of(fighter):
+		if f.is_dead() or not f.is_lifted():
+			continue
+		var d := f.global_position.distance_to(fighter.global_position)
+		if d <= best_d:
+			best_d = d
+			best = f
+	return best
+
+## An air strike at `tgt`: the button's move (the punch string counts on) on
+## R8_AIR_FRAMES, never charged; a punch with the stick pulled back spikes.
+func _start_air(action: int, press_t: float, tgt: Fighter) -> void:
+	_tick_chain(TimeDirector.now())
+	var idx := _string_index_now()
+	var m := MoveLibrary.air_move(_move_for(action))
+	if m == null:
+		return
+	_press_action = action
+	_press_t = press_t
+	_hold_pending = false
+	if action == Action.LIGHT or action == Action.HEAVY:
+		_cur_string = idx
+		_string_next = graph.next_index(idx)
+	else:
+		_cur_string = -1
+	var spike := not m.is_kick and _intent_back()
+	_launch_move(m, tgt)
+	_air_spike = spike
+
+## A landed air strike: up to Tuning.debug_air_hits per combo the player and
+## the body hang R8_AIR_HANG (a finisher's body flies: only the player hangs);
+## GameEvents.air_hit.
+func _on_air_hit(victim: Fighter, info: HitInfo) -> void:
+	_air_hits += 1
+	if _air_hits <= Tuning.debug_air_hits:
+		fighter.hang(Tuning.R8_AIR_HANG)
+		if not info.react in [&"launch", &"spike"]:
+			victim.air_hang(Tuning.R8_AIR_HANG)
+	GameEvents.air_hit.emit(fighter, victim, _air_hits)
+
+## The air combo ends when the player is back on the ground.
+func _tick_air_combo() -> void:
+	if _air_hits > 0 and not _player_airborne() and not (_move != null and _move.air and _phase != Phase.IDLE):
+		_air_hits = 0

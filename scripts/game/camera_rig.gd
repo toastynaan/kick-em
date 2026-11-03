@@ -60,6 +60,27 @@ extends Node3D
 ##   tier trauma; enemy hits on the player keep the tier trauma; drive impacts
 ##   shake by speed (DRIVE_TRAUMA: slam big, break medium); the Battering Ram
 ##   shakes by Tuning.TRAUMA ram.
+## - Round 8 (docs/Round 8 — Charge and Pressure.md):
+##   - Charge: while the player charges a strike (CombatController.get_charge()
+##     c > 0) the FOV narrows by CHARGE_ZOOM_FOV x smoothstep(c) (a slight
+##     push-in, monotonic in c), following c closely and easing back after the
+##     release or a cancel (CHARGE_FALL_RATE). GameEvents.charge_full (the
+##     player) adds a short narrowing pulse (CHARGE_FULL_PULSE). The charged
+##     hit itself punches by its weight (Round 7 rule).
+##   - Pressure break: the player breaking an enemy's pressure
+##     (GameEvents.pressure_broken, attacker = the player) punches the FOV
+##     (BREAK_PUNCH_FOV) and raises the trauma to BREAK_TRAUMA. No slow motion.
+##   - Air combo: while Traversal.is_air_following(), or the player is airborne
+##     with CombatController.get_air_hits() > 0 (or right after an
+##     air_follow_started / air_hit), the look-at rises (AIR_LOOK_RAISE) and
+##     leans toward the juggled body, the camera pulls back (AIR_PULLBACK,
+##     further if the player and the body would not fit AIR_SAFE of the frame)
+##     and sits a little lower. All of it on springs, and the follow's vertical
+##     spring softens to AIR_FOLLOW_OMEGA_Y: a hang never jolts the view. Air
+##     hits punch at AIR_HIT_PUNCH_SHARE of their weight; the kick launch and
+##     the spike use the launch and spike framing (HitInfo.air with a steep
+##     downward launch counts as a spike). The fall tilt stays off until the
+##     player lands.
 ## Cinematics the player does not control: the player's own knockdown (keep the
 ## pelvis in view), the last-kill close-up (GameEvents.last_kill: a cut to a side
 ## angle at CAM_LAST_KILL_DIST for TimeDirector's last-kill slow motion, then an
@@ -242,6 +263,34 @@ const PITCH_PUNCH_RISE := 0.04         ## s: ...rising this fast,
 const PITCH_PUNCH_HOLD := 0.1          ## held to here,
 const PITCH_PUNCH_END := 0.5           ## and eased back by here
 
+# Round 8 (local; candidates for Tuning).
+## Charge: FOV narrower by this at c = 1 (smoothstep in c).
+const CHARGE_ZOOM_FOV := 3.0           ## degrees
+const CHARGE_RISE_RATE := 14.0         ## 1/s: the zoom follows c closely while charging...
+const CHARGE_FALL_RATE := 6.0          ## ...and eases back after the release (95% in 0.5 s)
+const CHARGE_FULL_PULSE := 1.5         ## degrees narrower at the peak of the charge_full pulse
+const CHARGE_PULSE_RISE := 0.05        ## s
+const CHARGE_PULSE_HOLD := 0.08        ## s
+const CHARGE_PULSE_END := 0.3          ## s
+## Pressure break by the player: a short punch, no slow motion.
+const BREAK_PUNCH_FOV := 2.5           ## degrees (the hit's own weight punch is raised to this, never stacked)
+const BREAK_TRAUMA := 0.3              ## raised to (shake 0.09)
+## Air combo framing.
+const AIR_LOOK_RAISE := 0.35           ## m the look point rises above the followed player
+const AIR_LEAN_SHARE := 0.5            ## of the way from the player toward the juggled body...
+const AIR_LEAN_MAX := 1.5              ## ...at most this far (m)
+const AIR_LEAN_UP := 1.2               ## m: the lean's vertical part at most (a body above the player)
+const AIR_PULLBACK := 1.0              ## m further back at full air framing
+const AIR_DROP := 0.3                  ## m lower (the view flattens a little toward the juggle)
+const AIR_SAFE := 0.8                  ## the player and the body sit inside this share of the half frame
+const AIR_OMEGA := 7.0                 ## rad/s: the air lean is a critically damped spring (no jolt on a hang)
+const AIR_FOLLOW_OMEGA_Y := 12.0       ## rad/s: the follow's vertical spring at full air framing (FOLLOW_OMEGA otherwise)
+const AIR_RISE_RATE := 6.0             ## 1/s into the air framing (95% in 0.5 s)...
+const AIR_FALL_RATE := 3.0             ## ...and out of it after landing
+const AIR_EVENT_GRACE := 0.25          ## s after air_follow_started / air_hit the combo counts before Traversal / Combat report it
+const AIR_BODY_RANGE := 6.0            ## m: a body further off is left to the launch framing
+const AIR_HIT_PUNCH_SHARE := 0.5       ## an air hit's weight punch and kick at this share (finishers: full)
+
 ## Player settings (pause menu, saved to SETTINGS_PATH).
 static var sensitivity := 1.0
 static var invert_y := false
@@ -386,6 +435,22 @@ var _pitch_amp := 0.0             ## rad of the downward punch at its peak
 var _pitch_age := 10.0            ## s since it started
 var _pitch_punch := 0.0           ## rad of downward punch this frame
 
+# Round 8 state.
+var _charge_c := 0.0              ## the player's charge c this frame (0 when not charging)
+var _charge_k := 0.0              ## degrees of eased charge zoom (0..CHARGE_ZOOM_FOV)
+var _charge_pulse_age := 10.0     ## s since the last charge_full pulse started
+var _charge_pulse := 0.0          ## degrees of pulse this frame
+var _charge_fulls := 0            ## the player's charge_full events seen (tests, debug)
+var _breaks := 0                  ## the player's pressure breaks seen (tests, debug)
+var _air_combo := false           ## latched from the follow jump / first air hit until the player lands
+var _air_k := 0.0                 ## 0..1 eased air framing
+var _air_body = null              ## untyped: the juggled body (may be freed)
+var _air_event_t := -100.0        ## real time of the last air_follow_started / air_hit
+var _air_lean := Vector3.ZERO     ## smoothed look offset (raise + lean toward the body)
+var _air_lean_v := Vector3.ZERO
+var _air_dist := 0.0              ## fitted air framing distance this frame (0 = none)
+var _air_hits_seen := 0           ## the player's air_hit events seen (tests, debug)
+
 func _ready() -> void:
 	add_to_group(&"camera_rig")
 	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
@@ -434,6 +499,10 @@ func _ready() -> void:
 	GameEvents.rammed.connect(_on_rammed)
 	GameEvents.wall_run_started.connect(_on_wall_run_started)
 	GameEvents.wall_run_ended.connect(_on_wall_run_ended)
+	GameEvents.charge_full.connect(_on_charge_full)
+	GameEvents.pressure_broken.connect(_on_pressure_broken)
+	GameEvents.air_follow_started.connect(_on_air_follow_started)
+	GameEvents.air_hit.connect(_on_air_hit)
 	if target == null:
 		target = Targeting.player(get_tree())
 	snap_behind()
@@ -557,6 +626,37 @@ func is_glide_followed() -> bool:
 ## Downward punch (spike) this frame, degrees (0 almost always).
 func get_pitch_punch() -> float:
 	return rad_to_deg(_pitch_punch)
+
+## Round 8: degrees the charge narrows the FOV this frame (eased zoom, without
+## the charge_full pulse), and the pulse on its own.
+func get_charge_zoom() -> float:
+	return _charge_k
+
+func get_charge_pulse() -> float:
+	return _charge_pulse
+
+func get_charge_full_count() -> int:
+	return _charge_fulls
+
+func get_break_count() -> int:
+	return _breaks
+
+## Round 8 air combo: 0..1 eased air framing, the juggled body (null when none),
+## the smoothed look offset, and the air hits seen.
+func get_air_k() -> float:
+	return _air_k
+
+func is_air_combo() -> bool:
+	return _air_combo
+
+func get_air_body() -> Fighter:
+	return _air_body if _alive(_air_body) else null
+
+func get_air_lean() -> Vector3:
+	return _air_lean
+
+func get_air_hit_count() -> int:
+	return _air_hits_seen
 
 ## Spike hits seen and floor impacts that punched; the last impact
 ## ({"by": &"shockwave" | &"fall", "pos", "trauma"}).
@@ -741,6 +841,9 @@ func get_debug_text() -> String:
 		"yes" if _is_gliding() else "no", rad_to_deg(_auto_yaw_rate),
 		(_follow - target.get_aim_point()).length() if _alive_node(target) else 0.0,
 		_teleports, _pursuits, _spike_impacts, _spike_hits]
+	line += "\ncharge %.2f zoom %.1f deg  breaks %d  air %.2f%s lean %.2f m dist %.1f  air hits %d" % [
+		_charge_c, _charge_k, _breaks, _air_k, (" on " + _label_of(_air_body)) if _alive(_air_body) else "",
+		_air_lean.length(), _air_dist, _air_hits_seen]
 	line += "\nblocking: %s%s" % [", ".join(_blocker_names) if not _blocker_names.is_empty() else "nothing",
 		"  (squeezed by concrete)" if _squeezed else ""]
 	return line
@@ -791,6 +894,7 @@ func _process(_delta: float) -> void:
 	_request_mode(desired, t, desired == Mode.CLOSEUP or desired == Mode.KO or desired == Mode.DOWN \
 		or _mode == Mode.CLOSEUP)
 
+	_update_air_state(t, dt)
 	_update_speed_framing(dt)
 	var want_look := _look
 	var want_dist := _dist
@@ -853,24 +957,35 @@ func _process(_delta: float) -> void:
 				# Sprint or drive: further and lower (the larger of the two applies).
 				want_dist += maxf(Tuning.CAM_SPRINT_PULLBACK * _sprint_k, Tuning.R7_CAM_DRIVE_PULLBACK * _drive_k)
 				want_height -= maxf(Tuning.CAM_SPRINT_DROP * _sprint_k, Tuning.R7_CAM_DRIVE_DROP * _drive_k)
+				# Round 8 air combo: further back and a little lower.
+				want_dist += AIR_PULLBACK * _air_k
+				want_height -= AIR_DROP * _air_k
 				var lf := _launch_frame(t, dt, p, want_dist, want_height)
 				var launching: bool = lf[0]
 				if launching and lf[1] > want_dist:
 					want_dist = lf[1]
 					dist_rate = LAUNCH_DIST_RATE
+				var air_d := _air_frame(dt, p, want_dist, want_height, launching)
+				if air_d > want_dist:
+					want_dist = air_d
+				if _air_k > 0.0:
+					dist_rate = maxf(dist_rate, LAUNCH_DIST_RATE)
 				# Round 7 combat lean and auto-yaw (the launch framing has its own).
 				_update_combat_lean(dt, p, launching)
 				if not launching:
-					_combat_yaw(t, dt, p + _combat_lean, want_dist, want_height)
+					_combat_yaw(t, dt, p + _combat_lean + _air_lean, want_dist, want_height)
 				else:
 					_combat_yaw_v = 0.0
-				want_look = _follow + _combat_lean + _launch_lean
+				want_look = _follow + _combat_lean + _launch_lean + _air_lean
 				direct_look = true
 				shoulder = 1.0
 				subject = p
 
 	if not play:
 		_launch_lean = Vector3.ZERO
+		_air_lean = Vector3.ZERO
+		_air_lean_v = Vector3.ZERO
+		_air_dist = 0.0
 		_combat_lean = Vector3.ZERO
 		_combat_lean_v = Vector3.ZERO
 		_combat_yaw_v = 0.0
@@ -1092,6 +1207,8 @@ func _update_speed_framing(dt: float) -> void:
 		sc = 0.0
 		fall = 0.0
 		running = false
+	if _air_combo:
+		fall = 0.0  # Round 8: the drop out of an air combo is not a fall (no roll until the player lands)
 	# Sprint (the FOV must not snap when a sprint strike drops you to walk).
 	var rate := SPRINT_RISE_RATE if sc > _sprint_k else SPRINT_FALL_RATE
 	_sprint_k = sc if _snap else lerpf(_sprint_k, sc, 1.0 - exp(-rate * dt))
@@ -1108,8 +1225,14 @@ func _update_speed_framing(dt: float) -> void:
 	_windup_k = wk if _snap else lerpf(_windup_k, wk, 1.0 - exp(-(WINDUP_RISE_RATE if wk > _windup_k else WINDUP_FALL_RATE) * dt))
 	if absf(_windup_k - wk) < 0.001:
 		_windup_k = wk
+	# Round 8 charge push-in: smoothstep in c, eased in time (back out after the release).
+	_charge_c = clampf(_charge_amount(), 0.0, 1.0) if combat else 0.0
+	var cz := CHARGE_ZOOM_FOV * smoothstep(0.0, 1.0, _charge_c)
+	_charge_k = cz if _snap else lerpf(_charge_k, cz, 1.0 - exp(-(CHARGE_RISE_RATE if cz > _charge_k else CHARGE_FALL_RATE) * dt))
+	if absf(_charge_k - cz) < 0.001:
+		_charge_k = cz
 	_fov = Tuning.CAM_FOV + maxf((_fov_top - Tuning.CAM_FOV) * _sprint_k, Tuning.R7_CAM_DRIVE_FOV * _drive_k) \
-		- Tuning.R7_CAM_THROW_ZOOM_FOV * _windup_k
+		- Tuning.R7_CAM_THROW_ZOOM_FOV * _windup_k - _charge_k
 	# Fall tilt past CAM_FALL_FROM.
 	var fk := clampf((fall - Tuning.CAM_FALL_FROM) / FALL_RAMP, 0.0, 1.0)
 	_fall_k = lerpf(_fall_k, fk, 1.0 - exp(-(FALL_RISE_RATE if fk > _fall_k else FALL_RATE) * dt))
@@ -1164,8 +1287,16 @@ func _update_follow(dt: float, p: Vector3) -> void:
 		_follow_v = Vector3.ZERO
 	else:
 		var r := _spring(_follow, _follow_v, p, FOLLOW_OMEGA, dt)
-		_follow = r[0]
-		_follow_v = r[1]
+		var x: Vector3 = r[0]
+		var v: Vector3 = r[1]
+		if _air_k > 0.0:
+			# Round 8 air combo: a softer vertical follow, so the hang-fall-hang
+			# beats of a juggle never bob the view (each axis is its own spring).
+			var ry := _spring(_follow, _follow_v, p, lerpf(FOLLOW_OMEGA, AIR_FOLLOW_OMEGA_Y, _air_k), dt)
+			x.y = (ry[0] as Vector3).y
+			v.y = (ry[1] as Vector3).y
+		_follow = x
+		_follow_v = v
 	_follow_prev = p
 
 ## One exact step of a critically damped spring (omega rad/s) from position x
@@ -1206,6 +1337,7 @@ func _update_combat_lean(dt: float, p: Vector3, launching: bool) -> void:
 			if _all_inside(_view_from(p + lean * k, _out_dist, _out_height, _pitch), pts, LEAN_PLAYER_SAFE):
 				goal = lean * k
 				break
+	goal *= 1.0 - _air_k  # Round 8: the air framing leans toward the juggled body itself
 	if _snap:
 		_combat_lean = goal
 		_combat_lean_v = Vector3.ZERO
@@ -1530,7 +1662,15 @@ func _place_camera(dt: float, shoulder: float, subject: Vector3) -> void:
 	elif _fov_age < FOV_PUNCH_END:
 		k = 1.0 - smoothstep(FOV_PUNCH_HOLD, FOV_PUNCH_END, _fov_age)
 	_fov_punch = _fov_amp * k
-	camera.fov = _fov + _fov_punch
+	# Round 8: the charge_full pulse (a quick extra push-in, then back).
+	_charge_pulse_age += dt
+	var ck := 0.0
+	if _charge_pulse_age < CHARGE_PULSE_RISE:
+		ck = smoothstep(0.0, 1.0, _charge_pulse_age / CHARGE_PULSE_RISE)
+	elif _charge_pulse_age < CHARGE_PULSE_END:
+		ck = 1.0 - smoothstep(CHARGE_PULSE_HOLD, CHARGE_PULSE_END, _charge_pulse_age)
+	_charge_pulse = CHARGE_FULL_PULSE * ck if _mode == Mode.COMBAT else 0.0
+	camera.fov = _fov + _fov_punch - _charge_pulse
 	_view_corrected = 0.0
 	if _mode == Mode.COMBAT or (_mode == Mode.CLOSEUP and _alive_node(_closeup_on) and _alive_node(target) \
 			and _flat_dist(target.get_aim_point(), _point_of(_closeup_on)) < LAST_KILL_FIT_MAX):
@@ -1928,8 +2068,11 @@ func _on_hit_landed(info: HitInfo) -> void:
 	var mine := _alive_node(target) and is_instance_valid(info.attacker) and info.attacker == target
 	if mine:
 		_yaw_veto = null  # the player engaged a target: frame it again
+	# Round 8: an air hit that keeps the body floating is a juggle beat, not a jolt.
+	var air_beat := mine and info.air and not (info.react in [&"launch", &"spike"]) and not is_spike_hit(info)
+	var share := AIR_HIT_PUNCH_SHARE if air_beat else 1.0
 	if mine and info.react != &"":
-		var w := clampf(info.weight, 0.0, 1.0)
+		var w := clampf(info.weight, 0.0, 1.0) * share
 		if w > 0.0:
 			punch_fov(w * Tuning.R7_CAM_PUNCH_FOV)
 			add_trauma(w * Tuning.R7_CAM_PUNCH_TRAUMA)
@@ -1940,7 +2083,7 @@ func _on_hit_landed(info: HitInfo) -> void:
 		return
 	if info.attacker == target or info.victim == target:
 		var k := 0.03 + info.damage / KICK_DAMAGE_DIV + info.energy / KICK_ENERGY_DIV
-		add_kick(info.hit_direction, minf(k, KICK_MAX))
+		add_kick(info.hit_direction, minf(k, KICK_MAX) * share)
 	if mine and info.victim is Fighter and info.victim != target and is_spike_hit(info):
 		_start_spike_watch(info.victim as Fighter)
 	var launched := HitInfo.is_launch_tier(info.tier) or info.react == &"launch"
@@ -1979,7 +2122,7 @@ func _on_pursuit(attacker: Node3D, victim: Node3D) -> void:
 	if victim is Fighter:
 		_track_launch(victim as Fighter)
 
-## A spike hit: a pursuit hit by the player driving the body down
+## A spike hit: a pursuit or air-combo hit by the player driving the body down
 ## (react &"spike", or a launch velocity steeper than SPIKE_DOWN_DOT).
 static func is_spike_hit(info: HitInfo) -> bool:
 	if info == null:
@@ -1987,7 +2130,7 @@ static func is_spike_hit(info: HitInfo) -> bool:
 	if info.react == &"spike":
 		return true
 	var v := info.launch_velocity
-	return info.pursuit and v.length() > 1.0 and v.normalized().y < -SPIKE_DOWN_DOT
+	return (info.pursuit or info.air) and v.length() > 1.0 and v.normalized().y < -SPIKE_DOWN_DOT
 
 func _start_spike_watch(body: Fighter) -> void:
 	_spike_body = body
@@ -2240,6 +2383,149 @@ func _track_launch(f: Fighter) -> void:
 		return
 	_launch_body = f
 	_launch_t0 = t
+
+# --- Round 8: charge, pressure break, air combo -----------------------------------------
+## The player's charge c (CombatController.get_charge(), 0 when not charging).
+## Tests override this in a subclass.
+func _charge_amount() -> float:
+	if not _alive_node(target) or target.combat == null or not is_instance_valid(target.combat):
+		return 0.0
+	return target.combat.get_charge()
+
+## Traversal.is_air_following() of the player (the launcher jump). Tests override this.
+func _air_following() -> bool:
+	if not _alive_node(target) or target.traversal == null or not is_instance_valid(target.traversal):
+		return false
+	return bool(_trav_call(target.traversal, &"is_air_following", false))
+
+## CombatController.get_air_hits() of the player. Tests override this.
+func _air_hits() -> int:
+	if not _alive_node(target) or target.combat == null or not is_instance_valid(target.combat):
+		return 0
+	return target.combat.get_air_hits()
+
+## The player is in the air by choice (jump, launcher jump, hang). Tests override this.
+func _player_airborne() -> bool:
+	return _alive_node(target) and target.is_airborne()
+
+## The body a launcher jump would follow right now (before air_follow_started names it).
+func _air_follow_target():
+	if not _alive_node(target) or target.combat == null or not is_instance_valid(target.combat):
+		return null
+	return target.combat.get_air_follow_target()
+
+## The air combo is on from the launcher jump (or the first air hit) until the
+## player lands: Traversal / Combat report it, or an air event just arrived
+## (AIR_EVENT_GRACE covers the frames before they do). _air_k eases in and out.
+func _update_air_state(t: float, dt: float) -> void:
+	var on := false
+	if _mode == Mode.COMBAT and _alive(target):
+		var following := _air_following()
+		var airborne := _player_airborne()
+		var recent := t - _air_event_t < AIR_EVENT_GRACE
+		if following or recent or (airborne and _air_hits() > 0):
+			_air_combo = true
+		elif not airborne:
+			_air_combo = false  # landed
+		on = _air_combo
+		if on and not _alive(_air_body):
+			var f = _air_follow_target()
+			if _alive(f):
+				_air_body = f
+	else:
+		_air_combo = false
+	var goal := 1.0 if on else 0.0
+	_air_k = goal if _snap else lerpf(_air_k, goal, 1.0 - exp(-(AIR_RISE_RATE if goal > _air_k else AIR_FALL_RATE) * dt))
+	if absf(_air_k - goal) < 0.002:
+		_air_k = goal
+	if _air_k <= 0.0 and not on:
+		_air_body = null
+
+## The juggled body while the air framing may frame it: alive, not ragdoll-
+## launched (a kick launch or a spike belongs to the launch framing), close.
+func _air_body_framed(p: Vector3):
+	if not _alive(_air_body):
+		return null
+	var f := _air_body as Fighter
+	if f.is_launched() or f == target or _flat_dist(p, f.get_ground_position()) > AIR_BODY_RANGE:
+		return null
+	return f
+
+## Air combo framing. Sets _air_lean (a spring toward the raise plus the lean
+## toward the body, only as much as keeps the player inside LEAN_PLAYER_SAFE of
+## the half frame) and returns the distance at which the player and the body
+## both sit inside AIR_SAFE (0 when there is nothing to fit).
+func _air_frame(dt: float, p: Vector3, base_dist: float, height: float, launching: bool) -> float:
+	_air_dist = 0.0
+	if _air_k <= 0.0 and _air_lean.length() < 0.005:
+		_air_lean = Vector3.ZERO
+		_air_lean_v = Vector3.ZERO
+		return 0.0
+	var body = _air_body_framed(p)
+	var goal := Vector3.UP * AIR_LOOK_RAISE
+	if body != null and not launching:
+		var lean := ((body as Fighter).get_aim_point() - p) * AIR_LEAN_SHARE
+		var fwd := -Basis(Vector3.UP, _yaw).z
+		var depth := lean.dot(fwd)
+		if depth > LAUNCH_LEAN_DEPTH:
+			lean -= fwd * (depth - LAUNCH_LEAN_DEPTH)
+		lean.y = clampf(lean.y, -0.3, AIR_LEAN_UP)
+		goal += lean.limit_length(AIR_LEAN_MAX)
+	var pts := _player_points()
+	var fit := Vector3.ZERO
+	for k: float in LEAN_STEPS:
+		if _all_inside(_view_from(p + goal * k, _out_dist, _out_height, _pitch), pts, LEAN_PLAYER_SAFE):
+			fit = goal * k
+			break
+	fit *= _air_k
+	if _snap:
+		_air_lean = fit
+		_air_lean_v = Vector3.ZERO
+	else:
+		var r := _spring(_air_lean, _air_lean_v, fit, AIR_OMEGA, dt)
+		_air_lean = r[0]
+		_air_lean_v = r[1]
+	if body == null or launching or _air_k < 0.05:
+		return 0.0
+	var f := body as Fighter
+	var aim := f.get_aim_point()
+	var all: Array[Vector3] = [aim, aim + Vector3.UP * 0.5, f.get_ground_position() + Vector3.UP * 0.1]
+	all.append_array(pts)
+	_air_dist = _fit_distance(p + _air_lean, all, base_dist, Tuning.CAM_LAUNCH_DIST, height, AIR_SAFE)
+	return _air_dist
+
+func _on_charge_full(fighter: Node3D, _move_id: StringName) -> void:
+	if not _alive_node(target) or fighter != target:
+		return
+	_charge_fulls += 1
+	_charge_pulse_age = 0.0
+
+## The player broke an enemy's pressure: a short punch (raised to, never
+## stacked on the breaking hit's own weight punch). No slow motion.
+func _on_pressure_broken(fighter: Node3D, attacker: Node3D) -> void:
+	if not _alive_node(target) or attacker != target or fighter == target:
+		return
+	_breaks += 1
+	punch_fov(BREAK_PUNCH_FOV)
+	var pos := (fighter as Fighter).get_aim_point() if fighter is Fighter and _alive_node(fighter) else Vector3.ZERO
+	_trauma = clampf(maxf(_trauma, BREAK_TRAUMA * _event_k(pos)), 0.0, 1.0)
+
+func _on_air_follow_started(fighter: Node3D, body: Node3D) -> void:
+	if not _alive_node(target) or fighter != target:
+		return
+	_air_event_t = TimeDirector.now()
+	_air_combo = true
+	if _alive(body):
+		_air_body = body
+
+func _on_air_hit(attacker: Node3D, victim: Node3D, _count: int) -> void:
+	if not _alive_node(target) or attacker != target:
+		return
+	_air_event_t = TimeDirector.now()
+	_air_combo = true
+	_air_hits_seen += 1
+	if _alive(victim) and victim != target:
+		_air_body = victim
 
 # --- Combat-target ring (get_soft_target) ---------------------------------------------
 func _build_ring() -> void:

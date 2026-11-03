@@ -35,6 +35,12 @@ extends Node
 ## is_lifted), held, down or in hitstun gets no token, loses a held one
 ## (unless its attack is still live: tell armor) and leaves the line, so the
 ## enemies the player is not hitting keep coming.
+## Round 8 (docs/Round 8 — Charge and Pressure.md): a tap's flinch (react
+## &"flinch", about 0.2 s; is_flinching) is shrugged off: the enemy keeps its
+## token, its place in line and its turn, and a wind-up the tap cut short
+## just starts again once the flinch is over. Broken open by pressure
+## (is_enemy_broken) counts as impaired: no token, out of the line. A brain
+## that backs off under pressure (AIBrain.is_backing_off) leaves the line.
 ## Clocks: world_now() (scaled game time, the enemies' own time) for token
 ## timeouts, grant gaps, pacing and swing spacing; now() = TimeDirector.now()
 ## (real time, physics ticks) for the on-screen rule. B reports time to the
@@ -144,6 +150,8 @@ var _beam_hazards: Array = []        ## [centre (flat), axis (flat unit)] under 
 var min_active_gap := INF
 ## Crowd-pacing slots given back by holders knocked out of their turn (tests).
 var paced_refunds := 0
+## Round 8: holders whose wind-up a tap's flinch cut short and that kept their turn.
+var flinch_keeps := 0
 var _last_active_t := -INF
 var _last_active_by: Node3D = null
 
@@ -215,7 +223,7 @@ func request_token(enemy: Fighter, urgent := false, cut_line := false) -> bool:
 	if _holders.has(enemy):
 		if _holders[enemy]["attacking"]:
 			return true
-		if _enemy_can_attack(enemy) and (not is_player_down_or_held() or _may_swing_at_downed(enemy)):
+		if keeps_turn(enemy) and (not is_player_down_or_held() or _may_swing_at_downed(enemy)):
 			return true
 		release_token(enemy, _enemy_can_attack(enemy))
 		return false
@@ -388,6 +396,7 @@ func reset() -> void:
 	wave_index = 0
 	min_active_gap = INF
 	paced_refunds = 0
+	flinch_keeps = 0
 	_last_active_t = -INF
 	_last_active_by = null
 
@@ -503,6 +512,8 @@ func onscreen_time(enemy: Fighter) -> float:
 func request_swing(enemy: Fighter, startup: float, followups: Array = []) -> float:
 	if not _holders.has(enemy):
 		return -1.0
+	if _holders[enemy].has("cut"):
+		return -1.0  # its wind-up was just cut short: kept only if a flinch did it (next tick)
 	if not is_player_open() and not _may_swing_at_downed(enemy):
 		return -1.0
 	var t_now := world_now()
@@ -531,6 +542,7 @@ func notify_attack_started(enemy: Fighter, time_to_active: float) -> void:
 	entry["attacking"] = true
 	entry["started"] = t_now
 	entry["followup"] = false
+	entry["went_active"] = false
 	if is_finite(time_to_active):
 		entry["active_at"] = t_now + time_to_active * Engine.time_scale
 	if is_player_knocked_down():
@@ -595,12 +607,15 @@ func _is_fleeing(enemy: Fighter) -> bool:
 	return enemy.has_method(&"is_fleeing") and enemy.is_fleeing()
 
 ## States that keep an enemy out of the rotation: held by a grab, a Round 7
-## reaction (snap, spin, fold, buckle, push, or popped up by a lift), and the
-## Upgrade 2 daze and stumble (tripped enemies are down).
+## reaction (snap, spin, fold, buckle, push, or popped up by a lift), the
+## Upgrade 2 daze and stumble (tripped enemies are down), and Round 8's
+## pressure break (is_enemy_broken).
 func is_enemy_impaired(enemy: Fighter) -> bool:
 	if enemy.carry != null and enemy.carry.is_held():
 		return true
 	if enemy.is_reacting() or enemy.is_lifted():
+		return true
+	if is_enemy_broken(enemy):
 		return true
 	var c := enemy.combat
 	if c == null:
@@ -608,6 +623,40 @@ func is_enemy_impaired(enemy: Fighter) -> bool:
 	if c.has_method(&"is_dazed") and c.is_dazed():
 		return true
 	return c.has_method(&"is_stumbling") and c.is_stumbling()
+
+## Round 8: broken open by pressure (B's CombatController.is_broken(), H's
+## &"broken" reaction): dazed for Tuning.R8_BREAK_TIME, no attack, no guard,
+## no token. A hit's reaction may play over it; the break still counts.
+static func is_enemy_broken(enemy: Fighter) -> bool:
+	if enemy.get_react_state() == &"broken":
+		return true
+	return enemy.combat != null and enemy.combat.is_broken()
+
+## Round 8: in a tap's flinch (react &"flinch", about 0.2 s), or the
+## ragdoll's own flinch tier with no other reaction (it can outlast the
+## react by a few frames). Taps barely stun: the enemy shrugs it off.
+static func is_flinching(enemy: Fighter) -> bool:
+	var state := enemy.get_react_state()
+	if state == &"flinch":
+		return true
+	return state == &"" and enemy.get_state() == RagdollController.State.FLINCH
+
+## Can attack now, or the moment a tap's flinch is over: a flinching enemy
+## keeps its token and its place in line (Round 8). Anything more (another
+## reaction, down, held, fleeing, broken, dazed, stumbling) ends its turn.
+func keeps_turn(enemy: Fighter) -> bool:
+	if _enemy_can_attack(enemy):
+		return true
+	if not is_flinching(enemy) or enemy.is_dead() or enemy.is_down() or _is_fleeing(enemy):
+		return false
+	if enemy.carry != null and enemy.carry.is_held():
+		return false
+	if is_enemy_broken(enemy):
+		return false
+	var c := enemy.combat
+	if c != null and ((c.has_method(&"is_dazed") and c.is_dazed()) or (c.has_method(&"is_stumbling") and c.is_stumbling())):
+		return false
+	return true
 
 func _onscreen_long_enough(enemy: Fighter, t_now: float) -> bool:
 	if _camera() == null:
@@ -672,7 +721,23 @@ func _physics_process(delta: float) -> void:
 			continue
 		var entry: Dictionary = _holders[e]
 		var attacking: bool = entry["attacking"]
-		if not _enemy_can_attack(e) and not (attacking and _swing_live(e)):
+		if entry.has("cut"):
+			# Its wind-up ended before the active frames (_on_enemy_attack_ended):
+			# a tap's flinch keeps the turn (it swings again once free);
+			# anything else ends it as a used turn.
+			entry.erase("cut")
+			if is_flinching(e) and keeps_turn(e):
+				var none: Array[float] = []
+				entry["attacking"] = false
+				entry["started"] = INF
+				entry["active_at"] = INF
+				entry["reserved"] = none
+				entry["granted"] = t_now
+				flinch_keeps += 1
+			else:
+				release_token(e)
+			continue
+		if not keeps_turn(e) and not (attacking and _swing_live(e)):
 			release_token(e)
 		elif not attacking and player_gone and not (knocked_down and free_swings_left(e) > 0):
 			# Rule 3: an approaching holder does not keep its token while the
@@ -755,14 +820,15 @@ func _line_far(e: Fighter) -> float:
 
 ## In line: registered, fighting, and able to attack now. An enemy the player
 ## is hitting (a reaction, hitstun, held) steps out, so another one moves up
-## and takes the next turn (freeflow: the crowd keeps coming).
+## and takes the next turn (freeflow: the crowd keeps coming). Round 8: a
+## tap's flinch keeps its place; backing off under pressure gives it up.
 func _line_eligible(e: Fighter) -> bool:
 	if not is_instance_valid(e) or not e in _enemies or _holders.has(e):
 		return false
-	if not _enemy_can_attack(e):
+	if not keeps_turn(e):
 		return false
 	var b := e.brain as AIBrain
-	return b == null or b.is_fighting()
+	return b == null or (b.is_fighting() and not b.is_backing_off())
 
 # --- Navigation ----------------------------------------------------------------
 
@@ -947,6 +1013,7 @@ func _on_enemy_attack_started(_move_id: StringName, enemy: Fighter) -> void:
 	if _holders.has(enemy):
 		var entry: Dictionary = _holders[enemy]
 		entry["attacking"] = true
+		entry["went_active"] = false
 		if not is_finite(float(entry["started"])):
 			entry["started"] = world_now()
 
@@ -955,6 +1022,12 @@ func _on_enemy_attack_incoming(_move_id: StringName, time_to_active: float, enem
 		_holders[enemy]["active_at"] = world_now() + time_to_active * Engine.time_scale
 
 func _on_enemy_attack_ended(_move_id: StringName, enemy: Fighter) -> void:
+	if _holders.has(enemy) and _holders[enemy]["attacking"] and not _holders[enemy].get("went_active", false) \
+			and not _holders[enemy]["followup"] and not enemy.is_dead() and not enemy.is_down():
+		# Cut short in its wind-up (a tap cancels it): decided next tick, once
+		# the reaction that cut it is known (Round 8: a flinch keeps the turn).
+		_holders[enemy]["cut"] = true
+		return
 	if _holders.has(enemy) and _holders[enemy]["followup"]:
 		# The string goes on: the next hit's reservation becomes the current one.
 		var entry: Dictionary = _holders[enemy]
@@ -974,6 +1047,8 @@ func _on_enemy_attack_ended(_move_id: StringName, enemy: Fighter) -> void:
 func _on_attack_active(attacker: Node3D, _move_id: StringName) -> void:
 	if not attacker is Fighter or not attacker in _enemies:
 		return
+	if _holders.has(attacker):
+		_holders[attacker]["went_active"] = true
 	var t := world_now()
 	if _last_active_by != null and _last_active_by != attacker and is_instance_valid(_last_active_by):
 		min_active_gap = minf(min_active_gap, t - _last_active_t)
@@ -988,11 +1063,14 @@ func _drop(f: Node3D) -> void:
 
 ## A hit takes the token back, unless the holder is still mid-attack (a
 ## heavy's wind-up ignores flinches): it keeps its swing and its slot.
+## Round 8: a tap's flinch is shrugged off: the holder keeps its turn.
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null or not info.victim is Fighter:
 		return
 	var v := info.victim as Fighter
 	if _holders.has(v) and v.combat != null and v.combat.is_attacking() and not v.is_down():
+		return
+	if _holders.has(v) and (info.react == &"flinch" or is_flinching(v)) and keeps_turn(v):
 		return
 	release_token(v)
 

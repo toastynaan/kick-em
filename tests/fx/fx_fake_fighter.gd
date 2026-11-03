@@ -49,3 +49,10 @@ func add_traversal() -> Node:
 	traversal.name = "Traversal"
 	add_child(traversal)
 	return traversal
+
+## Attach a fake CombatController (Round 8: charge, pressure, broken).
+func add_combat() -> Node:
+	combat = preload("res://tests/fx/fx_fake_combat.gd").new()
+	combat.name = "Combat"
+	add_child(combat)
+	return combat

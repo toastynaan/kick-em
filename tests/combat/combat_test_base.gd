@@ -4,7 +4,7 @@ extends Node3D
 ## OWNER: agent B (fighter & combat).
 
 var failures: Array[String] = []
-var events: Array = []  ## [name, args...] captured from GameEvents
+var events: Array = []  ## [name, a, b, c, d, e, real time] captured from GameEvents
 var _timeout := 30.0
 
 func _ready() -> void:
@@ -50,12 +50,14 @@ func _capture_events() -> void:
 			&"armor_absorbed", &"attack_tell", &"thrown", &"combo_progress", &"combo_ended",
 			&"combo_escaped", &"stumbled", &"dazed", &"strike_started", &"screen_shake",
 			&"chain_hit", &"chain_ended", &"glide_started", &"counter_window", &"countered",
-			&"react_started", &"dodged"]:
+			&"react_started", &"dodged",
+			&"charge_started", &"charge_level_changed", &"charge_released", &"charge_full", &"charge_cancelled",
+			&"pressure_broken", &"pressure_recovered", &"air_hit", &"air_follow_started"]:
 		if not GameEvents.has_signal(sig):
 			continue
 		var s := sig
 		GameEvents.connect(s, func(a = null, b = null, c = null, d = null, e = null) -> void:
-			events.append([s, a, b, c, d, e]))
+			events.append([s, a, b, c, d, e, TimeDirector.now()]))
 
 func count_events(what: StringName) -> int:
 	var n := 0
@@ -72,6 +74,17 @@ func last_event(what: StringName) -> Array:
 
 func clear_events() -> void:
 	events.clear()
+
+## Every captured event named `what`, in order.
+func events_of(what: StringName) -> Array:
+	return events.filter(func(e: Array) -> bool: return e[0] == what)
+
+## Real time of the first `what` event (INF when none).
+func first_time(what: StringName) -> float:
+	for e in events:
+		if e[0] == what:
+			return float(e[6])
+	return INF
 
 ## Spawn a dummy fighter standing at `pos` facing `facing` (world XZ).
 func spawn(archetype: StringName, pos: Vector3, facing: Vector3, team := Fighter.TEAM_ENEMY) -> Fighter:

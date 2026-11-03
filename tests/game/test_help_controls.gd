@@ -5,10 +5,12 @@ extends Node
 ## "LT + X/A/B", Jump on Space / A with the wall run, Counter on V / mouse
 ## thumb / Y, Dash's meanings (tap = dodge, teleport just before a hit, pursuit
 ## right after a launch; hold = sprint), the pursuit hit (attack to launch,
-## back + attack to spike), hold for heavy on the punch and the three kicks,
-## and the hold actions throw, knee, drive and release. Nothing removed (Focus,
-## lock-on, parry / block, crouch, charge, the Heavy and Kick buttons). The
-## panel fits a 1600x900 window.
+## back + attack to spike), and the hold actions throw, knee, drive and
+## release. Round 8: every strike row says tap and hold to charge, the air
+## combo row follows Jump (charged uppercut, Jump, air hits, a kick sends them
+## away, pull back + punch spikes), and the panel and the title explain the
+## charge meter and pressure. Nothing removed (Focus, lock-on, parry / block,
+## crouch, the Heavy and Kick buttons). The panel fits a 1600x900 window.
 
 ## Title -> [keyboard + mouse, gamepad] the Round 7 doc's Controls table gives.
 const EXPECT := {
@@ -19,8 +21,10 @@ const EXPECT := {
 	"Holding: throw": ["LMB", "X"], "Holding: knee": ["RMB", "LT + X"], "Holding: drive": ["Shift (hold)", "RT (hold)"],
 	"Holding: release": ["C", "RB"], "Kick layer": ["-", "LT (hold)"], "Help": ["F1", "-"], "Debug": ["F3", "-"],
 }
-## Words of removed features that must not appear anywhere in the help (lower case).
-const REMOVED_WORDS: Array[String] = ["focus", "lock", "parry", "block", "crouch", "charge", "sweep", "sidestep", "strafe"]
+## Words of removed features that must not appear anywhere in the help (lower
+## case). Round 8 brought "charge" (hold to charge) and "sweep" (the full leg
+## kick) back.
+const REMOVED_WORDS: Array[String] = ["focus", "lock", "parry", "block", "crouch", "sidestep", "strafe", "heavy version"]
 ## Titles of the Round 5 rows that must be gone.
 const REMOVED_TITLES: Array[String] = ["Light", "Heavy", "Kick", "Sweep", "Crouch", "Block", "Focus",
 	"Lock on", "Switch target"]
@@ -88,11 +92,22 @@ func _run() -> void:
 		and desc.call("Pursuit hit").contains("pull back") and desc.call("Pursuit hit").contains("launch it further"),
 		"Pursuit hit: attack launches, pull back + attack spikes (%s)" % desc.call("Pursuit hit"))
 	_check(String(by_title.get("Pursuit hit", ["", ""])[1]).contains("S + attack"), "Pursuit hit keyboard: 'S + attack' (%s)" % by_title.get("Pursuit hit", ["", "?"])[1])
-	var heavy_kicks := true
-	for k in ["Leg kick", "Front kick", "Roundhouse", "Punch"]:
-		if not String(desc.call(k)).contains("hold"):
-			heavy_kicks = false
-	_check(heavy_kicks, "punch and the three kicks say hold = heavy")
+	# Round 8: every strike is tap or hold to charge, with what each gives.
+	var charge_rows := PackedStringArray()
+	for k in ["Punch", "Leg kick", "Gut punch", "Uppercut", "Front kick", "Roundhouse"]:
+		var dk: String = desc.call(k)
+		if not (dk.contains("tap") and dk.contains("hold to charge")):
+			charge_rows.append(k)
+	_check(charge_rows.is_empty(), "every strike row: tap, and hold to charge (missing: %s)" % ", ".join(charge_rows))
+	_check(desc.call("Leg kick").contains("sweep") and desc.call("Gut punch").contains("breaks them open")
+		and desc.call("Front kick").contains("launches") and desc.call("Uppercut").contains("lifts")
+		and desc.call("Uppercut").contains("jump"), "charged results: leg kick sweeps, gut punch breaks, front kick launches, uppercut lifts then Jump")
+	_check(desc.call("Jump").contains("charged uppercut"), "Jump: follows a charged uppercut (%s)" % desc.call("Jump"))
+	var ji := order.find("Jump")
+	_check(ji >= 0 and order.slice(ji + 1, ji + 2) == PackedStringArray(["Air combo"]), "the Air combo row follows Jump")
+	var air: String = desc.call("Air combo")
+	_check(air.contains("hangs") and air.contains("kick sends them flying") and air.contains("pull back + punch")
+		and air.contains("spike"), "Air combo: hits hang, a kick sends them away, pull back + punch spikes (%s)" % air)
 	var di := order.find("Dash / sprint")
 	_check(di >= 0 and order.slice(di + 1, di + 3) == PackedStringArray(["Pursuit", "Pursuit hit"]), "the pursuit rows follow Dash")
 
@@ -127,6 +142,10 @@ func _run() -> void:
 	_check(found.is_empty(), "F1 panel: no removed feature mentioned (found: %s)" % ", ".join(found))
 	_check(all.contains("Orange icon") and all.contains("Blue icon") and all.contains("V / Mouse thumb") and all.contains("RT"),
 		"F1 panel explains the orange / blue counter icons with their keys")
+	_check(all.contains(UIKit.CHARGE_HELP) and all.contains("white, orange, then red") and all.contains("flashes at full"),
+		"F1 panel: tap or hold to charge every strike, the meter's colours and the flash at full")
+	_check(all.contains(UIKit.PRESSURE_HELP) and all.to_lower().contains("breaks them open"),
+		"F1 panel: pressure fills from every hit and breaks them open")
 	var sz := panel.get_combined_minimum_size()
 	print("    F1 panel minimum size %s" % sz)
 	_check(sz.x <= 1600.0 and sz.y <= 900.0, "F1 panel fits 1600x900 (%.0f x %.0f)" % [sz.x, sz.y])
@@ -147,8 +166,20 @@ func _run() -> void:
 	_check(not counter_line.is_empty() and counter_line[1] == "V / Mouse thumb", "title: Counter on 'V / Mouse thumb'")
 	var tips := GameMenus.title_tips().to_lower()
 	_check(tips.contains("teleport") and tips.contains("pursue") and tips.contains("spike") and tips.contains("wall run")
-		and tips.contains("v to counter") and tips.contains("hold it, or a kick: the heavy version"),
-		"title tips: counter on V, teleport, pursue, spike, wall run, heavy kicks")
+		and tips.contains("v to counter"), "title tips: counter on V, teleport, pursue, spike, wall run")
+	_check(tips.contains("hold it to charge") and tips.contains("pressure") and tips.contains("breaks them open")
+		and tips.contains("charged uppercut, then space") and tips.contains("a kick sends them away") and tips.contains("s + punch spikes"),
+		"title tips: tap or hold to charge, pressure breaks, the air combo (charged uppercut, Space, kick away, S + punch spike)")
+	var menus := GameMenus.new()
+	add_child(menus)
+	await get_tree().process_frame
+	menus.show_title()
+	await get_tree().process_frame
+	var how := menus._title.find_children("*", "PanelContainer", true, false)[0] as PanelContainer
+	var how_sz := how.get_combined_minimum_size()
+	print("    title HOW TO FIGHT panel minimum size %s" % how_sz)
+	_check(how_sz.x <= 1600.0 - 96.0 - 460.0 and how_sz.y <= 900.0, "title HOW TO FIGHT panel fits beside the menu in 1600x900 (%.0f x %.0f)" % [how_sz.x, how_sz.y])
+	menus.queue_free()
 	var title_text := str(lines) + "\n" + GameMenus.title_tips()
 	print("    title tips: %s" % GameMenus.title_tips().replace("\n", " / "))
 	found = _removed_in(title_text)

@@ -1,7 +1,8 @@
 class_name UIKit
 ## Shared look for the HUD and menus: one theme, big readable type, outlined
 ## labels that read over the 3D scene, the controls help built from
-## Controls.ACTIONS (Round 7 key map) and the key names for the device the
+## Controls.ACTIONS (Round 7 key map; Round 8: tap or hold to charge every
+## strike, pressure, the air combo) and the key names for the device the
 ## player used last. OWNER: agent J (HUD, flow & menus).
 
 const ACCENT := Color(1.0, 0.42, 0.18)
@@ -22,6 +23,14 @@ const TELL_GRAB := Tuning.TELL_COLOR_GRAB
 ## from the orange counter and blue dodge colours.
 const PURSUIT_COLOR := Color(0.45, 1.0, 0.72)
 const RESULT_GOOD := Color(1.0, 0.85, 0.35)
+## Round 8: the charge meter by the move's steps passed: white under the first
+## step, orange past it, red past the last.
+const CHARGE_WHITE := Color(0.96, 0.95, 0.92)
+const CHARGE_ORANGE := Color(1.0, 0.56, 0.12)
+const CHARGE_RED := Color(0.95, 0.13, 0.1)
+## Round 8: enemy pressure bars, and the flash while broken open.
+const PRESSURE_COLOR := Color(1.0, 0.8, 0.22)
+const PRESSURE_BROKEN := Color(1.0, 1.0, 0.86)
 
 static var _theme: Theme
 static var _heavy_font: Font
@@ -130,16 +139,17 @@ static func full_rect(name: String) -> Control:
 const ACTION_HELP := {
 	&"move": "Move (camera-relative)",
 	&"camera": "Turn the camera. It only turns itself to keep your target in view",
-	&"punch": "Tap: jab, cross, hook (then back to the jab). Hold: the heavy version",
-	&"leg_kick": "Buckles the leg: the enemy drops to one knee. Hold: heavy kick",
-	&"gut_punch": "Folds the enemy over",
-	&"uppercut": "Pops the enemy into the air: keep hitting to juggle",
-	&"front_kick": "Shoves the enemy far back. Hold: heavy kick",
-	&"roundhouse": "Knockdown. Launches a lifted enemy into the walls. Hold: heavy kick",
+	&"punch": "Tap: jab, cross, hook. Hold to charge: a full jab shoves, cross launches, hook knocks down",
+	&"leg_kick": "Tap: a quick leg flinch. Hold to charge: buckles the knee. A full charge sweeps the legs",
+	&"gut_punch": "Tap: a quick fold. Hold to charge: a deep fold, lots of pressure. Full: breaks them open",
+	&"uppercut": "Tap: snaps the head back. Hold to charge: lifts them (higher with charge). Then Jump to follow",
+	&"front_kick": "Tap: a shove that makes space. Hold to charge: a long push. A full charge launches",
+	&"roundhouse": "Tap: knockdown. Hold to charge: a launch, faster the longer you hold",
 	&"kick_layer": "Gamepad kick layer: hold LT, then X / A / B for the three kicks",
 	&"grab": "Grab the enemy you face (or a prop). Press again to let go",
 	&"counter": "Orange icon over an enemy: counter its attack. Blue icon: dodge instead",
-	&"jump": "Jump. Sprint + jump at a wall: wall run. Attack in the air: dropping strike",
+	&"jump": "Jump. After a charged uppercut: leap to the lifted body. Sprint + jump at a wall: wall run. Attack in the air: dropping strike",
+	&"air_combo": "Each air hit hangs you both. A kick sends them flying. Pull back + punch: spike them down",
 	&"dash": "Tap: dodge, teleport just before a hit, pursue right after a launch. Hold: sprint",
 	&"pursuit": "Right after you launch someone: Dash to the flying body",
 	&"pursuit_hit": "Attack: launch it further. Pull back + attack: spike it into the ground",
@@ -150,14 +160,14 @@ const ACTION_HELP := {
 	&"pause": "Pause menu (the upgrades are in Debug settings)",
 	&"restart": "Restart the round",
 	&"help": "Show or hide this panel",
-	&"debug": "Debug overlay: move, string, chain, glide, the target's state",
+	&"debug": "Debug overlay: move, charge, the target's state and pressure, air hits",
 	&"fullscreen": "Switch between fullscreen and a window",
 }
 const ACTION_TITLES := {
 	&"move": "Move", &"camera": "Camera", &"punch": "Punch", &"leg_kick": "Leg kick",
 	&"gut_punch": "Gut punch", &"uppercut": "Uppercut", &"front_kick": "Front kick",
 	&"roundhouse": "Roundhouse", &"kick_layer": "Kick layer", &"grab": "Grab", &"counter": "Counter",
-	&"jump": "Jump", &"dash": "Dash / sprint", &"pursuit": "Pursuit", &"pursuit_hit": "Pursuit hit",
+	&"jump": "Jump", &"air_combo": "Air combo", &"dash": "Dash / sprint", &"pursuit": "Pursuit", &"pursuit_hit": "Pursuit hit",
 	&"throw": "Holding: throw", &"knee": "Holding: knee", &"drive": "Holding: drive",
 	&"release": "Holding: release", &"pause": "Pause", &"restart": "Restart",
 	&"help": "Help", &"debug": "Debug", &"fullscreen": "Fullscreen",
@@ -170,16 +180,25 @@ const HOLD_ROWS := [[&"throw", &"punch", ""], [&"knee", &"leg_kick", ""],
 const HOLD_AFTER := &"grab"
 ## The pursuit (God path) rows follow the Dash row.
 const PURSUIT_AFTER := &"dash"
+## Round 8: the air combo row follows the Jump row.
+const AIR_COMBO_AFTER := &"jump"
+## Round 8: how every strike works (tap or hold to charge, the meter) and
+## pressure, under the F1 grid and in the title tips.
+const CHARGE_HELP := "Every strike: tap for a quick hit, or hold to charge. The meter at the bottom fills white, orange, then red at the strike's steps, flashes at full, then fires on its own."
+const PRESSURE_HELP := "Pressure: the bar under an enemy's health. Every hit fills it, even into a guard. Full breaks them open for a moment: no guard, no attacks, extra damage."
 
 ## Rows of [title, keyboard+mouse, gamepad, description], one per action, built
 ## from Controls.ACTIONS (move_* and cam_* are merged into one row each). The
-## gamepad's kick-layer moves read "LT + X" (Controls.KICK_LAYER); the pursuit
-## rows follow Dash and the hold actions follow Grab.
+## gamepad's kick-layer moves read "LT + X" (Controls.KICK_LAYER); the air
+## combo row follows Jump, the pursuit rows follow Dash and the hold actions
+## follow Grab.
 static func control_rows() -> Array:
 	var groups := _binding_groups()
 	var rows: Array = []
 	for gid: StringName in groups["order"]:
 		rows.append(_row(gid, groups[gid]["kb"], groups[gid]["pad"], ""))
+		if gid == AIR_COMBO_AFTER:
+			rows.append(_air_combo_row())
 		if gid == PURSUIT_AFTER:
 			rows.append_array(_pursuit_rows(groups))
 		if gid == HOLD_AFTER:
@@ -203,6 +222,11 @@ static func _pursuit_rows(groups: Dictionary) -> Array:
 		[ACTION_TITLES[&"pursuit"], "%s (after a launch)" % dash_kb, "%s (after a launch)" % dash_pad, ACTION_HELP[&"pursuit"]],
 		[ACTION_TITLES[&"pursuit_hit"], "Attack / %s + attack" % back, "Attack / stick back + attack", ACTION_HELP[&"pursuit_hit"]],
 	]
+
+## Round 8 air combo: after a charged uppercut's lift and the Jump that follows
+## it, attacks in the air hang; a kick or back + punch finishes.
+static func _air_combo_row() -> Array:
+	return [ACTION_TITLES[&"air_combo"], "Attack (in the air)", "Attack (in the air)", ACTION_HELP[&"air_combo"]]
 
 static func _first_key(groups: Dictionary, gid: StringName, device: String) -> String:
 	var list: PackedStringArray = groups.get(gid, {}).get(device, PackedStringArray())
@@ -353,24 +377,26 @@ static func controls_panel() -> PanelContainer:
 	var grid := GridContainer.new()
 	grid.columns = 4
 	grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	grid.add_theme_constant_override(&"v_separation", 2)
+	grid.add_theme_constant_override(&"v_separation", 0)
 	box.add_child(grid)
 	for h in ["", "Keyboard + mouse", "Gamepad", ""]:
 		grid.add_child(label(h, 15, TEXT_DIM))
 	for row: Array in control_rows():
-		grid.add_child(label(row[0], 18, ACCENT, true, 4))
-		grid.add_child(label(row[1], 18, TEXT))
-		grid.add_child(label(row[2], 18, TEXT))
-		var d := label(row[3], 16, TEXT_DIM)
-		d.custom_minimum_size.x = 680
+		grid.add_child(label(row[0], 17, ACCENT, true, 4))
+		grid.add_child(label(row[1], 17, TEXT))
+		grid.add_child(label(row[2], 17, TEXT))
+		var d := label(row[3], 15, TEXT_DIM)
+		d.custom_minimum_size.x = 840
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		grid.add_child(d)
-	var tells := label("Orange icon over an enemy: Counter (%s / %s). Blue icon: it can't be countered, Dodge (%s / %s)." % [
-		keys_label(&"counter", false), key_label(&"counter", true), key_label(&"dash", false), key_label(&"dash", true)],
-		16, TELL_STRIKE)
-	tells.custom_minimum_size.x = 900
-	tells.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	box.add_child(tells)
+	for line: Array in [[CHARGE_HELP, CHARGE_ORANGE], [PRESSURE_HELP, PRESSURE_COLOR],
+			["Orange icon over an enemy: Counter (%s / %s). Blue icon: it can't be countered, Dodge (%s / %s)." % [
+				keys_label(&"counter", false), key_label(&"counter", true), key_label(&"dash", false),
+				key_label(&"dash", true)], TELL_STRIKE]]:
+		var l := label(line[0], 15, line[1])
+		l.custom_minimum_size.x = 1380
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(l)
 	box.add_child(label("F1 closes this panel", 15, TEXT_DIM))
 	panel.visible = false
 	return panel

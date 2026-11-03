@@ -1,12 +1,15 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Round 7 acceptance check 4 (docs/Round 7 — Freeflow Combat.md: Payoffs):
-## uppercut -> roundhouse on a real grunt (agent H's lift): the uppercut lifts
-## it, the roundhouse on the lifted body is the launch payoff, and the grunt
+## Round 7 acceptance check 4 (docs/Round 7 — Freeflow Combat.md: Payoffs),
+## with Round 8's uppercut (only the charged one lifts: here at c = 0, 0.8 m):
+## uppercut -> roundhouse on a real level-3 grunt (agent H's lift; capacity 8,
+## so the uppercut's pressure does not break it open and add the break
+## bonus): the uppercut lifts it, the roundhouse tap on the lifted body is the
+## launch payoff, and the grunt
 ## flies at 15 m/s +-1 into the air (12 degrees up, along the hit); a brick
 ## wall in its path cracks or breaks per the wall table (the impact energy
 ## against the panel's break energy, Tuning.CRACK_FRACTION of it to crack).
-## Also, with the real lift: the juggle re-pop caps at R7_JUGGLE_MAX, then the
-## body falls into a knockdown.
+## Also, with the real lift: the juggle re-pop (jab taps) caps at
+## R7_JUGGLE_MAX, then the body falls into a knockdown.
 
 const T := HitInfo.Tier
 
@@ -21,6 +24,7 @@ func run() -> void:
 	var p := spawn_fake(&"player", Vector3(0, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	p.combat.sever_on_kill_chance = 0.0
 	var g := spawn(&"grunt", Vector3(0, 0, -1.0), Vector3.BACK)
+	g.level = 3
 	var wall := Destructible.new()
 	wall.surface = &"brick"
 	wall.name = "BrickWall"
@@ -28,7 +32,7 @@ func run() -> void:
 	add_child(wall)
 	await ticks(20)
 	clear_events()
-	p.combat.play_move(&"uppercut", g)
+	p.combat.play_charged(&"uppercut", 0.0, g)
 	await wait_until(func() -> bool: return not hits_on(g).is_empty(), 1.0)
 	var up: HitInfo = hits_on(g)[0] if not hits_on(g).is_empty() else null
 	await wait_until(func() -> bool: return g.is_lifted() or g.is_down(), 0.5)
@@ -82,9 +86,10 @@ func run() -> void:
 	print("the juggle re-pop caps at R7_JUGGLE_MAX (agent H's lift)")
 	var p2 := spawn_fake(&"player", Vector3(20, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var g2 := spawn(&"grunt", Vector3(20, 0, -1.0), Vector3.BACK)
+	g2.level = 3
 	await ticks(20)
 	clear_events()
-	p2.combat.play_move(&"uppercut", g2)
+	p2.combat.play_charged(&"uppercut", 0.0, g2)
 	await wait_until(func() -> bool: return g2.is_lifted(), 1.0)
 	var reacts: Array[StringName] = []
 	for i in Tuning.R7_JUGGLE_MAX + 1:

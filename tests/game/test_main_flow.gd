@@ -1,7 +1,9 @@
 extends Node
 ## Full flow through scenes/main.tscn: title -> duel, pause (restart, debug
-## settings: the upgrades speed cap / Battering Ram / teleport / pursuit chain
-## and the overlay, saved, loaded and applied; no starting Focus) and resume,
+## settings: the upgrades speed cap / Battering Ram / teleport / pursuit chain,
+## Round 8's charge time / pressure / launch step / air hits, and the overlay,
+## saved, loaded and clamped; in the Duel they edit the player's own values
+## while the live ones stay at max; no starting Focus) and resume,
 ## restart (scene reload) from the pause item, Backspace in play and in the
 ## pause menu, Start then Back on the gamepad, back to the main menu
 ## (Backspace does nothing there), waves. A driver node parked under the root

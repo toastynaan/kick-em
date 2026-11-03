@@ -44,6 +44,18 @@ extends RefCounted
 ## (react_fold / react_buckle / react_lift are both). Hold keys: "blend_max",
 ## "ramp", "by_vy", "flail" (see HOLDS). AIM_YAW_ONLY strikes keep their height.
 ##
+## Round 8 (docs/Round 8 — Charge and Pressure.md): ROUND8_LOAD_IDS are the
+## charge loads (heavy_<move>_load for jab / cross / hook / leg_kick /
+## front_kick / roundhouse, plus gut_punch_load and uppercut_load; hold key
+## "by_charge"): PoseAnimator.set_charge_amount(c) deepens them from a light
+## load at c = 0 to the full wind-up at c = 1, with a slight tremble at full.
+## A strike played while its load is held skips its own wind-up keys. New
+## reactions react_flinch / react_sweep / react_broken (moves and holds),
+## react_fold under 0.45 s plays react_fold_quick (move key "quick"), air
+## strikes air_jab / air_cross / air_kick (Tuning.R8_AIR_FRAMES) and the
+## launcher jump air_follow (move and hold). Lists: ROUND8_MOVE_IDS,
+## ROUND8_HOLD_IDS, ROUND8_AIR_IDS.
+##
 ## Joint limits (Round 5): compile() fits every pose inside the ragdoll's soft
 ## ranges (HumanoidRig.JOINT_LIMITS minus LIMIT_MARGIN): elbows / knees swivel
 ## to a legal plane, hinges keep their axis and range, a chest turn past its
@@ -95,6 +107,8 @@ const STRIKE_BONES := {
 	&"leg_kick": [&"RightFoot", &"RightLowerLeg"], &"front_kick": [&"RightFoot", &"RightLowerLeg"],
 	&"heavy_leg_kick": [&"RightFoot", &"RightLowerLeg"], &"heavy_front_kick": [&"RightFoot", &"RightLowerLeg"],
 	&"heavy_roundhouse": [&"RightFoot", &"RightLowerLeg"],
+	# Round 8 air strikes.
+	&"air_jab": [&"LeftHand"], &"air_cross": [&"RightHand"], &"air_kick": [&"RightFoot", &"RightLowerLeg"],
 }
 
 const ALIAS := {
@@ -1381,6 +1395,100 @@ const POSES := {
 		"lua": Vector3(70, 0, -70), "lla": Vector3(40, 0, 0), "rua": Vector3(60, 0, 80), "rla": Vector3(45, 0, 0),
 		"lul": Vector3(55, 0, -12), "lll": Vector3(-70, 0, 0), "lf": Vector3(-20, 0, 0),
 		"rul": Vector3(40, 0, 10), "rll": Vector3(-45, 0, 0), "rf": Vector3(-25, 0, 0)},
+	# =========================================================================
+	# Round 8 (docs/Round 8 — Charge and Pressure.md). Agent P. Placeholder
+	# quality: readable from the camera, not polished.
+	# =========================================================================
+	# --- Charged loads the Round 7 heavies did not have. Full depth (c = 1);
+	# the hold shows less of them at low charge (PoseAnimator.set_charge_amount). ---
+	# Gut punch: the level drops, hips and shoulders wound right, the rear fist
+	# cocked low and behind the hip.
+	&"hgut_load": {"pos": Vector3(0, -0.24, 0.07), "hips": Vector3(-6, -34, 0), "spine": Vector3(-12, -8, 0),
+		"chest": Vector3(-4, -24, 0), "head": Vector3(16, 56, 0),
+		"lfist": Vector3(-0.06, 1.32, -0.36), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.30, 0.95, 0.14), "relbow": Vector3(0.7, -0.6, 0.8),
+		"lankle": Vector3(-0.16, 0.08, -0.30), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.19, 0.08, 0.24), "rknee": Vector3(0.3, 0, -1)},
+	# Uppercut: crouched deep, bent forward over the lead leg, the rear fist
+	# down at the hip and back, ready to come up the middle.
+	&"hupc_load": {"pos": Vector3(0, -0.28, 0.05), "hips": Vector3(-4, -28, 0), "spine": Vector3(-20, -6, 0),
+		"chest": Vector3(-6, -20, 0), "head": Vector3(22, 44, 0),
+		"lfist": Vector3(-0.10, 1.24, -0.30), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.26, 0.84, 0.06), "relbow": Vector3(0.5, -1, 0.6),
+		"lankle": Vector3(-0.17, 0.08, -0.26), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.19, 0.08, 0.22), "rknee": Vector3(0.3, 0, -1)},
+	# --- Reactions --------------------------------------------------------------
+	# Flinch (a tap): a quick wince. The head jerks back and aside, the
+	# shoulders hunch and the hands twitch up; the legs keep walking. Generic:
+	# B and H put the physical hit on the struck bone.
+	&"react_flinch_a": {"pos": Vector3(0, -0.05, 0.04), "spine": Vector3(5, 0, 0), "chest": Vector3(6, 8, 0),
+		"head": Vector3(18, -12, 8),
+		"lfist": Vector3(-0.17, 1.47, -0.16), "lelbow": Vector3(-0.8, -0.6, 0.2), "rfist": Vector3(0.17, 1.44, -0.12), "relbow": Vector3(0.8, -0.6, 0.2)},
+	&"react_flinch_b": {"pos": Vector3(0, -0.04, 0.02), "spine": Vector3(2, 0, 0), "chest": Vector3(3, 4, 0),
+		"head": Vector3(8, -6, 4),
+		"lfist": Vector3(-0.13, 1.44, -0.24), "lelbow": Vector3(-0.6, -0.8, 0.2), "rfist": Vector3(0.14, 1.42, -0.20), "relbow": Vector3(0.6, -0.8, 0.2)},
+	# Sweep (a full leg kick): the legs are taken out forward, the hips drop
+	# and tip back, the arms fly up; the moment before the ragdoll takes over.
+	&"react_sweep_a": {"pos": Vector3(0, -0.20, 0.10), "hips": Vector3(22, 0, 0), "spine": Vector3(10, 0, 0),
+		"chest": Vector3(6, 0, 0), "head": Vector3(-28, 0, 0),
+		"lua": Vector3(95, 0, -35), "lla": Vector3(30, 0, 0), "rua": Vector3(105, 0, 35), "rla": Vector3(25, 0, 0),
+		"lul": Vector3(45, 0, -8), "lll": Vector3(-25, 0, 0), "lf": Vector3(10, 0, 0),
+		"rul": Vector3(60, 0, 8), "rll": Vector3(-15, 0, 0), "rf": Vector3(15, 0, 0)},
+	&"react_sweep_b": {"pos": Vector3(0, -0.40, 0.18), "hips": Vector3(40, 0, 0), "spine": Vector3(12, 0, 0),
+		"chest": Vector3(8, 0, 0), "head": Vector3(-36, 0, 0),
+		"lua": Vector3(135, 0, -50), "lla": Vector3(25, 0, 0), "rua": Vector3(145, 0, 50), "rla": Vector3(20, 0, 0),
+		"lul": Vector3(45, 0, -10), "lll": Vector3(-20, 0, 0), "lf": Vector3(15, 0, 0),
+		"rul": Vector3(55, 0, 10), "rll": Vector3(-10, 0, 0), "rf": Vector3(20, 0, 0)},
+	# Broken (pressure break): dazed and open. The guard drops (hands hang at
+	# the thighs), the torso slumps, the head lolls, and the body sways from
+	# side to side (the hold loops a <-> b slowly). The legs stay planted.
+	&"react_broken_a": {"pos": Vector3(0.05, -0.10, 0.04), "hips": Vector3(-4, 6, 0), "spine": Vector3(-10, 4, -8),
+		"chest": Vector3(-8, 4, -6), "head": Vector3(-20, 14, -18),
+		"lfist": Vector3(-0.27, 0.78, -0.06), "lelbow": Vector3(-0.4, 0, 1), "rfist": Vector3(0.28, 0.72, 0.0), "relbow": Vector3(0.4, 0, 1)},
+	&"react_broken_b": {"pos": Vector3(-0.05, -0.11, 0.05), "hips": Vector3(-4, -6, 0), "spine": Vector3(-12, -4, 8),
+		"chest": Vector3(-8, -4, 6), "head": Vector3(-22, -14, 18),
+		"lfist": Vector3(-0.28, 0.72, 0.0), "lelbow": Vector3(-0.4, 0, 1), "rfist": Vector3(0.27, 0.78, -0.06), "relbow": Vector3(0.4, 0, 1)},
+	# Half-keel (a tapped gut punch, react_fold timed under ~0.45 s): bent at
+	# the stomach about half as deep as react_fold, hands in; the legs stay
+	# planted.
+	&"react_fold_half": {"pos": Vector3(0, -0.13, 0.07), "hips": Vector3(-14, 0, 0), "spine": Vector3(-22, 0, 0),
+		"chest": Vector3(-16, 0, 0), "head": Vector3(12, 0, 0),
+		"lfist": Vector3(-0.09, 1.06, -0.32), "lelbow": Vector3(-1, -0.6, 0.2), "rfist": Vector3(0.09, 1.03, -0.30), "relbow": Vector3(1, -0.6, 0.2)},
+	# --- Air strikes (R8_AIR_FRAMES): compact, the legs tucked under. Character
+	# space is the striker's own (the lifted body hangs about level with it). ---
+	&"air_tuck": {"spine": Vector3(-6, 0, 0), "chest": Vector3(-4, -6, 0), "head": Vector3(8, 10, 0),
+		"lfist": Vector3(-0.10, 1.44, -0.30), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.12, 1.40, -0.22), "relbow": Vector3(0.5, -1, 0.4),
+		"lul": Vector3(88, 0, -6), "lll": Vector3(-123, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(80, 0, 6), "rll": Vector3(-115, 0, 0), "rf": Vector3(-20, 0, 0)},
+	&"air_jab_load": {"hips": Vector3(0, -6, 0), "spine": Vector3(-6, 0, 0), "chest": Vector3(-4, 4, 0), "head": Vector3(8, 0, 0),
+		"lfist": Vector3(-0.11, 1.38, -0.22), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.12, 1.40, -0.20), "relbow": Vector3(0.5, -1, 0.4),
+		"lul": Vector3(91, 0, -6), "lll": Vector3(-126, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(82, 0, 6), "rll": Vector3(-118, 0, 0), "rf": Vector3(-20, 0, 0)},
+	&"air_jab_hit": {"hips": Vector3(0, -20, 0), "spine": Vector3(-8, -4, 0), "chest": Vector3(-4, -22, 0), "head": Vector3(8, 42, 0),
+		"lfist": Vector3(-0.04, 1.38, -0.64), "lelbow": Vector3(-0.8, -0.6, 0.2), "rfist": Vector3(0.13, 1.40, -0.16), "relbow": Vector3(0.5, -1, 0.4),
+		"lul": Vector3(84, 0, -6), "lll": Vector3(-118, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(74, 0, 6), "rll": Vector3(-110, 0, 0), "rf": Vector3(-20, 0, 0)},
+	&"air_cross_load": {"hips": Vector3(0, -18, 0), "spine": Vector3(-6, -4, 0), "chest": Vector3(-4, -14, 0), "head": Vector3(8, 34, 0),
+		"lfist": Vector3(-0.08, 1.42, -0.34), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.16, 1.37, -0.10), "relbow": Vector3(0.6, -1, 0.4),
+		"lul": Vector3(91, 0, -6), "lll": Vector3(-126, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(82, 0, 6), "rll": Vector3(-118, 0, 0), "rf": Vector3(-20, 0, 0)},
+	&"air_cross_hit": {"hips": Vector3(0, 18, 0), "spine": Vector3(-8, 4, 0), "chest": Vector3(-4, 26, 0), "head": Vector3(8, -40, 0),
+		"lfist": Vector3(-0.13, 1.40, -0.18), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.03, 1.38, -0.67), "relbow": Vector3(0.8, -0.6, 0.2),
+		"lul": Vector3(80, 0, -6), "lll": Vector3(-113, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(92, 0, 6), "rll": Vector3(-125, 0, 0), "rf": Vector3(-20, 0, 0)},
+	# Air kick: the right knee chambers up, then the heel drives straight out
+	# at the body's middle, leaning back; the left leg stays tucked.
+	&"air_kick_load": {"hips": Vector3(10, -4, 0), "spine": Vector3(8, 0, 0), "chest": Vector3(4, -4, 0), "head": Vector3(-14, 6, 0),
+		"lfist": Vector3(-0.14, 1.44, -0.26), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.20, 1.34, -0.10), "relbow": Vector3(0.6, -1, 0.3),
+		"lul": Vector3(82, 0, -6), "lll": Vector3(-123, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(100, 0, 6), "rll": Vector3(-130, 0, 0), "rf": Vector3(10, 0, 0)},
+	&"air_kick_hit": {"hips": Vector3(18, -4, 0), "spine": Vector3(12, 0, 0), "chest": Vector3(6, -4, 0), "head": Vector3(-26, 6, 0),
+		"lfist": Vector3(-0.22, 1.36, -0.12), "lelbow": Vector3(-0.6, -0.8, 0.4), "rfist": Vector3(0.30, 1.20, 0.04), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lul": Vector3(78, 0, -6), "lll": Vector3(-118, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(78, 0, 4), "rll": Vector3(-4, 0, 0), "rf": Vector3(22, 0, 0)},
+	# Launcher jump (air_follow): a rising leap after the lifted body. The
+	# right knee drives up, the left leg trails, the right arm reaches up the
+	# line of the uppercut, the chest and head lift toward the body above.
+	&"air_follow_rise": {"hips": Vector3(4, -8, 0), "spine": Vector3(8, 0, 0), "chest": Vector3(8, -6, 0), "head": Vector3(22, 8, 0),
+		"lfist": Vector3(-0.30, 1.10, 0.12), "lelbow": Vector3(-0.6, -0.4, 1), "rfist": Vector3(0.16, 1.92, -0.36), "relbow": Vector3(1, 0.2, 0.3),
+		"lul": Vector3(-12, 0, -4), "lll": Vector3(-45, 0, 0), "lf": Vector3(-30, 0, 0),
+		"rul": Vector3(110, 0, 6), "rll": Vector3(-115, 0, 0), "rf": Vector3(-15, 0, 0)},
 }
 
 const MOVES := {
@@ -1562,12 +1670,45 @@ const MOVES := {
 		"keys": [[0, Vector2(1.0, 0.05), &"react_spin_a#m", &"snap"], [1, 0.45, &"react_spin_b#m"], [1, 1.0, &"react_spin_b#m"]]},
 	&"react_push": {"steps": 3, "step_dir": Vector3(0, 0, 1), "timed": Vector3(0.08, 0.62, 0.3),
 		"keys": [[0, Vector2(1.0, 0.05), &"react_push_a", &"snap"], [1, 0.33, &"react_push_b"], [1, 0.66, &"react_push_a"], [1, 1.0, &"react_push_b"]]},
-	&"react_fold": {"timed": Vector3(0.08, 0.77, 0.15),
+	## Round 8: play_timed(&"react_fold", d) with d under "quick"[0] s plays
+	## "quick"[1] instead (a tapped gut punch: a half-keel straight back up).
+	&"react_fold": {"timed": Vector3(0.08, 0.77, 0.15), "quick": [0.45, &"react_fold_quick"],
 		"keys": [[0, Vector2(1.0, 0.06), &"react_fold_a", &"snap"], [1, 0.5, &"react_fold_b"], [1, 1.0, &"react_fold_a"]]},
 	&"react_buckle": {"timed": Vector3(0.08, 0.72, 0.2),
 		"keys": [[0, Vector2(1.0, 0.07), &"react_buckle_a", &"snap"], [1, 0.5, &"react_buckle_b"], [1, 1.0, &"react_buckle_a"]]},
 	&"react_lift": {"timed": Vector3(0.06, 0.84, 0.1),
 		"keys": [[0, Vector2(1.0, 0.05), &"react_lift_rise", &"snap"], [1, 0.35, &"react_lift_fall"], [1, 1.0, &"react_lift_fall"]]},
+	# =========================================================================
+	# Round 8 (agent P).
+	# =========================================================================
+	## Flinch (play_timed over the tap's stun, ~0.15-0.25 s): the wince lands in
+	## 0.03 s, eases off, and is gone by the end; upper body only, so a walking
+	## enemy keeps coming.
+	&"react_flinch": {"legs": &"free", "timed": Vector3(0.12, 0.38, 0.5),
+		"keys": [[0, Vector2(1.0, 0.03), &"react_flinch_a", &"snap"], [1, 1.0, &"react_flinch_b"]]},
+	## Sweep (play_timed over the moment before the ragdoll, ~0.2-0.4 s, or
+	## hold_pose): the legs go out and the body tips back. Hand over to the
+	## ragdoll before it ends (a timed move ends back on the locomotion).
+	&"react_sweep": {"timed": Vector3(0.06, 0.9, 0.04),
+		"keys": [[0, Vector2(1.0, 0.04), &"react_sweep_a", &"snap"], [1, 1.0, &"react_sweep_b", &"accel"]]},
+	## Broken (play_timed over R8_BREAK_TIME, or hold_pose): the dazed sway.
+	&"react_broken": {"timed": Vector3(0.08, 0.8, 0.12),
+		"keys": [[0, Vector2(1.0, 0.08), &"react_broken_a", &"snap"], [1, 0.3, &"react_broken_b"], [1, 0.65, &"react_broken_a"],
+			[1, 1.0, &"react_broken_b"]]},
+	## The quick half-keel (react_fold under 0.45 s): in at once, a short
+	## hold, then more than half the time standing straight back up.
+	&"react_fold_quick": {"timed": Vector3(0.12, 0.33, 0.55),
+		"keys": [[0, Vector2(1.0, 0.04), &"react_fold_half", &"snap"], [1, 1.0, &"react_fold_half"]]},
+	## Air strikes (play_move on Tuning.R8_AIR_FRAMES; B maps every air punch to
+	## air_jab / air_cross and every air kick to air_kick). Contact on the first
+	## active frame; the legs stay tucked throughout.
+	&"air_jab": {"keys": [[0, 0.5, &"air_jab_load"], [1, 0.0, &"air_jab_hit", &"snap"], [1, 1.0, &"air_jab_hit"], [2, 0.45, &"air_tuck"]]},
+	&"air_cross": {"keys": [[0, 0.5, &"air_cross_load"], [1, 0.0, &"air_cross_hit", &"snap"], [1, 1.0, &"air_cross_hit"], [2, 0.45, &"air_tuck"]]},
+	&"air_kick": {"keys": [[0, 0.55, &"air_kick_load"], [1, 0.0, &"air_kick_hit", &"snap"], [1, 1.0, &"air_kick_hit"], [2, 0.4, &"air_kick_load"],
+		[2, 0.75, &"air_tuck"]]},
+	## Launcher jump (play_timed over the follow, ~R8_AIR_FOLLOW_TIME, or
+	## hold_pose until the first air strike).
+	&"air_follow": {"timed": Vector3(0.25, 0.6, 0.15), "keys": [[0, 1.0, &"air_follow_rise", &"snap"], [1, 1.0, &"air_follow_rise"]]},
 }
 
 ## play_timed() split of a move's length into startup / active / recovery when
@@ -1630,17 +1771,28 @@ const HOLDS := {
 	&"clinch_hold": {"poses": [&"clinch"], "legs": &"free"},
 	&"glide": {"poses": [&"glide_lean"], "legs": &"free"},
 	&"counter_catch": {"poses": [&"counter_catch"], "legs": &"free", "blend_max": 0.04},
-	# Heavy wind-ups held while the punch button waits for the hold decision
-	# (play_move(&"heavy_*", startup_left, ...) then carries on from here).
-	&"heavy_jab_load": {"poses": [&"hjab_load"], "legs": &"free", "tremble": 0.6},
-	&"heavy_cross_load": {"poses": [&"hcross_load"], "legs": &"free", "tremble": 0.6},
-	&"heavy_hook_load": {"poses": [&"hhook_load"], "legs": &"free", "tremble": 0.6},
-	&"heavy_leg_kick_load": {"poses": [&"hlk_load"], "tremble": 0.6},
-	&"heavy_front_kick_load": {"poses": [&"hfk_chamber"], "tremble": 0.6},
-	&"heavy_roundhouse_load": {"poses": [&"hrh_coil"], "tremble": 0.6},
+	# Charge loads (Round 8: "by_charge"). Held while a strike charges; the
+	# pose is the full wind-up at c = 1 and PoseAnimator.set_charge_amount(c)
+	# shows LOAD_LIGHT_W of it at c = 0, deepening smoothly with c; "tremble"
+	# (deg) is the tremble at full (a trace of it below). A strike played from
+	# a load skips its own wind-up keys (straight from the load to contact).
+	# Round 7 used the heavy_* ones for the hold decision.
+	&"heavy_jab_load": {"poses": [&"hjab_load"], "legs": &"free", "tremble": 1.2, "by_charge": true},
+	&"heavy_cross_load": {"poses": [&"hcross_load"], "legs": &"free", "tremble": 1.2, "by_charge": true},
+	&"heavy_hook_load": {"poses": [&"hhook_load"], "legs": &"free", "tremble": 1.2, "by_charge": true},
+	&"heavy_leg_kick_load": {"poses": [&"hlk_load"], "legs": &"free", "tremble": 1.2, "by_charge": true},
+	&"heavy_front_kick_load": {"poses": [&"hfk_chamber"], "tremble": 1.2, "by_charge": true},
+	&"heavy_roundhouse_load": {"poses": [&"hrh_coil"], "legs": &"free", "tremble": 1.2, "by_charge": true},
+	&"gut_punch_load": {"poses": [&"hgut_load"], "legs": &"free", "tremble": 1.2, "by_charge": true},
+	&"uppercut_load": {"poses": [&"hupc_load"], "legs": &"free", "tremble": 1.2, "by_charge": true},
 	&"react_fold": {"poses": [&"react_fold_a", &"react_fold_b"], "rate": 1.4, "blend_max": 0.06},
 	&"react_buckle": {"poses": [&"react_buckle_a", &"react_buckle_b"], "rate": 1.0, "blend_max": 0.07},
 	&"react_lift": {"poses": [&"react_lift_rise", &"react_lift_fall"], "by_vy": true, "flail": 8.0, "blend_max": 0.05},
+	# --- Round 8 reactions and the launcher jump (also play_timed moves) ---------------
+	&"react_flinch": {"poses": [&"react_flinch_a"], "legs": &"free", "blend_max": 0.03},
+	&"react_sweep": {"poses": [&"react_sweep_a", &"react_sweep_b"], "ramp": 0.25, "blend_max": 0.04},
+	&"react_broken": {"poses": [&"react_broken_a", &"react_broken_b"], "rate": 0.7, "blend_max": 0.08},
+	&"air_follow": {"poses": [&"air_follow_rise"], "blend_max": 0.06},
 }
 
 const ALL_MOVE_IDS: Array[StringName] = [&"jab1", &"jab2", &"jab3", &"power_punch", &"sparta_kick",
@@ -1685,10 +1837,32 @@ const ROUND7_HOLD_IDS: Array[StringName] = [&"throw_windup", &"drive_hold", &"cl
 	&"heavy_leg_kick_load", &"heavy_front_kick_load", &"heavy_roundhouse_load",
 	&"react_fold", &"react_buckle", &"react_lift"]
 
-## Every move id (older rounds, Round 5 and Round 7).
+## Round 8 ids (docs/Round 8 — Charge and Pressure.md). ROUND8_AIR_IDS take
+## Tuning.R8_AIR_FRAMES in play_move(); the others are play_timed() moves
+## (react_fold under 0.45 s plays the quick half-keel by itself).
+const ROUND8_AIR_IDS: Array[StringName] = [&"air_jab", &"air_cross", &"air_kick"]
+const ROUND8_MOVE_IDS: Array[StringName] = [&"air_jab", &"air_cross", &"air_kick", &"air_follow",
+	&"react_flinch", &"react_sweep", &"react_broken", &"react_fold_quick"]
+## Round 8 holds: the charge loads (set_charge_amount deepens them) and the
+## reactions / launcher jump as holds.
+const ROUND8_LOAD_IDS: Array[StringName] = [&"heavy_jab_load", &"heavy_cross_load", &"heavy_hook_load",
+	&"heavy_leg_kick_load", &"heavy_front_kick_load", &"heavy_roundhouse_load", &"gut_punch_load", &"uppercut_load"]
+const ROUND8_HOLD_IDS: Array[StringName] = [&"heavy_jab_load", &"heavy_cross_load", &"heavy_hook_load",
+	&"heavy_leg_kick_load", &"heavy_front_kick_load", &"heavy_roundhouse_load", &"gut_punch_load", &"uppercut_load",
+	&"react_flinch", &"react_sweep", &"react_broken", &"air_follow"]
+
+## The charge-load hold of a Round 8 strike (&"jab" -> &"heavy_jab_load",
+## &"gut_punch" -> &"gut_punch_load"); &"" if it has none.
+static func charge_load_of(move_id: StringName) -> StringName:
+	for h: StringName in [StringName("heavy_" + String(move_id) + "_load"), StringName(String(move_id) + "_load")]:
+		if HOLDS.has(h) and HOLDS[h].get("by_charge", false):
+			return h
+	return &""
+
+## Every move id (older rounds, Round 5, Round 7 and Round 8).
 static func all_move_ids() -> Array[StringName]:
 	var out: Array[StringName] = ALL_MOVE_IDS.duplicate()
-	for id in ROUND5_MOVE_IDS + ROUND7_MOVE_IDS:
+	for id in ROUND5_MOVE_IDS + ROUND7_MOVE_IDS + ROUND8_MOVE_IDS:
 		if not out.has(id):
 			out.append(id)
 	return out

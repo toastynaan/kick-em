@@ -7,6 +7,10 @@ extends Node3D
 ## screen flash (from 0.7 or a launch) and push dust (pushes of 1 m or more),
 ## and the roundhouse must flash bigger and play more layers than the jab.
 ## Hits from a B that has not landed Round 7 yet follow the tier rules (noted).
+## Round 8: a real held press charges (glow and hum on charge_started); a charged
+## hit plays the charged crunch, a hit that adds pressure ticks, and a hit
+## that breaks the grunt plays the guard break and its burst on its frame (and
+## flashes the screen whatever its weight).
 ## Then a real dodge through the player's Traversal (M): on its dodged frame,
 ## the whoosh, the dust kick and an after-image where it started.
 ## Skips (with a note) whatever the other modules have not landed yet.
@@ -17,6 +21,8 @@ const HOLD := 0.35               ## s a held punch is kept down (past Tuning.R7_
 
 var hits: Array[Dictionary] = []
 var played: Array = []           ## [id, physics frame]
+var broke_frames: Array[int] = []  ## Round 8: physics frames of pressure_broken
+var charge_seen: Array = []      ## Round 8: [frame, glow on, hums] at each player charge_started
 
 func _ready() -> void:
 	var errlog := U.ErrorLogger.new()
@@ -29,6 +35,10 @@ func _ready() -> void:
 		fails.append("AudioFX never finished synthesising")
 	AudioFX.sound_played.connect(func(id: StringName, _p: Vector3) -> void: played.append([id, Engine.get_physics_frames()]))
 	var ff: Node = BloodFX.get_freeflow_fx()
+	GameEvents.pressure_broken.connect(func(_f: Node3D, _a: Node3D) -> void: broke_frames.append(Engine.get_physics_frames()))
+	GameEvents.charge_started.connect(func(f: Node3D, _m: StringName) -> void:
+		if is_instance_valid(f) and f.is_in_group(&"player"):
+			charge_seen.append([Engine.get_physics_frames(), BloodFX.get_charge_glow(f) != null, AudioFX.active_hums()]))
 	GameEvents.hit_landed.connect(func(info: HitInfo) -> void:
 		if info.attacker == null or not info.attacker.is_in_group(&"player"):
 			return
@@ -62,6 +72,7 @@ func _ready() -> void:
 		await U.physics_frames(get_tree(), 20)
 		hits.clear()
 		played.clear()
+		charge_seen.clear()
 		combat.call(&"press", spec[1])
 		if float(spec[2]) > 0.0:
 			var th := TimeDirector.now()
@@ -102,8 +113,11 @@ func _ready() -> void:
 					fails.append("%s: %s not played on the hit frame" % [spec[0], id])
 			if absf(float(fx.get("flash_size", 0.0)) - want_flash) > 0.001:
 				fails.append("%s: flash %.2f m, want %.2f for weight %.2f" % [spec[0], fx.get("flash_size", 0.0), want_flash, w])
-			if h["screen"] != (w >= ScreenFX.R7_FLASH_FROM or info.react == &"launch"):
-				fails.append("%s: screen flash %s at weight %.2f" % [spec[0], h["screen"], w])
+			# Round 8: a hit that breaks the victim's pressure flashes the screen too.
+			var broke := broke_frames.has(int(h["frame"]))
+			if h["screen"] != (w >= ScreenFX.R7_FLASH_FROM or info.react == &"launch" or broke):
+				fails.append("%s: screen flash %s at weight %.2f (broke %s)" % [spec[0], h["screen"], w, broke])
+			_check_r8(spec[0], info, on_frame, broke, fails)
 			if h["dust"] != (info.push >= 1.0):
 				fails.append("%s: push dust %s for %.1f m" % [spec[0], h["dust"], info.push])
 			r7_flash[spec[0]] = float(fx.get("flash_size", 0.0))
@@ -158,3 +172,23 @@ func _ready() -> void:
 		elif not (ids.has(&"sidestep") and dusted and ghosts >= 1):
 			fails.append("real dodge: sounds %s, dust %s, after-images %d" % [ids, dusted, ghosts])
 	U.finish(get_tree(), "test_real_contact", fails, errlog)
+
+## Round 8 on a real hit: a charged strike plays the charged crunch, a hit that
+## adds pressure ticks, a break plays the guard break and bursts, all on the
+## hit's frame; a real charge lit the glow and the hum on charge_started.
+func _check_r8(what: String, info: HitInfo, on_frame: Array, broke: bool, fails: Array[String]) -> void:
+	var cfx: Node = BloodFX.get_charge_fx()
+	var bursts: Array = (cfx.get(&"effect_log") as Array).filter(func(e: Dictionary) -> bool:
+		return e["event"] == &"break_burst" and broke_frames.has(int(e["frame"])))
+	print("  round 8: charged %s c %.2f, pressure %.1f, broken bonus %s, broke %s; charge_started %s" % [info.charged,
+		info.charge, info.pressure, info.broken_bonus, broke, charge_seen])
+	for rec: Array in charge_seen:
+		if not rec[1] or int(rec[2]) < 1:
+			fails.append("%s: charge_started without the glow or the hum" % what)
+	if info.charged and not on_frame.has(&"hit_charged"):
+		fails.append("%s: charged hit without the charged crunch" % what)
+	if info.pressure > 0.0 and not on_frame.has(&"pressure_tick"):
+		fails.append("%s: pressure %.1f without a tick" % [what, info.pressure])
+	if broke and (not on_frame.has(&"guard_break") or bursts.is_empty()):
+		fails.append("%s: the break without its sound or burst" % what)
+

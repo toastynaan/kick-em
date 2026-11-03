@@ -18,6 +18,10 @@ static func spawn_enemy(parent: Node, archetype: StringName, xform: Transform3D,
 	var f := Fighter.new()
 	f.name = String(archetype).capitalize()
 	f.setup(archetype, Fighter.TEAM_ENEMY)
+	# Round 8: enemy level from the wave (pressure capacity, blocking); the Duelist
+	# stays 1. AttackDirector.wave_index is 1-based in Waves (GameMode sets
+	# index + 1) and 0 outside it; R8_LEVEL_BY_WAVE is 0-based.
+	f.level = 1 if archetype == &"duelist" else Tuning.r8_level_for_wave(AttackDirector.wave_index - 1)
 	f.transform = xform
 	parent.add_child(f)
 	var brain := AIBrain.new()

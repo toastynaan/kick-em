@@ -9,8 +9,8 @@ extends Node3D
 ## screen flash only from launch up, each at most once per 0.2 s; the victim's
 ## mesh jitters 2-4 cm for its freeze (the player's capped at 60 ms); a whoosh
 ## on every strike (a longer one for charged), strike trails on a charged
-## strike's limb, and the charge glow that brightens and pulses with a sound
-## at each level. OWNER: agent F.
+## strike's limb, and the charge glow that brightens with c and pulses with a
+## tick at each step (Round 8). OWNER: agent F.
 
 const U := preload("res://tests/fx/fx_test_util.gd")
 
@@ -193,7 +193,7 @@ func _ready() -> void:
 	if seen != 1 or pts < 2 or int(st["strike"]) != 0:
 		fails.append("strike trail wrong (seen %d, points %d)" % [seen, pts])
 
-	# --- Charge glow ---------------------------------------------------------------------------
+	# --- Charge glow (Round 8: by c, a pulse and a tick at each step) ------------------------
 	played.clear()
 	GameEvents.charge_started.emit(player, &"sparta_kick")
 	var g := BloodFX.get_charge_glow(player)
@@ -204,22 +204,23 @@ func _ready() -> void:
 		if g.get(&"bone") != Bones.R_FOOT:
 			fails.append("charge glow on %s, want the kicking foot" % g.get(&"bone"))
 		await get_tree().create_timer(0.15).timeout
-		levels.append(g.call(&"get_level"))
+		levels.append(g.get(&"intensity"))
 		for lvl in [1, 2, 3]:
+			var before: float = g.call(&"get_level")
 			GameEvents.charge_level_changed.emit(player, lvl)
 			await get_tree().process_frame
 			var pulse: float = g.call(&"get_level")
-			await get_tree().create_timer(0.25).timeout
-			levels.append(g.call(&"get_level"))
-			if pulse <= levels.back() * 1.2:
-				fails.append("no pulse at level %d (%.2f vs %.2f)" % [lvl, pulse, levels.back()])
-		print("charge glow levels (steady, by charge level 0..3): %s; level-up sounds %d" % [
-			levels.map(func(v: float) -> String: return "%.2f" % v), played.count(&"charge_level")])
+			await get_tree().create_timer(0.2).timeout
+			levels.append(g.get(&"intensity"))
+			if pulse <= before * 1.2:
+				fails.append("no pulse at step %d (%.2f vs %.2f)" % [lvl, pulse, before])
+		print("charge glow strength (c rising over time) at 0.15 s and after steps 1..3: %s; step ticks %d" % [
+			levels.map(func(v: float) -> String: return "%.2f" % v), played.count(&"charge_tick")])
 		for k in range(1, levels.size()):
-			if levels[k] <= levels[k - 1] * 1.15:
-				fails.append("glow not brighter at level %d" % k)
-		if played.count(&"charge_level") != 3:
-			fails.append("level-up sounds %d, want 3" % played.count(&"charge_level"))
+			if levels[k] <= levels[k - 1]:
+				fails.append("glow not brighter after step %d" % k)
+		if played.count(&"charge_tick") != 3:
+			fails.append("step ticks %d, want 3" % played.count(&"charge_tick"))
 		GameEvents.charge_released.emit(player, &"sparta_kick", 3)
 		await get_tree().create_timer(0.3).timeout
 		if is_instance_valid(g):

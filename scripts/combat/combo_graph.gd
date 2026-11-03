@@ -4,17 +4,21 @@ extends Resource
 ## (combat).
 ##
 ## Round 7 (docs/Round 7 — Freeflow Combat.md: Moves; amendment): one button,
-## one move. The only string is the punch button's: tapped it counts 1, 2, 3
-## (jab, cross, hook) and wraps back to the jab. A press of the punch or of a
-## kick (leg kick, front kick, roundhouse) still held at
-## Tuning.R7_HOLD_THRESHOLD is that move's heavy version (Tuning.R7_HEAVY_OF).
-## Combos come from states, not strings (Tuning.R7_PAYOFFS). CombatController
-## keeps the string position: it continues while the chain is alive and resets
-## to the jab on a whiff or a dropped chain.
+## one move. The only string is the punch button's: it counts 1, 2, 3 (jab,
+## cross, hook) and wraps back to the jab. Combos come from states, not strings
+## (Tuning.R7_PAYOFFS). CombatController keeps the string position: it
+## continues while the chain is alive and resets to the jab on a whiff or a
+## dropped chain.
+## Round 8 (docs/Round 8 — Charge and Pressure.md: Charge): a held press no
+## longer switches to a heavy; CombatController charges the position's punch
+## (or any strike) continuously. The heavy ids (Tuning.R7_HEAVY_OF) stay: they
+## are the charged strikes' payoff rows (R8_MOVES "payoff_id"), Round 7 moves
+## for scripted play_move (the lab, bots), and index_of() / is_heavy() still
+## know them.
 
 ## Punch string positions: index 0 = 1st press, 1 = 2nd, 2 = 3rd.
 @export var punches: Array[StringName] = []
-## Move -> its heavy version (the string punches and the three kicks).
+## Move -> its Round 7 heavy version (the string punches and the three kicks).
 @export var heavies: Dictionary = {}
 
 static var _default: ComboGraph

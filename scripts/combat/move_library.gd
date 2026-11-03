@@ -10,7 +10,19 @@ class_name MoveLibrary
 ## hit level, target bone), which way it pushes and which limbs strike. Enemy moves carry a preset tier, damage from Tuning.DMG_ENEMY,
 ## startup from AttackDirector.enemy_startup_frames() and whether the player
 ## can counter them.
+##
+## Round 8 (docs/Round 8 — Charge and Pressure.md: Moves): the eight strikes of
+## Tuning.R8_MOVES (jab, cross, hook, leg kick, gut punch, uppercut, front kick,
+## roundhouse) are taps on their "tap" entry's frame data; charged_move() and
+## air_move() give their charged and air versions (same id, landing, limbs and
+## push direction; their own frames). The Round 7 heavy ids, the counter and
+## the dropping strike stay Round 7 moves (Tuning.R7_MOVES): payoffs, the lab
+## and scripted bots still use them.
 
+## Round 8 air strike poses (agent P): every air kick, left-hand punches, right-hand punches.
+const AIR_ANIM_KICK := &"air_kick"
+const AIR_ANIM_LEFT := &"air_jab"
+const AIR_ANIM_RIGHT := &"air_cross"
 const PLAYER_MOVES: Array[StringName] = [&"jab", &"cross", &"hook", &"heavy_jab", &"heavy_cross",
 	&"heavy_hook", &"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse", &"counter",
 	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse", &"drop_strike"]
@@ -78,6 +90,8 @@ const LIMB_FALLBACK := {
 }
 
 static var _moves: Dictionary = {}
+static var _charged: Dictionary = {}
+static var _air: Dictionary = {}
 
 static func get_move(id: StringName) -> MoveData:
 	if _moves.is_empty():
@@ -88,6 +102,59 @@ static func has_move(id: StringName) -> bool:
 	if _moves.is_empty():
 		_build()
 	return _moves.has(id)
+
+## Round 8: the charged version of strike `id` (null for moves outside
+## Tuning.R8_MOVES): the tap's landing, limbs and active frames, startup
+## R8_RELEASE_STARTUP (from the release, after any glide), recovery the tap's +
+## R8_CHARGED_EXTRA_RECOVERY, guard_break; it plays the Round 7 heavy's pose
+## when P has one (heavy_<id>), else the tap's.
+static func charged_move(id: StringName) -> MoveData:
+	if _charged.has(id):
+		return _charged[id]
+	var tap := get_move(id)
+	if tap == null or not tap.r8:
+		return null
+	var m: MoveData = tap.duplicate()
+	m.charged = true
+	m.guard_break = true
+	m.startup = Tuning.R8_RELEASE_STARTUP
+	m.recovery = tap.recovery + Tuning.R8_CHARGED_EXTRA_RECOVERY
+	var ch: Dictionary = Tuning.R8_MOVES[id]["charged"]
+	m.damage = (ch["dmg"] as Vector2).y
+	var heavy_anim := StringName("heavy_" + String(id))
+	if PoseLibrary.has_move(heavy_anim):
+		m.anim = heavy_anim
+	_charged[id] = m
+	return m
+
+## Round 8: the air strike of `id` (air combo; null outside Tuning.R8_MOVES):
+## the tap with Tuning.R8_AIR_FRAMES, never charged. It plays P's air pose:
+## AIR_ANIM_KICK for a kick, AIR_ANIM_LEFT for a left-hand punch, else
+## AIR_ANIM_RIGHT (striking with that pose's limbs), or the tap's own pose when
+## P has none.
+static func air_move(id: StringName) -> MoveData:
+	if _air.has(id):
+		return _air[id]
+	var tap := get_move(id)
+	if tap == null or not tap.r8:
+		return null
+	var m: MoveData = tap.duplicate()
+	m.air = true
+	m.startup = Tuning.R8_AIR_FRAMES.x
+	m.active = Tuning.R8_AIR_FRAMES.y
+	m.recovery = Tuning.R8_AIR_FRAMES.z
+	var air_anim := AIR_ANIM_KICK if tap.is_kick else (AIR_ANIM_LEFT if tap.limb == &"LeftHand" else AIR_ANIM_RIGHT)
+	if PoseLibrary.has_move(air_anim):
+		m.anim = air_anim
+		var src: Array = PoseLibrary.STRIKE_BONES.get(air_anim, [])
+		if not src.is_empty():
+			var bones: Array[StringName] = []
+			for b in src:
+				bones.append(StringName(b))
+			m.limbs = bones
+			m.limb = bones[0]
+	_air[id] = m
+	return m
 
 static func _add(m: MoveData) -> void:
 	if m.anim == &"":
@@ -117,6 +184,23 @@ static func anim_for(id: StringName, depth := 0) -> StringName:
 		return anim_for(first, depth + 1)
 	return id
 
+## A Round 8 strike: a Round 7 move (glide, chains, auto-connect) whose frame
+## data and damage come from Tuning.R8_MOVES[id]["tap"]; its charge pose is
+## P's PoseLibrary.charge_load_of(id) (heavy_jab_load, gut_punch_load, ...).
+static func _r8(id: StringName, level: int, reach: float, height: float, target: StringName,
+		push := Vector3(0.0, 0.0, 1.0)) -> MoveData:
+	var m := _r7(id, level, reach, height, target, push)
+	var t: Dictionary = Tuning.R8_MOVES[id]["tap"]
+	var f: Vector3 = t["f"]
+	m.r8 = true
+	m.startup = f.x
+	m.active = f.y
+	m.recovery = f.z
+	m.damage = float(t["dmg"])
+	m.guard_break = false
+	m.charge_hold = PoseLibrary.charge_load_of(id)
+	return m
+
 ## A Round 7 player move: frame data and damage from Tuning.R7_MOVES[id].
 ## `target`: the bone it lands on without a limb contact (head for high
 ## punches, the waist for the gut punch, the leg for the leg kick).
@@ -140,40 +224,42 @@ static func _r7(id: StringName, level: int, reach: float, height: float, target:
 	return m
 
 static func _build() -> void:
+	_charged.clear()
+	_air.clear()
 	var hi := HitInfo.Level.HIGH
 	var mid := HitInfo.Level.MID
 	var low := HitInfo.Level.LOW
-	# --- Player moves (Round 7) -----------------------------------------------------
+	# --- Player moves (Round 7; the eight strikes are Round 8's _r8) -------------------
 	# push_dir (x right, y up, z forward of the attacker): which way the hit
 	# drives the victim. Heights are m above the feet at height scale 1 (head
 	# ~1.65, chest 1.35, waist 1.0, knee 0.5).
-	_add(_r7(&"jab", hi, 1.05, 1.45, Bones.HEAD))
-	_add(_r7(&"cross", hi, 1.1, 1.45, Bones.HEAD))
+	_add(_r8(&"jab", hi, 1.05, 1.45, Bones.HEAD))
+	_add(_r8(&"cross", hi, 1.1, 1.45, Bones.HEAD))
 	# Left hook: the fist sweeps left to right, so the head turns to the attacker's right.
-	_add(_r7(&"hook", hi, 1.05, 1.45, Bones.HEAD, Vector3(0.75, 0.0, 0.65)))
+	_add(_r8(&"hook", hi, 1.05, 1.45, Bones.HEAD, Vector3(0.75, 0.0, 0.65)))
 	_add(_r7(&"heavy_jab", hi, 1.1, 1.45, Bones.HEAD))
 	_add(_r7(&"heavy_cross", hi, 1.15, 1.45, Bones.HEAD))
 	_add(_r7(&"heavy_hook", hi, 1.1, 1.45, Bones.HEAD, Vector3(0.75, 0.0, 0.65)))
 	# Uppercut: up under the chin, lifting.
-	_add(_r7(&"uppercut", hi, 1.0, 1.45, Bones.HEAD, Vector3(0.0, 0.75, 0.65)))
+	_add(_r8(&"uppercut", hi, 1.0, 1.45, Bones.HEAD, Vector3(0.0, 0.75, 0.65)))
 	# Gut punch: into the waist.
-	var gp := _r7(&"gut_punch", mid, 1.0, 1.0, Bones.SPINE)
+	var gp := _r8(&"gut_punch", mid, 1.0, 1.0, Bones.SPINE)
 	gp.reach_radius = 0.42
 	_add(gp)
 	# Leg kick: the right shin into the victim's lead (left) leg, low, sweeping across.
-	var lk := _r7(&"leg_kick", low, 1.25, 0.5, Bones.L_LOWER_LEG, Vector3(-0.4, 0.0, 0.9))
+	var lk := _r8(&"leg_kick", low, 1.25, 0.5, Bones.L_LOWER_LEG, Vector3(-0.4, 0.0, 0.9))
 	lk.is_kick = true
 	lk.limb_radius = 0.26
 	lk.reach_radius = 0.4
 	_add(lk)
 	# Front kick: a straight push kick to the body.
-	var fk := _r7(&"front_kick", mid, 1.4, 1.05, Bones.SPINE)
+	var fk := _r8(&"front_kick", mid, 1.4, 1.05, Bones.SPINE)
 	fk.is_kick = true
 	fk.limb_radius = 0.24
 	fk.reach_radius = 0.42
 	_add(fk)
 	# Right roundhouse to the head: the shin sweeps right to left.
-	var rh := _r7(&"roundhouse", hi, 1.45, 1.45, Bones.HEAD, Vector3(-0.75, 0.1, 0.65))
+	var rh := _r8(&"roundhouse", hi, 1.45, 1.45, Bones.HEAD, Vector3(-0.75, 0.1, 0.65))
 	rh.is_kick = true
 	rh.limb_radius = 0.26
 	rh.reach_radius = 0.45

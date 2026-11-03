@@ -1,6 +1,6 @@
 extends Node3D
 ## The charge glow (and its hum) never outlives its charge (lead review): it
-## drops on charge_released at any level (B and G send level 0 on a cancel),
+## drops on charge_released at any level, on charge_cancelled (Round 8),
 ## on a hit landing on the charging fighter, when that fighter dies, flies,
 ## goes down or is grabbed, and after CHARGE_GLOW_MAX at the latest. A hit the
 ## charging fighter deals does not drop it. OWNER: agent F.
@@ -22,6 +22,7 @@ func _ready() -> void:
 
 	var cases := {
 		"cancel (charge_released level 0)": func() -> void: GameEvents.charge_released.emit(p, &"sparta_kick", 0),
+		"cancelled (charge_cancelled)": func() -> void: GameEvents.charge_cancelled.emit(p, &"sparta_kick", &"cancel"),
 		"hit on the charging fighter": func() -> void:
 			var h := U.hit(p, &"e_jab", p.global_position + Vector3(0, 1.3, -0.1), Vector3(0, 0, 1), 10.0, 0.0,
 					&"strike", HitInfo.Tier.FLINCH)

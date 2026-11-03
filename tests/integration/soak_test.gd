@@ -6,23 +6,27 @@ extends Node
 ## Prints periodic stats and a summary; exits 1 if the round could not start.
 ##
 ## Round 7 bot (docs/Round 7 — Freeflow Combat.md): plays short combos from
-## COMBOS (taps, and holds for the heavy punches), grabs then drives or throws,
+## COMBOS (taps, and holds that charge: Round 8), grabs then drives or throws,
 ## answers counter windows on the player with Counter (orange) or a dodge
 ## (blue) after a human-ish reaction delay, and sprints, dodges or jumps to
 ## close in. God path (amendment): after a launch it often pursues (Dash), then
 ## attacks with the stick neutral (relaunch) or pulled back (spike).
 
-## Combos the bot plays: [action, hold seconds] per step. Hold 0 is a tap.
+## Combos the bot plays: [action, hold seconds] per step. Hold 0 is a tap;
+## a hold past Tuning.R8_TAP_MAX charges (Round 8), 1.1 s is a full charge.
 const COMBOS := [
 	[[&"punch", 0.0], [&"punch", 0.0], [&"punch", 0.0]],
-	[[&"punch", 0.3], [&"punch", 0.0], [&"punch", 0.3]],
-	[[&"gut_punch", 0.0], [&"uppercut", 0.0], [&"roundhouse", 0.0]],
-	[[&"uppercut", 0.0], [&"roundhouse", 0.0]],
-	[[&"leg_kick", 0.0], [&"roundhouse", 0.0]],
-	[[&"punch", 0.0], [&"punch", 0.0], [&"front_kick", 0.0]],
-	[[&"gut_punch", 0.0], [&"front_kick", 0.0]],
+	[[&"punch", 0.0], [&"punch", 0.0], [&"punch", 0.7]],
+	[[&"punch", 0.0], [&"punch", 0.0], [&"gut_punch", 1.1], [&"front_kick", 1.1]],
+	[[&"gut_punch", 0.6], [&"uppercut", 0.5], [&"roundhouse", 0.0]],
+	[[&"leg_kick", 1.1], [&"roundhouse", 0.8]],
+	[[&"punch", 0.0], [&"punch", 0.0], [&"front_kick", 0.4]],
 	[[&"leg_kick", 0.0], [&"gut_punch", 0.0], [&"uppercut", 0.0], [&"punch", 0.0], [&"front_kick", 0.0]],
 ]
+## The air combo (Round 8): a full-charge uppercut, Jump to follow, air hits, a kick away.
+const AIR_COMBO := [[&"uppercut", 1.1, 0.12], [&"jump", 0.0, 0.3], [&"punch", 0.0, 0.2], [&"punch", 0.0, 0.2],
+	[&"punch", 0.0, 0.2], [&"punch", 0.0, 0.2], [&"roundhouse", 0.0, 0.4]]
+const AIR_COMBO_CHANCE := 0.2
 const STEP_GAP := Vector2(0.28, 0.42)   ## s between combo presses (presses during startup/active are dropped)
 const TAP_TIME := 0.06                  ## s a tap is held
 const REACT_DELAY := Vector2(0.05, 0.25) ## s before answering a counter window
@@ -45,7 +49,8 @@ var stats := {"launches": 0, "hits": 0, "blocks": 0, "breaks": 0, "cracks": 0,
 	"impacts": 0, "bowls": 0, "deaths": 0, "rounds": 0, "tells": 0, "grabs": 0, "severs": 0,
 	"chains": 0, "best_chain": 0, "payoffs": 0, "windows": 0, "counters": 0, "counter_whiffs": 0,
 	"dodges": 0, "drives": 0, "drive_breaks": 0, "slams": 0, "throws": 0,
-	"pursuits": 0, "spikes": 0, "teleports": 0, "rams": 0, "jumps": 0}
+	"pursuits": 0, "spikes": 0, "teleports": 0, "rams": 0, "jumps": 0,
+	"charges": 0, "full_charges": 0, "charge_cancels": 0, "pressure_breaks": 0, "air_follows": 0, "air_hits": 0}
 var max_debris := 0
 var max_enemies := 0
 
@@ -79,6 +84,12 @@ func _ready() -> void:
 	GameEvents.drive_started.connect(func(_h: Node3D, _b: Node3D) -> void: stats.drives += 1)
 	GameEvents.drive_impact.connect(_on_drive_impact)
 	GameEvents.thrown.connect(func(_g: Node3D, _v: Node3D, _vel: Vector3) -> void: stats.throws += 1)
+	GameEvents.charge_started.connect(func(_f: Node3D, _m: StringName) -> void: stats.charges += 1)
+	GameEvents.charge_full.connect(func(_f: Node3D, _m: StringName) -> void: stats.full_charges += 1)
+	GameEvents.charge_cancelled.connect(func(_f: Node3D, _m: StringName, _r: StringName) -> void: stats.charge_cancels += 1)
+	GameEvents.pressure_broken.connect(func(_f: Node3D, _a: Node3D) -> void: stats.pressure_breaks += 1)
+	GameEvents.air_follow_started.connect(func(_f: Node3D, _t: Node3D) -> void: stats.air_follows += 1)
+	GameEvents.air_hit.connect(func(_a: Node3D, _v: Node3D, _c: int) -> void: stats.air_hits += 1)
 	GameEvents.round_over.connect(_on_round_over)
 	var packed: PackedScene = load("res://scenes/main.tscn")
 	game = packed.instantiate()
@@ -183,6 +194,8 @@ func _drive_bot() -> void:
 	elif roll < 0.15:
 		_tap(&"grab", elapsed, TAP_TIME)
 		next_action = elapsed + 0.6
+	elif roll < 0.15 + AIR_COMBO_CHANCE:
+		_play_air_combo()
 	else:
 		_play_combo(COMBOS[rng.randi() % COMBOS.size()])
 
@@ -194,6 +207,15 @@ func _play_combo(combo: Array) -> void:
 		_tap(step[0], t, hold if hold > 0.0 else TAP_TIME)
 		t += rng.randf_range(STEP_GAP.x, STEP_GAP.y) + hold
 	next_action = t + rng.randf_range(0.2, 0.6)
+
+## [action, hold, gap to the next step] per step: timed for the follow jump and the hangs.
+func _play_air_combo() -> void:
+	var t := elapsed
+	for step: Array in AIR_COMBO:
+		var hold: float = step[1]
+		_tap(step[0], t, hold if hold > 0.0 else TAP_TIME)
+		t += hold + float(step[2])
+	next_action = t + 0.8
 
 ## Holding a body: drive it (hold Dash), throw it (hold Punch to wind up), or knee it.
 func _play_hold(roll: float) -> void:

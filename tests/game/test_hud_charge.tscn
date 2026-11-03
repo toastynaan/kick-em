@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/game/test_hud_charge.gd" id="1"]
+
+[node name="TestHudCharge" type="Node"]
+script = ExtResource("1")

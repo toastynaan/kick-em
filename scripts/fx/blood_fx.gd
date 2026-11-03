@@ -12,7 +12,10 @@ extends Node
 ## brightness, shock ring and jitter by HitInfo.weight instead of the tier;
 ## the other Round 7 effects (push dust and skid, counter, dodge, reactions,
 ## drive, throw wind-up glow) live in the FreeflowFX child
-## (scripts/fx/freeflow_fx.gd). Parry, sidestep and the aimed-zone highlight
+## (scripts/fx/freeflow_fx.gd). Round 8 (Charge and pressure): the charge glow
+## by c, the charged and broken hit accents, pressure ticks, the break burst,
+## the dazed loop and the air combo touches live in the ChargeFX child
+## (scripts/fx/charge_fx.gd). Parry, sidestep and the aimed-zone highlight
 ## are gone with their features. Decals persist for the round within caps: blood
 ## decals at most Tuning.BLOOD_DECAL_MAX, marks (floor cracks) MARK_DECAL_MAX,
 ## the oldest fading first; get_decal_counts() reports them (end-of-wave check).
@@ -629,7 +632,6 @@ func _process(delta: float) -> void:
 	_update_stumps(delta)
 	var real := delta / maxf(Engine.time_scale, 0.001)
 	_update_jitter(real)
-	_update_charge_glows(real)
 	_update_impact_flashes(real)
 	_update_swirls(delta)
 	_arena_check_t -= delta
@@ -2325,6 +2327,7 @@ func _make_star_tex() -> ImageTexture:
 const WorldFXScript := preload("res://scripts/fx/world_fx.gd")
 const DestructionFXScript := preload("res://scripts/fx/destruction_fx.gd")
 const FreeflowFXScript := preload("res://scripts/fx/freeflow_fx.gd")
+const ChargeFXScript := preload("res://scripts/fx/charge_fx.gd")
 
 ## Contact frame by tier. Index = HitInfo.Tier: NONE, FLINCH, STUMBLE, STAGGER,
 ## KNOCKDOWN, LAUNCH, HARD_LAUNCH, SEVER. Flash size 0..1 (IMPACT_FLASH_SIZE),
@@ -2355,15 +2358,11 @@ const FLOOR_MARK_MERGE := 0.75
 const FADE_SLACK := 10            ## decals of one kind allowed to be fading at once
 const CRACK_SIZE := Vector2(1.7, 2.3)  ## m: a heavy landing's floor crack
 const CRACK_COLOR := Color(0.1, 0.095, 0.09, 0.92)
-## Charge glow intensity at charge level 0..3 (brand colour Tuning.TRAIL_COLOR).
-const CHARGE_GLOW_LEVELS: Array[float] = [0.35, 0.8, 1.3, 2.0]
-const CHARGE_LEVEL_FLASH := 0.14  ## a small white flash at the limb on each level-up
-## Safety net: a charge glow never outlives its charge. Dropped on charge_released
-## (B and G send level 0 on a cancel), on a hit landing on the charging fighter,
-## when it dies, goes down / flies, or is grabbed; and after this long anyway
-## (Tuning.CHARGE_AUTO_RELEASE plus a margin: a held button never locks).
-const CHARGE_GLOW_MAX := Tuning.CHARGE_AUTO_RELEASE + 0.5
-const CHARGE_GLOW_POLL := 0.05    ## s between checks of the charging fighters' state
+## Round 8: a charge glow never outlives its charge (ChargeFX.charge_glow_max():
+## the longest legal charge, to full and the hold at full, plus a margin).
+## Dropped on charge_released and charge_cancelled, on a hit landing on the
+## charging fighter, when it dies, goes down / flies, or is grabbed.
+const CHARGE_GLOW_MAX := 1.0 - Tuning.R8_TAP_MAX + Tuning.R8_CHARGE_HOLD_AT_FULL + ChargeFXScript.CHARGE_SLACK
 const WATER_DROP := Color(0.78, 0.86, 0.95)
 
 ## Every contact frame: {frame (physics), tier, flash, ring, blood} (F4 check, newest last).
@@ -2374,14 +2373,13 @@ var _decals_released := 0
 var _impact_ring_on: Array[bool] = []
 var _last_ring := -INF                 ## real s of the last shock ring
 var _jitter: Dictionary = {}           ## fighter id -> [parts, s left, amplitude m, offset]
-var _charge_glow: Dictionary = {}      ## fighter id -> LimbGlow handle
-var _charge_poll := 0.0
 var _crack_tex: ImageTexture
 var _crater_tex: ImageTexture
 var _rubble_tex: ImageTexture
 var _world: Node
 var _destruction: Node
 var _freeflow: Node
+var _charge: Node
 
 func _build_round5() -> void:
 	var trng := RandomNumberGenerator.new()
@@ -2397,29 +2395,21 @@ func _build_round5() -> void:
 	_destruction.name = "DestructionFX"
 	add_child(_destruction)
 	_destruction.call(&"setup", self, _world, _holder)
-	GameEvents.charge_started.connect(_on_charge_started)
-	GameEvents.charge_level_changed.connect(_on_charge_level_changed)
-	GameEvents.charge_released.connect(_on_charge_released)
-	GameEvents.fighter_died.connect(func(f: Node3D, _i: HitInfo) -> void: _drop_charge_glow(f))
-	GameEvents.fighter_launched.connect(func(f: Node3D, _v: Vector3) -> void: _drop_charge_glow(f))
-	GameEvents.grab_started.connect(func(_g: Node3D, v: Node3D) -> void: _drop_charge_glow(v))
-	GameEvents.limb_grab_started.connect(func(_g: Node3D, v: Node3D, _b: StringName) -> void: _drop_charge_glow(v))
-	GameEvents.carry_changed.connect(func(_h: Node3D, held: Node3D) -> void: _drop_charge_glow(held))
-	GameEvents.thrown.connect(func(_g: Node3D, v: Node3D, _vel: Vector3) -> void: _drop_charge_glow(v))
 	_freeflow = FreeflowFXScript.new()
 	_freeflow.name = "FreeflowFX"
 	add_child(_freeflow)
 	_freeflow.call(&"setup", self, _world, _holder)
+	# Round 8: the charge glow (by c), the pressure ticks, the break burst, the
+	# dazed loop and the air combo touches live in ChargeFX.
+	_charge = ChargeFXScript.new()
+	_charge.name = "ChargeFX"
+	add_child(_charge)
+	_charge.call(&"setup", self, _world, _holder)
 
 func _reset_round5() -> void:
 	for id: int in _jitter:
 		_set_jitter(_jitter[id][0], Vector3.ZERO)
 	_jitter.clear()
-	for id: int in _charge_glow:
-		var h = _charge_glow[id]
-		if is_instance_valid(h):
-			(h as Node).queue_free()
-	_charge_glow.clear()
 	contact_log.clear()
 	_last_ring = -INF
 	if _world != null:
@@ -2428,6 +2418,8 @@ func _reset_round5() -> void:
 		_destruction.call(&"reset")
 	if _freeflow != null:
 		_freeflow.call(&"reset")
+	if _charge != null:
+		_charge.call(&"reset")
 
 ## The movement / world effects node (WorldFX).
 func get_world_fx() -> Node:
@@ -2440,6 +2432,10 @@ func get_destruction_fx() -> Node:
 ## The Round 7 effects node (FreeflowFX).
 func get_freeflow_fx() -> Node:
 	return _freeflow
+
+## The Round 8 effects node (ChargeFX).
+func get_charge_fx() -> Node:
+	return _charge
 
 static func _real_now() -> float:
 	return Engine.get_physics_frames() / float(Engine.physics_ticks_per_second)
@@ -2506,64 +2502,16 @@ func _set_jitter(parts: Array, off: Vector3) -> void:
 				mat.set_shader_parameter(&"jitter", off)
 
 # --- Charge glow (Feel Reference: On the character > Charge glow) --------------------
-
-## While an attack is held, the striking limb glows; brighter at each charge
-## level with a short pulse (the sound is AudioFX's charge_level).
-func _on_charge_started(fighter: Node3D, move_id: StringName) -> void:
-	if not is_instance_valid(fighter):
-		return
-	_drop_charge_glow(fighter)
-	var h := limb_glow(fighter, FXRules.strike_limb(move_id), Tuning.TRAIL_COLOR, 0.0, CHARGE_GLOW_LEVELS[0])
-	if h != null:
-		_charge_glow[fighter.get_instance_id()] = h
-
-func _on_charge_level_changed(fighter: Node3D, level: int) -> void:
-	if not is_instance_valid(fighter):
-		return
-	var h = _charge_glow.get(fighter.get_instance_id())
-	if not is_instance_valid(h):
-		return
-	h.call(&"set_intensity", CHARGE_GLOW_LEVELS[clampi(level, 0, CHARGE_GLOW_LEVELS.size() - 1)])
-	if level > 0:
-		h.call(&"pulse")
-		impact_flash((h as Node3D).global_position, CHARGE_LEVEL_FLASH, false, false)
-
-func _on_charge_released(fighter: Node3D, _move_id: StringName, _level: int) -> void:
-	_drop_charge_glow(fighter)
-
-## Poll the charging fighters: down, flying, dead or held drops the glow, and
-## no glow outlives CHARGE_GLOW_MAX.
-func _update_charge_glows(real: float) -> void:
-	if _charge_glow.is_empty():
-		return
-	_charge_poll -= real
-	if _charge_poll > 0.0:
-		return
-	_charge_poll = CHARGE_GLOW_POLL
-	for id: int in _charge_glow.keys():
-		var h = _charge_glow[id]
-		var f := instance_from_id(id) as Node3D
-		if not is_instance_valid(h) or f == null:
-			if is_instance_valid(h):
-				h.call(&"stop")
-			_charge_glow.erase(id)
-			continue
-		if float(h.get(&"age")) > CHARGE_GLOW_MAX or FXRules.cannot_charge(f):
-			_drop_charge_glow(f)
+# Round 8: the glow follows the charge amount c and lives in ChargeFX
+# (scripts/fx/charge_fx.gd); these keep the older entry points.
 
 func _drop_charge_glow(fighter: Node3D) -> void:
-	if not is_instance_valid(fighter):
-		return
-	var id := fighter.get_instance_id()
-	var h = _charge_glow.get(id)
-	if is_instance_valid(h):
-		h.call(&"stop")
-	_charge_glow.erase(id)
+	if _charge != null:
+		_charge.call(&"drop_charge_glow", fighter)
 
 ## The charge glow handle on a fighter (tests), or null.
 func get_charge_glow(fighter: Node3D) -> Node3D:
-	var h = _charge_glow.get(fighter.get_instance_id()) if is_instance_valid(fighter) else null
-	return h if is_instance_valid(h) else null
+	return _charge.call(&"get_charge_glow", fighter) if _charge != null else null
 
 # --- Water, floor cracks ------------------------------------------------------------------
 

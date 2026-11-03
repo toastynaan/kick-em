@@ -7,9 +7,13 @@ extends Node
 ##    player's Carry, forced on for the test while G's switch is off); he
 ##    fights on with the grunt's moves.
 ## C. Grunt: guards Tuning.GUARD_TAP_CHANCE of the tapped punches aimed at
-##    him (Round 7's jab, cross, hook), never a guard breaker (heavies, gut
-##    punch, uppercut, kicks) nor an older charged strike; a plain guard,
-##    never a parry; stick and heavy never.
+##    him (jab, cross, hook). Round 8: every tap is guardable (the kicks, gut
+##    punch and uppercut too, at the same chance); a charged strike (B's
+##    strike_started charge_level >= 1, same id) breaks a guard, so never one,
+##    nor a Round 7 heavy id or an older charged strike; a plain guard, never
+##    a parry. Round 8: the stick enemy and the heavy guard tapped strikes at
+##    their own "guard_chance" x AIBrain.block_mult() (measured like the
+##    grunt's), never a charged one.
 ## D. Breaking the player's grab (G's Carry asks wants_grab_break): per
 ##    archetype rate (heavies more), never while stunned, reacting or
 ##    fleeing, likelier for each recent grab on him; Round 7: never once the
@@ -20,9 +24,10 @@ extends Node
 const Util := preload("res://tests/ai/ai_test_util.gd")
 const FakeCarry := preload("res://tests/ai/fake_carry.gd")
 const GUARD_TRIALS := 300
-## Round 7 player moves that break a guard (Tuning.R7_MOVES "guard_break").
-const BREAKERS: Array[StringName] = [&"heavy_jab", &"heavy_cross", &"heavy_hook", &"gut_punch", &"uppercut",
-	&"leg_kick", &"front_kick", &"roundhouse"]
+## Round 7 heavy ids (Tuning.R7_MOVES "guard_break"): never guarded.
+const BREAKERS: Array[StringName] = [&"heavy_jab", &"heavy_cross", &"heavy_hook"]
+## Round 8 strikes other than the punches: guarded tapped, never charged.
+const R8_OTHERS: Array[StringName] = [&"gut_punch", &"uppercut", &"leg_kick", &"front_kick", &"roundhouse"]
 
 var failures := 0
 var player: Fighter
@@ -177,13 +182,31 @@ func _part_guard() -> void:
 		"grunt guards %d of %d tapped punches (jab, cross, hook: %.0f%%, target %.0f%%)" % [guards, GUARD_TRIALS, p * 100.0, Tuning.GUARD_TAP_CHANCE * 100.0])
 	check(guards > 0 and blocked_up == guards, "every guard raises his block at once (%d / %d)" % [blocked_up, guards])
 	var breakers := 0
+	var all_moves: Array[StringName] = []
+	all_moves.append_array(Tuning.R7_PUNCH_STRING)
+	all_moves.append_array(R8_OTHERS)
 	for i in 160:
 		await _clear_guard(g, gb)
 		var before := gb.tap_guards
-		GameEvents.strike_started.emit(player, g, BREAKERS[i % BREAKERS.size()], false, 0)
+		var k := i >> 1
+		if i % 2 == 0:
+			GameEvents.strike_started.emit(player, g, BREAKERS[k % BREAKERS.size()], false, 0)
+		else:
+			GameEvents.strike_started.emit(player, g, all_moves[k % all_moves.size()], false, 1 + k % 3)
 		if gb.tap_guards > before:
 			breakers += 1
-	check(breakers == 0, "never raises a tap guard against a guard breaker (heavies, gut punch, uppercut, kicks: %d of 160)" % breakers)
+	check(breakers == 0, "never raises a tap guard against a guard breaker (Round 7 heavies, any charged strike: %d of 160)" % breakers)
+	var other_guards := 0
+	for i in GUARD_TRIALS:
+		await _clear_guard(g, gb)
+		var before := gb.tap_guards
+		GameEvents.strike_started.emit(player, g, R8_OTHERS[i % R8_OTHERS.size()], false, 0)
+		if gb.tap_guards > before:
+			other_guards += 1
+	var po := float(other_guards) / GUARD_TRIALS
+	check(absf(po - Tuning.GUARD_TAP_CHANCE) <= 0.07,
+		"Round 8: guards tapped kicks, gut punches and uppercuts like punches (%d of %d: %.0f%%, target %.0f%%)" % [
+			other_guards, GUARD_TRIALS, po * 100.0, Tuning.GUARD_TAP_CHANCE * 100.0])
 	var charged := 0
 	for i in 100:
 		await _clear_guard(g, gb)
@@ -192,14 +215,37 @@ func _part_guard() -> void:
 		if gb.tap_guards > before:
 			charged += 1
 	check(charged == 0, "never guards an older charged strike (%d of 100)" % charged)
-	var others := 0
 	for f: Fighter in [s, h]:
 		var fb := f.brain as AIBrain
-		for i in 60:
+		# Brain paused between its own turns: every trial is a strike it is free to guard.
+		await _settle(f)
+		fb.process_mode = Node.PROCESS_MODE_DISABLED
+		var want := fb.get_guard_chance()
+		var base := float(f.config.get("guard_chance", 0.0))
+		var tap_guards_f := 0
+		for i in GUARD_TRIALS:
+			await _clear_guard(f, fb)
 			var before := fb.tap_guards
-			GameEvents.strike_started.emit(player, f, &"jab", false, 0)
-			others += fb.tap_guards - before
-	check(others == 0, "stick enemy and heavy never tap-guard (%d)" % others)
+			GameEvents.strike_started.emit(player, f, all_moves[i % all_moves.size()], false, 0)
+			if fb.tap_guards > before:
+				tap_guards_f += 1
+		var charged_f := 0
+		for i in 100:
+			await _clear_guard(f, fb)
+			var before := fb.tap_guards
+			GameEvents.strike_started.emit(player, f, all_moves[i % all_moves.size()], false, 1 + i % 3)
+			if fb.tap_guards > before:
+				charged_f += 1
+		fb.process_mode = Node.PROCESS_MODE_INHERIT
+		var rate := float(tap_guards_f) / GUARD_TRIALS
+		var tol := maxf(0.03, 3.5 * sqrt(maxf(want * (1.0 - want), 1e-6) / GUARD_TRIALS))
+		print("[ai] info: %s (level %d, p %.2f): guards %d of %d taps (%.1f%%; chance %.3f = %.2f x block mult %.2f), %d of 100 charged" % [
+			f.archetype, f.level, fb.get_pressure(), tap_guards_f, GUARD_TRIALS, rate * 100.0, want, base, fb.block_mult(), charged_f])
+		check(base > 0.0 and absf(want - base * fb.block_mult()) < 1e-6, "%s: guard chance %.3f = its guard_chance %.2f x block_mult()" % [
+			f.archetype, want, base])
+		check(absf(rate - want) <= tol, "%s guards %.1f%% of %d tapped strikes (target %.1f%% +- %.1f)" % [
+			f.archetype, rate * 100.0, GUARD_TRIALS, want * 100.0, tol * 100.0])
+		check(charged_f == 0, "%s never guards a charged strike (%d of 100)" % [f.archetype, charged_f])
 	# Real jabs: B's strike_started reaches the brain, a guard is a plain guard.
 	# Counters in arrays: lambdas capture plain locals by value.
 	var parried := [0]

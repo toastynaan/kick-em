@@ -542,3 +542,116 @@ Same rules as before: edit only your own files; test on a private copy (`<scratc
 - **Soaks** (`FAST=1`): Duel 120 s and Waves 180 s, 0 errors. The Duel run had 4 pursuits, 2 spikes, 4 teleports and 2 rams; the Waves run had 52 launches, 27 wall breaks and a best chain of 21.
 - **Module runs** by their owners on fresh copies: combat 17, input + defence 13, move 12, grab 12, game 19, fx 26, ai 24 (3 runs), anim 5, rig 18, world fixes by the lead. Performance checks were skipped this round (the user's call).
 - **Still the user's:** the feel check in play. Animation is placeholder quality until the mocap round. Many feel numbers are local constants that agents listed as Tuning candidates; they are not moved yet.
+
+## Round 8: Charge and pressure (docs/Round 8 — Charge and Pressure.md)
+
+The user's grill session reworked the **strikes**: taps are light interrupts, holding charges continuously (with a meter), charged strikes do the stuns, sweeps, lifts and launches, an enemy pressure meter makes enemies passive and breaks them open, and a charged uppercut starts an air combo. The Duel is the player fully upgraded; Waves keeps the debug upgrades until the roguelike round. **Counter, dodge, grab, drive, throw, teleport and pursuit are untouched this round.** Round 8 wins over Round 7 for strikes. Animation quality and performance are out of scope.
+
+### Ownership (Round 8)
+
+Same rules as Round 7 (own files only, private copies under `<scratchpad>/agent_<id>/proj`, `--fixed-fps 120`, `SCRIPT ERROR` / `Parse Error` / `ERROR:` are failures, no git commits).
+
+| Owner | Files |
+| --- | --- |
+| core (lead) | `scripts/core/*` except `time_director.gd`, `scripts/game/fighter_factory.gd`, `tests/core/*`, `tests/integration/*`, `tests/world/*`, `tests/rig/*`, docs |
+| B — combat | `combat_controller.gd`, `move_data.gd`, `move_library.gd`, `combo_graph.gd`, `hurtbox.gd`, `combat_fx.gd`, `thrown_chunk.gd`, `projectile_probe.gd`, `tests/combat/*` |
+| H — fighter & player | `fighter.gd`, `player_controller.gd`, `input_interpreter.gd`, `zone_aim.gd`, `defence.gd`, `tests/input/*`, `tests/defence/*` |
+| M — movement | `traversal.gd`, `tests/move/*` |
+| C — AI | `scripts/ai/*`, `tests/ai/*` |
+| J — HUD, flow & menus | `hud.gd`, `game_menus.gd`, `game_mode.gd`, `ui_kit.gd`, `scenes/main.tscn`, `tests/game/*` except E's |
+| P — poses | `pose_library.gd`, `pose_animator.gd`, `tests/anim/*` |
+| F — FX & audio | `scripts/fx/*`, `shaders/*`, `tests/fx/*` |
+| E — camera & time | `scripts/core/time_director.gd`, `scripts/game/camera_rig.gd`, `tests/game/test_camera_rig*`, `test_time_director*`, `test_cam_*`, `test_time_*` |
+| G (grabs), A, D, K | not active |
+
+### Contract already in the tree (lead)
+
+- **`Tuning` Round 8 block** (end of the file): `R8_TAP_MAX`, charge numbers, `R8_MOVES` (tap and charged entries per move), pressure (`R8_PRESSURE_CAP`, decay, break, immunity, AI effects), levels (`R8_LEVEL_BY_WAVE`, `R8_LEVEL_BLOCK_MULT`, `r8_level_for_wave()`, `r8_pressure_cap()`), the air combo, `R8_UPGRADE_MAX`. New debug statics: `debug_charge_full`, `debug_pressure_mult`, `debug_launch_step`, `debug_air_hits`.
+- **`HitInfo`**: `charged`, `charge`, `pressure`, `broken_bonus`, `air`.
+- **`GameEvents` Round 8 block**: `charge_full`, `charge_cancelled`, `pressure_broken`, `pressure_recovered` (B); `air_follow_started` (M); `air_hit` (B). The Upgrade 2 `charge_started` / `charge_level_changed` / `charge_released` are reused (B; level = the move's steps passed).
+- **`FighterFactory.spawn_enemy`** sets `Fighter.level` from `AttackDirector.wave_index` (Duelist 1).
+- **Stubs with fixed signatures** (end of each file):
+
+| API | Owner | Callers |
+| --- | --- | --- |
+| `CombatController.get_charge()`, `get_charge_move()`, `get_charge_steps()`, `is_charge_full()`, `get_pressure()`, `get_pressure_max()`, `get_pressure_fraction()`, `is_broken()`, `get_broken_time_left()`, `get_air_follow_target()`, `get_air_hits()` | B | J, C, F, E, H |
+| `Fighter.level`, `Fighter.air_hang(seconds)` | H | B, C, J |
+| `Traversal.start_air_follow(target) -> bool`, `is_air_following()` | M | H, E |
+| `PoseAnimator.set_charge_amount(c)` | P | B |
+
+### How the pieces meet (Round 8)
+
+- **Charge (B).**
+  - A strike press still held at `R8_TAP_MAX` charges. B emits `charge_started`, calls `animator.set_charge_amount(c)` every tick, emits `charge_level_changed` at each of the move's steps and `charge_full` at full, then fires the strike itself after `R8_CHARGE_HOLD_AT_FULL`.
+  - `get_move_speed_mult()` is `R8_CHARGE_WALK_MULT` while charging (Fighter and Traversal already read it).
+  - On release (or the auto-fire), the target is re-picked if the stick is pushed. The glide is limited to `R8_CHARGE_LUNGE` lerped by c, then come `R8_RELEASE_STARTUP`, the active frames and the recovery.
+  - A hit on the charging player emits `charge_cancelled(..., &"hit")`.
+- **Hits (B → H).**
+  - B resolves a tap from `R8_MOVES[move].tap` and a charged strike from `.charged` lerped by c. A launch applies at c ≥ min(`launch_from`, `debug_launch_step`); `full_react` and `full_break` apply at c = 1. Payoffs come from `R7_PAYOFFS` (taps by their id, charged by `payoff_id`). The break bonus applies when the victim `is_broken()`.
+  - B fills HitInfo (including the Round 8 fields) and calls `victim.react()`, `knockdown()` or `launch()`. A hook's charged knockdown and launch go sideways.
+  - New react kinds: **`&"flinch"`** (a physical hit on the struck bone and a short stun; the enemy acts again right after) and **`&"sweep"`** (a knockdown with the legs taken out). Also **`&"broken"`** (dazed, can't act, `R8_BREAK_TIME`): B calls `victim.react(&"broken", ...)` when pressure breaks.
+  - Any tap cancels a normal enemy's wind-up; armored wind-ups keep the Round 7 damage-and-snap path.
+- **Pressure (B, victim side).** Kept on every fighter's CombatController.
+  - It fills from player hits, including blocked ones (x `R8_BLOCKED_PRESSURE_MULT`), and the hit's pressure is x `debug_pressure_mult`.
+  - It drains after the delay, breaks at capacity (`Tuning.r8_pressure_cap(archetype, fighter.level)`), and refills at half rate during the immunity.
+  - Events: `pressure_broken` / `pressure_recovered`.
+- **AI (C)** reads `get_pressure_fraction()` for block chance, attack rate, tell slow-down and backing off, plus `Fighter.level` for blocking. A broken enemy does nothing.
+- **Air combo.**
+  - H's PlayerController: on Jump, if `combat.get_air_follow_target()` is set, it calls `traversal.start_air_follow(target)` (M; emits `air_follow_started`), else jumps as before.
+  - B: an attack press while airborne with a lifted body within `R8_AIR_STRIKE_RANGE` is an air strike (`R8_AIR_FRAMES`, never charged). Each landed one, up to `debug_air_hits`, calls `fighter.hang(R8_AIR_HANG)` (player) and `victim.air_hang(R8_AIR_HANG)` (H) and emits `air_hit`. A kick finishes with a launch at `R8_AIR_KICK_LAUNCH`; a punch with the stick pulled back is the Round 7 spike.
+- **HUD (J).**
+  - The charge meter at the bottom centre, from `get_charge()` / `get_charge_steps()` / `is_charge_full()`: white, then orange, then red at the steps, flashing at full.
+  - The pressure bar under each enemy's health.
+  - The pause-menu Debug settings for the four new upgrades.
+  - GameMode: the Duel sets every upgrade to `R8_UPGRADE_MAX` and restores the player's settings after.
+- **Effects (F)**: the charge glow and hum by c, a step tick, the full-charge ping, a release whoosh by c, pressure-hit ticks, a big break burst and sound on `pressure_broken`, a dazed loop while broken, air-hit accents.
+- **Camera (E)**: a slight zoom while charging, a punch by the charged hit's weight (already by weight), and air combo framing (the player up to about 3 m high with the body).
+
+### Decisions (Round 8)
+
+1. The charge is continuous (user). The tap ends at 0.25 s, full charge takes 1.0 s at the start and 0.5 s at max, it holds 0.5 s at full, then fires itself.
+2. Taps interrupt a normal wind-up and barely stun (user). Armored wind-ups ignore taps.
+3. Pressure (user): fills from every hit (blocked ones too), makes enemies passive, breaks them open for 1.5 s with a 1.5x bonus, and drains when you stop. Level-1 grunts break in 2–3 taps.
+4. A hit on the player cancels a charge. Charge armor is a later roguelike upgrade.
+5. You walk at half speed while charging. The release glides farther with charge (3 m to 6 m).
+6. Punch roles at full (user): the jab shoves, the cross launches straight back, the hook knocks down and launches sideways.
+7. Air combo (user): a charged uppercut lifts 0.8 to 2.5 m; Jump follows; 4 hanging air hits; a kick sends them away, a back + punch spikes.
+8. The gut punch is the pressure breaker (user). The leg kick at full sweeps (user). The front kick tap makes space and the charged one launches at full, earlier with the `debug_launch_step` upgrade (user).
+9. The full payoff table stays (user). Payoff results don't scale with charge.
+10. The meter shows colour steps with no labels (user).
+11. The roundhouse charge only scales the launch. Enemy level follows the wave (1, 1, 2, 2, 3+). The Duel is at max upgrades and the Duelist's pressure capacity is 16 (lead's assumptions, stated to the user).
+
+### Acceptance checks (Round 8)
+
+| Check (doc: Acceptance) | Owner |
+| --- | --- |
+| 1 tap vs charge timing, auto-fire, `debug_charge_full` | B (real input with H) |
+| 2 every move row tapped and charged at c = 0 and 1; `debug_launch_step` | B (reactions measured with H's react) |
+| 3 taps interrupt and the grunt attacks again within 0.4 s; armor not interrupted | B (with C) |
+| 4 walk at half speed, glide 3 m / 6 m, hit cancels charge | B |
+| 5 pressure fill, blocked fill, break, bonus, drain, immunity, Duelist 16 | B |
+| 6 AI under pressure: back off, block and attack rates | C |
+| 7 air combo: lift heights, the follow jump, 4 hangs, kick launch, spike | B (with H, M) |
+| reactions `flinch`, `sweep`, `broken`; `air_hang` | H |
+| launcher jump reaches the body's height in about 0.25 s | M |
+| 8 meter colours and flash, the pressure bar; Debug settings for the new upgrades | J |
+| 9 Duel at max, settings restored | J |
+| poses: charge loads deepen with c, flinch, sweep fall, broken daze, air strikes | P |
+| effects on every Round 8 event | F |
+| camera: charge zoom, air combo framing | E |
+| 10 soaks and run_all | lead |
+
+### Round 8 status
+
+- **Built:**
+  - Continuous charge on all eight strikes, with the bottom meter (white, orange, red; always two colour steps), walking while charging, a release lunge of 3–6 m, and charge cancel on hit.
+  - Per-move tap and charged results from `R8_MOVES`, keeping the Round 7 payoff table.
+  - Enemy pressure (blocked hits count): break, bonus, drain and immunity, with enemy levels by wave (1, 1, 2, 2, 3+) and bars over enemies.
+  - The air combo: charged uppercut, buffered launcher jump, 4 hanging air hits, kick launch or spike.
+  - The Duel at max upgrades, restoring the player's own afterwards; four new upgrade settings.
+  - Flinch, sweep, broken and quick-keel reactions; charge-load poses that deepen with c; charge and break effects; charge zoom and air-combo camera.
+  - The Duelist's armor narrowed to `e_heavy` (`"armor_moves"`); stick and heavy got a base `guard_chance`.
+- **Owners' module runs** on fresh copies: combat 22, input + defence 17, move 13, ai 29, game 12 (J) + 11 (E), anim 6, fx 27.
+- **Full suite** on the integrated tree: 201 of 202. The one failure, `ai/test_roster`, was a duplicate-variable error that C fixed after the copy was taken; C's later fresh-copy run is 29 of 29.
+- **Soaks** were not rerun this round: the user stopped the run to playtest.
+- **Open for the playtest:** the full-charge time, tap stun lengths, pressure caps (any charged hit breaks a level-1 grunt), the full gut punch's fold (1.8 s) outlasting the break (1.5 s), and the air-combo timing. Many agents' local constants are Tuning candidates and have not been moved yet.

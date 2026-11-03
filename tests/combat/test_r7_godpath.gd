@@ -63,7 +63,7 @@ func run() -> void:
 	tap(rj[0], A.LIGHT)
 	await wait_until(func() -> bool: return not hits_on(rj[1]).is_empty(), 1.0)
 	var ji: HitInfo = hits_on(rj[1])[0] if not hits_on(rj[1]).is_empty() else null
-	var jwant := float(Tuning.R7_MOVES[&"jab"]["push"]) * (1.0 + Tuning.R7_SPRINT_PUSH_PER_MS * (10.0 - Tuning.SPEED_BONUS_FROM))
+	var jwant := float(Tuning.R8_MOVES[&"jab"]["tap"]["push"]) * (1.0 + Tuning.R7_SPRINT_PUSH_PER_MS * (10.0 - Tuning.SPEED_BONUS_FROM))
 	print("  a jab at 10 m/s: react %s push %.2f (want push %.2f)" % [ji.react if ji else &"-", ji.push if ji else 0.0, jwant])
 	check(ji != null and ji.sprint and ji.react == &"push" and is_equal_approx(ji.push, jwant), "a sprint jab is a longer push")
 
@@ -220,7 +220,7 @@ func _real_sprint(cap: float) -> void:
 	Tuning.debug_speed_cap = was
 	await wait_real(0.5)
 
-## The real player launches a grunt (heavy roundhouse, held R), Dashes inside
+## The real player launches a grunt (Round 8: a charged roundhouse, R held past R8_TAP_MAX), Dashes inside
 ## the pursuit window (H's Defence teleports it next to the body and hangs),
 ## then punches: the stick neutral relaunches, move_back held spikes.
 func _real_pursuit(spike: bool) -> void:
@@ -245,7 +245,7 @@ func _real_pursuit(spike: bool) -> void:
 	var launched := await wait_until(func() -> bool: return g.is_launched(), 1.5)
 	await wait_until(func() -> bool: return not g.is_frozen(), 0.5)
 	if not launched:
-		print("  the heavy roundhouse did not launch: hits %s" % [hits_on(g).map(func(h: HitInfo) -> String: return "%s %s" % [h.move_id, h.react])])
+		print("  the charged roundhouse did not launch: hits %s" % [hits_on(g).map(func(h: HitInfo) -> String: return "%s %s" % [h.move_id, h.react])])
 	await tap_input(&"dash", 0.05)
 	var pursued := await wait_until(func() -> bool: return p.defence.get_pursuit_target() == g, 0.6)
 	if not pursued:

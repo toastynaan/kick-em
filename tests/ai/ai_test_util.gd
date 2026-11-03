@@ -2,6 +2,7 @@ extends RefCounted
 ## Shared helpers for tests/ai. OWNER: agent C (AI tests).
 
 const FakeFighter := preload("res://tests/ai/fake_fighter.gd")
+const FakeCombat := preload("res://tests/ai/fake_combat.gd")
 
 ## 80 x 80 m static floor on Layers.WORLD, top at y = 0.
 static func build_floor(parent: Node) -> StaticBody3D:
@@ -36,6 +37,31 @@ static func spawn_fake_enemy(parent: Node, archetype: StringName, pos: Vector3, 
 	f.name = "Fake" + String(archetype).capitalize() + "Enemy"
 	if facing.length() > 0.01 and f.has_method(&"snap_facing"):
 		f.snap_facing(facing)
+	var brain := AIBrain.new()
+	brain.name = "AIBrain"
+	f.add_child(brain)
+	return f
+
+## Round 8: an enemy FakeFighter whose CombatController is the FakeCombat
+## pressure double (fake_pressure, fake_broken stand in for B's
+## get_pressure_fraction / is_broken), with its real AIBrain added after the
+## swap, so the brain and AttackDirector listen to the double. `level` is
+## Fighter.level (FighterFactory sets it from the wave in a real spawn).
+static func spawn_pressure_enemy(parent: Node, archetype: StringName, pos: Vector3, facing := Vector3.ZERO, level := 1) -> Fighter:
+	var f := spawn_fake(parent, archetype, Fighter.TEAM_ENEMY, pos)
+	f.name = "Pressure" + String(archetype).capitalize()
+	f.level = level
+	if facing.length() > 0.01 and f.has_method(&"snap_facing"):
+		f.snap_facing(facing)
+	var real := f.combat
+	if real != null:
+		f.remove_child(real)
+		real.queue_free()
+	var fc: CombatController = FakeCombat.new()
+	fc.name = "CombatController"
+	f.add_child(fc)
+	fc.setup(f)
+	f.combat = fc
 	var brain := AIBrain.new()
 	brain.name = "AIBrain"
 	f.add_child(brain)
