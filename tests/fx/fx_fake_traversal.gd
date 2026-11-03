@@ -6,6 +6,7 @@ var sprint_charge := 0.0
 var airborne := false
 var speed := 0.0
 var air_dashing := false
+var drive_speed := 0.0   ## Round 7: get_drive_speed() (0 = not reported)
 
 func is_airborne() -> bool:
 	return airborne
@@ -18,3 +19,6 @@ func get_speed_cap() -> float:
 
 func is_air_dashing() -> bool:
 	return air_dashing
+
+func get_drive_speed() -> float:
+	return drive_speed

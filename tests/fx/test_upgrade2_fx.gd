@@ -1,10 +1,10 @@
 extends Node3D
 ## Upgrade 2 BloodFX: limb glow (handle, part emission, halo and light,
 ## timed / until freed / stop(), on the real rig too), set_fighter_fade, the
-## aimed-zone highlight (zone parts only, cleared on change and null, stronger
-## in Focus), the U7 impact flash (sized by power, gone after a few frames),
-## dust on floor and wall impacts, larger wounds on the player, the dazed
-## swirl, stumble and trip dust. OWNER: agent F.
+## U7 impact flash (sized by power, gone after a few frames), dust on floor and
+## wall impacts, larger wounds on the player, the dazed swirl, stumble and trip
+## dust. Round 7 removed zone aiming: aim_zone_changed no longer lights any
+## part (the aimed-zone highlight is gone). OWNER: agent F.
 
 const U := preload("res://tests/fx/fx_test_util.gd")
 
@@ -70,44 +70,20 @@ func _ready() -> void:
 	if U.fparam(hand_mat, &"view_fade") != 0.0:
 		fails.append("fade did not clear")
 
-	# --- zone highlight ---------------------------------------------------------------
+	# --- Round 7: no aimed-zone highlight ------------------------------------------------
 	var player := U.make_fighter(self, Vector3(0, 0, 2))
 	player.add_to_group(&"player")
 	GameEvents.aim_zone_changed.emit(player, f, BodyZones.Zone.ARM_R)
 	await U.physics_frames(get_tree(), 20)
-	var arm_parts: Array[MeshInstance3D] = []
-	for bone in BodyZones.bones(BodyZones.Zone.ARM_R):
-		arm_parts.append_array(f.rig.get_bone_parts(bone))
 	var lit := 0
-	var unlit_other := true
 	for p: MeshInstance3D in f.rig.get_mesh_parts():
-		var h := U.part_param(p, &"highlight")
-		if arm_parts.has(p):
-			if h > 0.1:
-				lit += 1
-		elif h > 0.0:
-			unlit_other = false
-	var normal_level: float = BloodFX._hl_level  # before the gentle pulse
-	print("zone highlight: %d of %d arm parts lit (%.2f); others dark %s" % [lit, arm_parts.size(), normal_level, unlit_other])
-	if lit != arm_parts.size() or not unlit_other:
-		fails.append("highlight not exactly on the right arm")
-	if TimeDirector.begin_focus():
-		await get_tree().create_timer(0.4).timeout
-		var focus_level: float = BloodFX._hl_level
-		TimeDirector.end_focus()
-		print("zone highlight in Focus: %.2f (normal %.2f)" % [focus_level, normal_level])
-		if absf(normal_level - BloodFX.HIGHLIGHT_NORMAL) > 0.01 or focus_level < BloodFX.HIGHLIGHT_FOCUS - 0.01:
-			fails.append("highlight levels: normal %.2f, Focus %.2f" % [normal_level, focus_level])
-		if not BloodFX._hl_halo.visible:
-			fails.append("no zone halo")
-	else:
-		print("note: TimeDirector.begin_focus refused; Focus highlight not checked")
-	GameEvents.aim_zone_changed.emit(player, f, BodyZones.Zone.HEAD)
-	if U.part_param(arm_parts[0], &"highlight") != 0.0:
-		fails.append("changing zone left the arm highlighted")
+		if U.part_param(p, &"highlight") > 0.0:
+			lit += 1
+	print("aim_zone_changed (zone aiming removed): %d parts highlighted, BloodFX has set_zone_highlight %s" % [
+		lit, BloodFX.has_method(&"set_zone_highlight")])
+	if lit != 0 or BloodFX.has_method(&"set_zone_highlight"):
+		fails.append("the removed zone highlight still lights parts")
 	GameEvents.aim_zone_changed.emit(player, null, BodyZones.Zone.TORSO)
-	if not BloodFX.get_highlight_parts().is_empty():
-		fails.append("null target did not clear the highlight")
 
 	# --- impact flash (Round 5: sized by tier) -----------------------------------------
 	var jab := U.hit(f, &"jab1", Vector3(0, 1.4, -0.85), Vector3(0, 0, -1), 15.0, 140.0, &"strike",
@@ -201,12 +177,8 @@ func _ready() -> void:
 		if rg != null:
 			rg.queue_free()
 		BloodFX.set_fighter_fade(real, 0.5)
-		GameEvents.aim_zone_changed.emit(player, real, BodyZones.Zone.LEGS)
 		await U.physics_frames(get_tree(), 5)
-		print("real rig zone highlight: %d leg parts" % BloodFX.get_highlight_parts().size())
-		if BloodFX.get_highlight_parts().size() < 6:
-			fails.append("real rig: leg zone has too few parts")
-		GameEvents.aim_zone_changed.emit(player, null, 0)
+		BloodFX.set_fighter_fade(real, 0.0)
 	else:
 		print("note: real HumanoidRig has no parts; skipped")
 	U.finish(get_tree(), "test_upgrade2_fx", fails, errlog)

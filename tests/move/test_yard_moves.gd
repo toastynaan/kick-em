@@ -7,9 +7,13 @@ extends "res://tests/move/move_test_base.gd"
 ## - sprint + Jump along the west facade (destructible panels) and the south
 ##   concrete wall starts a wall run; a kick-off from the west facade lands on
 ##   the platform 3 m out;
-## - footsteps report the water and metal patches.
+## - footsteps report the water and metal patches;
+## - the four stairwells are climbed with step-ups to their 3 m landing (Round 7).
 
 var yard: YardBuilder
+var _pl: Fighter  ## the player, for the stairwell helpers
+var _q := PhysicsShapeQueryParameters3D.new()
+var _shape := CapsuleShape3D.new()
 
 func _init() -> void:
 	_timeout = 900.0
@@ -39,6 +43,12 @@ func run() -> void:
 	await _cracked_facade(p)
 	await _platform_landings(p, feats["platform"])
 	await _surfaces(p)
+	_pl = p
+	_shape.radius = Fighter.CAPSULE_RADIUS
+	_shape.height = Fighter.CAPSULE_HEIGHT
+	_q.shape = _shape
+	_q.collision_mask = Layers.WORLD | Layers.DESTRUCTIBLE | Layers.CAPSULE
+	await _stairwells()
 	done()
 
 func _vault_lane(p: Fighter, start: Vector3, dir: Vector3, label: String, want: StringName = &"vault") -> void:
@@ -52,7 +62,7 @@ func _vault_lane(p: Fighter, start: Vector3, dir: Vector3, label: String, want: 
 	var m := {"v": 0.0}
 	var started := await wait_until(func() -> bool:
 		if not p.traversal.is_vaulting():
-			m["v"] = hspeed(p)
+			m["v"] = minf(hspeed(p), p.traversal.get_speed_cap())  # run speed: a dodge's burst above the cap is not
 		return p.traversal.is_vaulting(), 360)
 	var v_in: float = m["v"]
 	var kind := p.traversal.get_parkour_kind()
@@ -314,3 +324,84 @@ func _lane(lane_name: StringName) -> Dictionary:
 		if l["name"] == lane_name:
 			return l
 	return {}
+
+func _start(pos: Vector3, facing: Vector3) -> void:
+	await settle(_pl, 10)
+	await place(_pl, pos, facing)
+	await ticks(4)
+	clear_events()
+
+## The stairwells (YardBuilder._build_stairwells): a flight of 12 steps (0.25 m
+## rise, 0.3 m run) to a 3 m landing. Each is walked up from a clear run-in in
+## front of its first step, else (a partition right in front of it) stepping
+## onto its first step from the side and then up the flight.
+func _stairwells() -> void:
+	var flights := [[Vector3(-12.6, 0.0, -16.85), Vector3.LEFT, 1.3], [Vector3(12.6, 0.0, -16.85), Vector3.RIGHT, 1.3],
+		[Vector3(-16.9, 0.0, 5.0), Vector3.BACK, 1.2], [Vector3(16.9, 0.0, 5.0), Vector3.BACK, 1.2]]
+	var climbed := 0
+	var tried := 0
+	for f: Array in flights:
+		var bottom: Vector3 = f[0]
+		var dir: Vector3 = f[1]
+		var width: float = f[2]
+		var side := dir.cross(Vector3.UP).normalized()
+		# A straight run-in (the farthest clear one up to 1 m), else from the side.
+		var start := Vector3.INF
+		var first := Vector3.ZERO  # the first leg's direction (onto the flight)
+		var how := ""
+		var gap := 1.0
+		while gap >= 0.34 and start == Vector3.INF:
+			var at := bottom - dir * gap + Vector3.UP * 0.05
+			if _capsule_clear(at) and _path_clear(at, bottom - dir * 0.31 + Vector3.UP * 0.05):
+				start = at
+				first = dir
+				how = "straight, %.2f m before it" % gap
+			gap -= 0.05
+		for sgn: float in [1.0, -1.0]:
+			# Beside the first step, the capsule over its near edge (a 0.3 m tread
+			# is narrower than the capsule; past it the second riser is in the way).
+			var at := bottom - dir * 0.05 + side * sgn * (width * 0.5 + 0.6) + Vector3.UP * 0.05
+			if start == Vector3.INF and _capsule_clear(at) and _path_clear(at, at - side * sgn * 0.25):
+				start = at
+				first = -side * sgn
+				how = "from the side"
+		if start == Vector3.INF:
+			print("  stairwell at (%.1f, %.1f): no way onto it, skipped" % [bottom.x, bottom.z])
+			continue
+		tried += 1
+		await _start(start, first)
+		var steps0 := count_events(&"parkour")
+		_pl.move_input = first
+		if first != dir:
+			# Onto the first step from the side, to the flight's middle line.
+			await wait_until(func() -> bool: return absf((_pl.global_position - bottom).dot(side)) < 0.1, 120)
+		_pl.move_input = dir
+		# Up to the landing (then stop: past it the parkour finds the floor above).
+		var kinds := {}
+		await wait_until(func() -> bool:
+			var k := _pl.traversal.get_parkour_kind()
+			if k != &"":
+				kinds[k] = true
+			return _pl.global_position.y >= 2.95, 180)
+		_pl.move_input = Vector3.ZERO
+		await ticks(10)
+		var y := _pl.global_position.y
+		print("  stairwell at (%.1f, %.1f) walking %s (%s): feet at y %.2f on the landing, %d parkour moves, kinds %s" % [
+			bottom.x, bottom.z, dir, how, y, count_events(&"parkour") - steps0, kinds.keys()])
+		if near(y, 3.0, 0.05) and kinds.keys() == [&"step"]:
+			climbed += 1
+	check(tried == 4 and climbed == tried, "the Yard's stairwells are climbed with step-ups (%d / %d)" % [climbed, tried])
+
+## The player's capsule moves from `a` to `b` (feet) without touching anything.
+func _path_clear(a: Vector3, b: Vector3) -> bool:
+	_q.exclude = [_pl.get_rid()]
+	_q.transform = Transform3D(Basis(), a + Vector3.UP * (Fighter.CAPSULE_HEIGHT * 0.5 + 0.02))
+	_q.motion = b - a
+	var r := get_world_3d().direct_space_state.cast_motion(_q)
+	_q.motion = Vector3.ZERO
+	return r.size() > 0 and r[0] >= 0.999
+
+func _capsule_clear(feet: Vector3) -> bool:
+	_q.exclude = [_pl.get_rid()]
+	_q.transform = Transform3D(Basis(), feet + Vector3.UP * (Fighter.CAPSULE_HEIGHT * 0.5 + 0.02))
+	return get_world_3d().direct_space_state.intersect_shape(_q, 1).is_empty()

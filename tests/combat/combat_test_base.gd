@@ -43,16 +43,19 @@ func _make_floor() -> void:
 	body.add_child(cs)
 	add_child(body)
 
+## Every GameEvents signal a combat test reads (skipped if the lead removed it).
 func _capture_events() -> void:
-	for sig: StringName in [&"hit_landed", &"hit_blocked", &"perfect_dodge", &"teleport_counter",
-			&"grab_started", &"grab_broken", &"fighter_died", &"limb_severed",
-			&"attack_whiff", &"attack_active", &"fighter_launched", &"focus_changed", &"pursuit", &"air_recovery", &"armor_absorbed", &"dodge_feedback",
-			&"attack_tell", &"thrown", &"charge_started", &"charge_level_changed", &"charge_released",
-			&"combo_progress", &"combo_ended", &"stumbled", &"tripped", &"dazed", &"limb_damaged",
-			&"arm_broken", &"wall_slam"]:
+	for sig: StringName in [&"hit_landed", &"hit_blocked", &"grab_started", &"grab_broken",
+			&"fighter_died", &"limb_severed", &"attack_whiff", &"attack_active", &"fighter_launched",
+			&"armor_absorbed", &"attack_tell", &"thrown", &"combo_progress", &"combo_ended",
+			&"combo_escaped", &"stumbled", &"dazed", &"strike_started", &"screen_shake",
+			&"chain_hit", &"chain_ended", &"glide_started", &"counter_window", &"countered",
+			&"react_started", &"dodged"]:
+		if not GameEvents.has_signal(sig):
+			continue
 		var s := sig
-		GameEvents.connect(s, func(a = null, b = null, c = null, d = null) -> void:
-			events.append([s, a, b, c, d]))
+		GameEvents.connect(s, func(a = null, b = null, c = null, d = null, e = null) -> void:
+			events.append([s, a, b, c, d, e]))
 
 func count_events(what: StringName) -> int:
 	var n := 0
@@ -77,8 +80,8 @@ func spawn(archetype: StringName, pos: Vector3, facing: Vector3, team := Fighter
 
 const FakeFighter := preload("res://tests/combat/fake_fighter.gd")
 
-## A fighter whose crouch / jump / stick intent the test sets (fake_crouch,
-## fake_air, fake_intent). hold: read press/release as tap vs hold.
+## A fighter whose Round 7 react state the test sets (fake_react) and that
+## records its reactions (reacts). hold: read press/release as tap vs hold.
 func spawn_fake(archetype: StringName, pos: Vector3, facing: Vector3, team := Fighter.TEAM_ENEMY,
 		hold := false) -> Fighter:
 	var f: Fighter = FakeFighter.new()
@@ -152,3 +155,52 @@ func finish() -> void:
 	else:
 		print("RESULT FAIL ", name, " ", failures)
 		get_tree().quit(1)
+
+# --- Round 7 helpers -------------------------------------------------------------
+const A := CombatController.Action
+
+## hit_landed infos on `victim` (all of them, in order).
+func hits_on(victim: Fighter) -> Array[HitInfo]:
+	var out: Array[HitInfo] = []
+	for e: Array in events:
+		if e[0] == &"hit_landed" and (e[1] as HitInfo).victim == victim:
+			out.append(e[1])
+	return out
+
+## The last hit_landed of `move_id` (null when none).
+func last_hit(move_id: StringName) -> HitInfo:
+	for i in range(events.size() - 1, -1, -1):
+		var e: Array = events[i]
+		if e[0] == &"hit_landed" and (e[1] as HitInfo).move_id == move_id:
+			return e[1]
+	return null
+
+## Moves started by `f` from now on (attack_started), in order.
+func record_moves(f: Fighter) -> Array[StringName]:
+	var out: Array[StringName] = []
+	f.combat.attack_started.connect(func(id: StringName) -> void: out.append(id))
+	return out
+
+## The real player (PlayerController + InputInterpreter, M's Traversal, H's Defence).
+func spawn_player(pos: Vector3, facing := Vector3.FORWARD) -> Fighter:
+	var p := FighterFactory.spawn_player(self, Transform3D(Basis.looking_at(facing.normalized(), Vector3.UP), pos))
+	AttackDirector.set_player(p)
+	return p
+
+## Release every input action (between real-input sections).
+func release_inputs() -> void:
+	for a in InputMap.get_actions():
+		if not String(a).begins_with("ui_"):
+			Input.action_release(a)
+
+## Press input `action` for `secs` of real time, then release.
+func tap_input(action: StringName, secs := 0.05) -> void:
+	Input.action_press(action)
+	await wait_real(secs)
+	Input.action_release(action)
+
+## Put `victim` back on its feet `dist` m in front of `p`, facing it.
+func place_in_front(p: Fighter, victim: Fighter, dist: float) -> void:
+	victim.global_position = p.global_position + p.get_forward() * dist
+	victim.snap_facing(-p.get_forward())
+	victim.reset_physics_interpolation()

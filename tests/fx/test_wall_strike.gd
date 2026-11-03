@@ -2,7 +2,7 @@ extends Node3D
 ## Round 3 wall strikes (GameEvents.wall_struck): per-surface strike sounds,
 ## volume and pitch rising with power, hold / crack / hole / break layering,
 ## rapid jabs throttled per surface and varied (no single repeated sample,
-## each quick repeat softer), player pitch kept in Focus, dust and chips in
+## each quick repeat softer), player pitch kept in slow motion, dust and chips in
 ## the surface colour along the normal (bigger for holes and breaks, plus a
 ## puff out the far side), and no double burst or double break sound when D
 ## emits wall_broken / wall_cracked for the same strike. OWNER: agent F.
@@ -90,21 +90,21 @@ func _ready() -> void:
 	if complete and AudioFX.variant_count(&"strike_drywall") != 5:
 		fails.append("strike_drywall has %d variants, want 5" % AudioFX.variant_count(&"strike_drywall"))
 
-	# Focus: the player's strike keeps its pitch.
-	if TimeDirector.begin_focus():
+	# Slow motion: the player's strike keeps its pitch.
+	if U.slow_world(0.3):
 		await get_tree().create_timer(0.3).timeout
 		await _gap()
 		GameEvents.wall_struck.emit(player, wall, at, n, 60.0, &"chip", &"wood")
 		var i := _last_index()
 		var factor := AudioFX.player_pitch_factor()
 		if i < 0 or AudioFX._owned_base[i] <= 0.0 or absf(AudioFX._players[i].pitch_scale - AudioFX._owned_base[i] * factor) > 0.05:
-			fails.append("strike not pitch-compensated in Focus")
+			fails.append("strike not pitch-compensated in slow motion")
 		else:
-			print("focus: strike pitch %.2f = base %.2f x %.2f" % [AudioFX._players[i].pitch_scale, AudioFX._owned_base[i], factor])
-		TimeDirector.end_focus()
+			print("slow motion: strike pitch %.2f = base %.2f x %.2f" % [AudioFX._players[i].pitch_scale, AudioFX._owned_base[i], factor])
+		U.normal_time()
 		await get_tree().create_timer(0.3).timeout
 	else:
-		print("note: begin_focus refused; Focus pitch not checked")
+		print("note: TimeDirector refused slow motion; pitch not checked")
 
 	# Particles: one puff + chips; two bursts for a hole, larger.
 	var d0: int = BloodFX._dust_next

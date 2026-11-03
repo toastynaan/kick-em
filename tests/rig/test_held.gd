@@ -240,19 +240,20 @@ func _ready() -> void:
 		n += 1
 	_check("dead body let go: settles and refreezes", rc.is_settled(), "%.2f s" % (n / 120.0))
 
-	# --- Focus: the player carries a body at real speed (world at 0.3x) ---------------------
+	# --- Slow motion: the player carries a body at real speed (world at 0.3x) ---------------
+	# Round 7 removed Focus mode; any non-KO slow motion keeps the player in real time.
 	holder.add_to_group(&"player")
 	var w := RigTestUtil.make_dummy(self, &"grunt", Vector3(40, 0, 0), null, false)
 	await _frames(8)
 	hand.global_transform = _hand_at(0.0, Vector3(40, 0, 0))
 	w.ragdoll.begin_held(Bones.CHEST, hand, holder)
-	TimeDirector.begin_focus()
+	TimeDirector.request_slowmo(0.3, 4.0, TimeDirector.PRIO_DODGE)
 	await _frames(2)
 	var k := TimeDirector.player_time_factor()
 	st = await _run(w, Vector3(40, 0, 0), 3.0)
 	TimeDirector.reset()
-	print("  ", _held_line("focus x%.2f" % k, st))
-	_check("Focus: a body the player carries keeps up at real speed", k > 3.0 and st["pin_mean"] < 0.08
+	print("  ", _held_line("slow x%.2f" % k, st))
+	_check("slow motion: a body the player carries keeps up at real speed", k > 3.0 and st["pin_mean"] < 0.08
 		and st["capped_max"] > Tuning.LAUNCH_SPEED_MAX and st["capped_max"] <= RagdollController.HELD_SPEED_CAP * k + 0.01
 		and not st["nan"], "caps x%.2f" % k)
 	w.ragdoll.end_held()

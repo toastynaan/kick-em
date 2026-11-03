@@ -1,42 +1,49 @@
 class_name TellGlint
 extends MeshInstance3D
-## Attack tell (Feel Reference: Enemies have to be readable first; Sifu 1 at
-## 4.75 s). The attacking limb glows from the start of the wind-up until its
-## first active frame, on every enemy attack: ORANGE on strikes (answer:
-## parry, or teleport), BLUE on both hands for grabs (cannot be parried:
-## answer with Grab or a teleport). The Duelist's teleport counter is a strike
-## and glows orange too, brighter. A stick enemy's stick glows with his hand.
-## The glow is BloodFX.limb_glow on the move's strike bone (PoseLibrary.
-## STRIKE_BONES), so where it glows also shows the height: fist at head height
-## = HIGH, waist = MID, ankles = LOW. F keeps the Focus tint from dimming it.
-## Until BloodFX.limb_glow returns a glow the old billboard star above the head
-## is shown instead, so a tell never vanishes. Unshaded, drawn over
-## everything, render layer Layers.VIS_FX. Spawned by AttackDirector on
-## GameEvents.attack_tell. OWNER: agent C (AI).
+## Attack tell (Feel Reference: Enemies have to be readable first; Round 7:
+## Defence > Counter). The attacking limb glows from the start of the wind-up
+## until its first active frame, on every enemy attack: ORANGE when the player
+## can Counter it, BLUE when only a dodge answers it: every tell kind other
+## than &"strike" (grabs &"grab" on both hands, the heavy's shoulder charge
+## &"charge" on the shoulder), and any move whose MoveData.counterable is
+## false (UNCOUNTERABLE_FALLBACK while a move lacks the field). A stick
+## enemy's stick glows with his hand. The glow is BloodFX.limb_glow on the move's strike bone
+## (PoseLibrary.STRIKE_BONES), so where it glows also shows the height: fist
+## at head height = HIGH, waist = MID, ankles = LOW. Until BloodFX.limb_glow
+## returns a glow the old billboard star above the head is shown instead, so
+## a tell never vanishes. Unshaded, drawn over everything, render layer
+## Layers.VIS_FX. Spawned by AttackDirector on GameEvents.attack_tell.
+## OWNER: agent C (AI).
 ##
 ## Timing: the glow starts on the physics tick the wind-up starts (resolved
 ## with a deferred call, flushed at the end of that tick) and stops on the
 ## attacker's CombatController.attack_active signal, its exact first active
 ## frame, whatever hitstop or slow motion did to the startup in between.
-## A closing ring shrinks onto the glow and meets it exactly when the parry /
-## teleport window opens (active frame - Tuning.PARRY_WINDOW): subtle on
-## strikes and grabs, strong on counters. Everything runs on scaled game time
-## like the attack's startup, so in Focus (world at 0.3x) the tell, glow and
-## ring all last 3.3x longer in real time together.
+## Every enemy startup is at least AttackDirector.tell_min_frames(), so the
+## glow is up Tuning.R7_TELL_MARGIN before the counter window opens. A closing
+## ring shrinks onto the glow and meets it when the answer's window opens:
+## Tuning.R7_COUNTER_WINDOW before the active frame on orange tells,
+## Tuning.R7_DODGE_INVULN on blue ones (a dodge pressed then is still
+## invulnerable on the active frame). Everything runs on scaled game time like
+## the attack's startup, so in slow motion the tell, glow and ring all last
+## longer in real time together (the windows are real time).
 
 ## The contract's tell colours (J's off-screen arrows use the same ones).
-const STRIKE_COLOR := Tuning.TELL_COLOR_STRIKE  ## orange: parry it
-const GRAB_COLOR := Tuning.TELL_COLOR_GRAB      ## blue: a grab, cannot be parried
-const COUNTER_COLOR := STRIKE_COLOR            ## the Duelist's counter is a strike
+const STRIKE_COLOR := Tuning.TELL_COLOR_STRIKE  ## orange: Counter it
+const GRAB_COLOR := Tuning.TELL_COLOR_GRAB      ## blue: uncounterable, dodge it
+## Enemy moves the player cannot Counter while B's MoveData has no
+## `counterable` field yet (the Round 7 doc: grabs and the heavy's shoulder charge).
+const UNCOUNTERABLE_FALLBACK: Array[StringName] = [&"e_grab", &"e_grab_slam", &"e_charge"]
 ## BloodFX.limb_glow intensity per tell kind.
-const GLOW_INTENSITY := {&"strike": 1.2, &"grab": 1.2, &"counter": 1.6}
+const GLOW_INTENSITY := {&"strike": 1.2, &"grab": 1.2, &"charge": 1.2}
 ## Glows are asked for this much longer than the tell and stopped on the
 ## active frame (a hitstop during the wind-up delays it).
 const GLOW_SAFETY := 1.0
 ## Closing ring: scale at the tell's start and when it meets the star.
 const RING_START_SCALE := 3.4
 const RING_MEET_SCALE := 1.0
-const RING_ALPHA := {&"strike": 0.35, &"grab": 0.3, &"counter": 0.8}
+## Ring alpha on counterable (orange) and dodge-only (blue) tells.
+const RING_ALPHA := {true: 0.35, false: 0.3}
 ## Ring circle radius as a fraction of the quad's half size.
 const RING_RADIUS := 0.82
 ## Quad size in metres at scale 1.
@@ -74,7 +81,8 @@ var _mat: StandardMaterial3D
 var _color := STRIKE_COLOR
 var _ring: MeshInstance3D
 var _ring_mat: StandardMaterial3D
-var _meet_t := 0.0        ## _t at which the ring meets the star (parry window opens).
+var _meet_t := 0.0        ## _t at which the ring meets the glow (the answer's window opens).
+var _counterable := true  ## orange (Counter) or blue (dodge only)
 var _glows: Array[Node3D] = []  ## BloodFX limb glows (empty: star fallback)
 var _move_id: StringName = &""
 var _resolved := false
@@ -158,24 +166,27 @@ func _ready() -> void:
 	var quad := QuadMesh.new()
 	quad.size = Vector2(SIZE, SIZE)
 	mesh = quad
-	_color = color_for(kind)
+	# The brain names the move it is starting (B emits attack_tell from inside
+	# start_enemy_attack, so this runs before the move begins); _resolve_limb
+	# looks again at the end of the tick.
+	_move_id = _tell_move_of(attacker as Fighter)
+	_set_counterable(is_counterable(_move_id, kind))
 	_mat = _make_material(get_star_texture())
 	material_override = _mat
 	scale = Vector3.ONE * 0.2
-	# The ring meets the glow when the parry window opens. The tell runs on
+	# The ring meets the glow when the answer's window opens. The tell runs on
 	# scaled game time; the window is real time.
 	_update_meet_time()
-	if RING_ALPHA.has(kind):
-		_ring = MeshInstance3D.new()
-		_ring.name = "Ring"
-		_ring.top_level = true
-		_ring.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
-		_ring.layers = Layers.VIS_FX
-		_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		_ring.mesh = quad
-		_ring_mat = _make_material(get_ring_texture())
-		_ring.material_override = _ring_mat
-		add_child(_ring)
+	_ring = MeshInstance3D.new()
+	_ring.name = "Ring"
+	_ring.top_level = true
+	_ring.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_ring.layers = Layers.VIS_FX
+	_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_ring.mesh = quad
+	_ring_mat = _make_material(get_ring_texture())
+	_ring.material_override = _ring_mat
+	add_child(_ring)
 	var f := attacker as Fighter
 	if f != null and f.combat != null:
 		f.combat.attack_active.connect(_on_attack_active)
@@ -184,13 +195,42 @@ func _ready() -> void:
 	# known by the end of this physics tick: resolve then (same tick).
 	_resolve_limb.call_deferred()
 
-static func color_for(p_kind: StringName) -> Color:
-	match p_kind:
-		&"grab":
-			return GRAB_COLOR
-		&"counter":
-			return COUNTER_COLOR
-	return STRIKE_COLOR
+## Tell colour of an enemy move: orange when the player can Counter it, blue
+## when only a dodge answers it. `p_kind` is the attack_tell kind: only a
+## &"strike" can be orange (a grab or a charge never is, even without a move id).
+static func color_for(p_kind: StringName, move_id := &"") -> Color:
+	return STRIKE_COLOR if is_counterable(move_id, p_kind) else GRAB_COLOR
+
+## Round 7: can the player Counter this enemy move? Only a &"strike" tell
+## kind can be (B: &"grab" for grabs, &"charge" for the shoulder charge), and
+## then only when the move's MoveData.counterable is true (a move without the
+## field falls back to UNCOUNTERABLE_FALLBACK).
+static func is_counterable(move_id: StringName, p_kind := &"strike") -> bool:
+	if p_kind != &"strike":
+		return false
+	if move_id == &"":
+		return true
+	if MoveLibrary.has_move(move_id):
+		var m := MoveLibrary.get_move(move_id)
+		if m != null and &"counterable" in m:
+			return bool(m.get(&"counterable"))
+		if m != null and m.tell_kind != &"strike":
+			return false
+	return not move_id in UNCOUNTERABLE_FALLBACK
+
+## Orange (the player can Counter it) or blue (dodge only).
+func is_counterable_tell() -> bool:
+	return _counterable
+
+func _set_counterable(on: bool) -> void:
+	_counterable = on
+	_color = STRIKE_COLOR if on else GRAB_COLOR
+
+## The move a brain is starting this tick (&"" for hand-emitted tells).
+static func _tell_move_of(f: Fighter) -> StringName:
+	if f != null and f.brain != null and f.brain.has_method(&"get_tell_move"):
+		return f.brain.get_tell_move()
+	return &""
 
 func _make_material(tex: Texture2D) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -250,7 +290,7 @@ func _process(delta: float) -> void:
 	_mat.albedo_color = Color(_color.r, _color.g, _color.b, alpha)
 	if _ring:
 		_ring.global_position = get_anchor_position()
-		var ring_alpha: float = RING_ALPHA[kind] * alpha
+		var ring_alpha: float = RING_ALPHA[_counterable] * alpha
 		if t >= _meet_t and not _cancelled:
 			ring_alpha = minf(ring_alpha * 1.6, 1.0)  # the window is open
 		_ring.scale = Vector3.ONE * get_ring_scale()
@@ -349,10 +389,15 @@ func _resolve_limb() -> void:
 	var f := attacker as Fighter
 	if f == null:
 		return
-	if f.brain != null and f.brain.has_method(&"get_tell_move"):
-		_move_id = f.brain.get_tell_move()
+	if _move_id == &"":
+		_move_id = _tell_move_of(f)
 	if _move_id == &"" and f.combat != null:
 		_move_id = f.combat.current_move_id()
+	# Colour and ring by the move now known (before this tick renders).
+	_set_counterable(is_counterable(_move_id, kind))
+	_update_meet_time()
+	if _ring_mat != null:
+		_ring_mat.albedo_color = Color(_color.r, _color.g, _color.b, RING_ALPHA[_counterable])
 	if _attack_aborted() or active_world_time >= 0.0:
 		return
 	var remaining := maxf(duration - _t, 0.05) + GLOW_SAFETY
@@ -386,11 +431,17 @@ func _stop_glows() -> void:
 		if f != null and is_instance_valid(f) and f.brain != null and f.brain.has_method(&"set_weapon_glow"):
 			f.brain.set_weapon_glow(_color, false)
 
-## The ring meets the glow when the parry window opens. The tell runs on
+## The ring meets the glow when the answer's window opens: the counter window
+## on orange tells, the dodge's invulnerability on blue ones. The tell runs on
 ## scaled game time and the window is real time, so the meet point is
-## re-derived each frame (Focus may start or end mid-tell).
+## re-derived each frame (slow motion may start or end mid-tell).
 func _update_meet_time() -> void:
-	_meet_t = maxf(duration - Tuning.PARRY_WINDOW * Engine.time_scale, duration * 0.3)
+	_meet_t = maxf(duration - answer_window(_counterable) * Engine.time_scale, 0.0)
+
+## Real seconds before the active frame in which the player's answer works:
+## Counter (orange) or dodge (blue).
+static func answer_window(counterable: bool) -> float:
+	return Tuning.R7_COUNTER_WINDOW if counterable else Tuning.R7_DODGE_INVULN
 
 func get_color() -> Color:
 	return _color

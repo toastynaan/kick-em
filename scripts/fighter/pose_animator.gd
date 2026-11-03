@@ -28,6 +28,23 @@ extends Node
 ## Upper-body strikes (move "legs": &"free") and charge holds let the legs keep
 ##   running while the fighter moves faster than LEGS_FREE_FROM; kicks, landings
 ##   and parkour keep their own legs.
+## Round 7 (docs/Round 7 — Freeflow Combat.md "Poses"):
+##   play_move(strike, startup, active, recovery) with Tuning.R7_MOVES frames for
+##     PoseLibrary.ROUND7_STRIKE_IDS (contact on the first active frame).
+##   play_timed(id, d): dodge, glide, throw_release, react_snap / react_spin
+##     (react_spin_r: the mirror) / react_push / react_fold / react_buckle /
+##     react_lift (d = the stun). The first reaction pose lands within 0.07 s.
+##   hold_pose(id): throw_windup (grows to full over R7_THROW_WINDUP_FULL),
+##     drive_hold, clinch_hold, glide, counter_catch, heavy_<move>_load for
+##     jab / cross / hook / leg_kick / front_kick / roundhouse (a press waiting
+##     for the hold decision), react_fold, react_buckle, react_lift. Reaction holds blend in
+##     within their "blend_max" (<= 0.07 s) whatever blend is passed.
+##     react_lift blends rising -> falling limbs by the rig's own vertical
+##     speed (not set_stance's) and flails them, so it reads while the capsule
+##     flies, with or without RagdollController.limp_chain on top. Calling
+##     hold_pose() again with the same id keeps its clock (no restart).
+##   set_upper_overlay(id) also takes throw_windup (growing), drive_hold and
+##     clinch_hold over the running legs.
 ##
 ## Layers, bottom to top: locomotion (legs by IK to procedural foot targets, so
 ## feet stay planted) -> upper overlay -> held pose -> one-shot move ->
@@ -106,6 +123,21 @@ const CRAWL_CYCLE := 0.9
 const STUMBLE_LIFT := 0.11
 ## Share of a cycle each foot is planted: walking, running (4.5 m/s).
 const WALK_DUTY := Vector2(0.62, 0.42)
+
+# --- Round 7 tuning (local; agent P) -------------------------------------------
+## s: shortest cross-fade when a hold replaces a move or another hold.
+const HOLD_XFADE_MIN := 0.04
+## "by_vy" holds (react_lift): vertical speed (m/s, rig motion) at which the
+## rising pose is full, and the falling pose full; smoothing rate (1/s).
+const LIFT_VY_RISE := 2.0
+const LIFT_VY_FALL := -3.0
+const LIFT_VY_SMOOTH := 10.0
+## "flail" holds: wobble frequencies (rad/s) of the loose limbs; arms swing
+## FLAIL_ARM_MULT x the hold's amplitude, hinges FLAIL_HINGE_MULT x.
+const FLAIL_FREQ := Vector2(13.0, 17.0)
+const FLAIL_ARM_MULT := 1.4
+const FLAIL_HINGE_MULT := 1.6
+const FLAIL_BONES: Array[int] = [4, 5, 7, 8, 10, 11, 13, 14]
 
 const STYLES: Array[StringName] = [&"walk", &"sprint", &"carry", &"limp", &"crawl", &"strafe",
 	&"wall_run_l", &"wall_run_r"]
@@ -188,6 +220,8 @@ var _hold_w := 0.0
 var _hold_w_target := 0.0
 var _hold_blend := 0.08
 var _hold_t := 0.0
+var _vy_k := 0.0              # "by_vy" holds: 0 rising .. 1 falling (smoothed)
+var _overlay_t := 0.0         # s since the overlay was set ("ramp" holds as overlays)
 # Move layer
 var _move_id: StringName = &""
 var _move_t := 0.0
@@ -385,6 +419,7 @@ func set_upper_overlay(pose_id: StringName) -> void:
 		_start_xfade(OVERLAY_BLEND)
 	_overlay_id = pose_id
 	_overlay_pose = PoseLibrary.get_pose(pname)
+	_overlay_t = 0.0
 
 func get_upper_overlay() -> StringName:
 	return _overlay_id
@@ -448,7 +483,8 @@ func is_busy() -> bool:
 ## and move up/down by up to AIM_MAX_HEIGHT, the chest turns a little with
 ## them; blends in over the move's startup. Stays until clear_aim_target().
 ## Cheap to call every tick (rebuilds only when the target moves > 5 cm).
-## Moves in PoseLibrary.NO_AIM (leg_sweep, throw) ignore it.
+## Moves in PoseLibrary.NO_AIM (leg_sweep, throw) ignore it; moves in
+## PoseLibrary.AIM_YAW_ONLY (gut punch, leg kick, kicks, uppercut) only turn.
 func set_aim_target(world_pos: Vector3) -> void:
 	_aim_world = world_pos
 	_aim_on = true
@@ -592,8 +628,14 @@ func _hold(pose_id: StringName, blend_time: float) -> void:
 	else:
 		push_warning("PoseAnimator: unknown hold %s" % pose_id)
 		return
+	# Round 7: reaction holds land with the hit whatever blend the caller asks.
+	if def.has("blend_max"):
+		blend_time = minf(blend_time, float(def["blend_max"]))
+	# A new hold (or one coming back from a release) starts its clock; calling
+	# hold_pose() again with the same id keeps a ramp or loop where it is.
+	var fresh := _hold_id != pose_id or _hold_w_target <= 0.0
 	if _move_id != &"" or (_hold_id != &"" and _hold_id != pose_id):
-		_start_xfade(maxf(blend_time, 0.05))
+		_start_xfade(maxf(blend_time, HOLD_XFADE_MIN))
 		_end_move()
 		_hold_w = 1.0
 	elif _hold_id != pose_id:
@@ -604,7 +646,9 @@ func _hold(pose_id: StringName, blend_time: float) -> void:
 	_hold_def = def
 	_hold_w_target = 1.0
 	_hold_blend = maxf(blend_time, 0.0)
-	_hold_t = 0.0
+	if fresh:
+		_hold_t = 0.0
+		_vy_k = 0.0
 	if _hold_blend <= 0.0:
 		_hold_w = 1.0
 
@@ -675,6 +719,9 @@ func _evaluate(dt: float) -> void:
 	# Hold layer.
 	if _hold_id != &"":
 		_hold_t += dt * loop_speed
+		if _hold_def.get("by_vy", false):
+			var vk := clampf((LIFT_VY_RISE - _vy) / (LIFT_VY_RISE - LIFT_VY_FALL), 0.0, 1.0)
+			_vy_k = lerpf(_vy_k, vk, 1.0 - exp(-LIFT_VY_SMOOTH * dt))
 		if _hold_blend > 0.0:
 			_hold_w = move_toward(_hold_w, _hold_w_target, dt / _hold_blend)
 		else:
@@ -833,6 +880,12 @@ func _hold_pose_eval() -> PoseLibrary.Pose:
 	var p: PoseLibrary.Pose
 	if poses.size() == 1:
 		p = PoseLibrary.get_pose(poses[0])
+	elif _hold_def.get("by_vy", false):
+		# Round 7 lift: rising pose -> falling pose by the body's vertical speed.
+		p = _blend_poses(PoseLibrary.get_pose(poses[0]), PoseLibrary.get_pose(poses[1]), _vy_k)
+	elif _hold_def.has("ramp"):
+		# Round 7 throw wind-up: grows from poses[0] to poses[1] once, then holds.
+		p = _ramp_pose(poses, _hold_t, float(_hold_def["ramp"]))
 	else:
 		var rate := float(_hold_def.get("rate", 1.0))
 		var x := _hold_t * rate * poses.size() * 0.5
@@ -844,6 +897,34 @@ func _hold_pose_eval() -> PoseLibrary.Pose:
 	# Crouched variant (block -> block_crouch).
 	if _hold_def.has("crouch") and _crouch_w > 0.0:
 		p = _blend_poses(p, PoseLibrary.get_pose(_hold_def["crouch"]), _crouch_w)
+	var flail := float(_hold_def.get("flail", 0.0))
+	if flail > 0.0:
+		p = _flailed(p, deg_to_rad(flail))
+	return p
+
+## poses[0] -> poses[1] over `ramp` s (smoothstep), then poses[1].
+static func _ramp_pose(poses: Array, t: float, ramp: float) -> PoseLibrary.Pose:
+	var r := clampf(t / maxf(ramp, 0.001), 0.0, 1.0)
+	if r <= 0.0 or r >= 1.0:
+		return PoseLibrary.get_pose(poses[0 if r <= 0.0 else 1])
+	return _blend_poses(PoseLibrary.get_pose(poses[0]), PoseLibrary.get_pose(poses[1]), r * r * (3.0 - 2.0 * r))
+
+## A copy of `src` with loose limbs: slow, out-of-phase wobble of the arms and
+## legs (radians `amp`), kept inside the joint limits. Never edits the cached pose.
+func _flailed(src: PoseLibrary.Pose, amp: float) -> PoseLibrary.Pose:
+	var p := _blend_poses(src, src, 0.0)
+	var t := _time
+	for i in FLAIL_BONES:
+		var q = p.rot[i]
+		if q == null:
+			continue
+		var a := amp * (FLAIL_ARM_MULT if i < LEG_START else 1.0)
+		var e := Vector3.ZERO
+		if PoseLibrary.joint_type(i) == 2:
+			e.x = sin(t * FLAIL_FREQ.x + i * 1.9) * a * FLAIL_HINGE_MULT
+		else:
+			e = Vector3(sin(t * FLAIL_FREQ.x + i * 1.3) * a, 0.0, sin(t * FLAIL_FREQ.y + i * 2.1) * a)
+		p.rot[i] = PoseLibrary.clamp_joint(Bones.ALL[i], (q as Quaternion) * Quaternion.from_euler(e))
 	return p
 
 ## Per-bone blend of two compiled poses (bones only one defines keep it).
@@ -946,6 +1027,11 @@ func _update_locomotion(dt: float) -> void:
 	# Upper overlay (carry_hold by default while carrying).
 	var ov_id := _overlay_id
 	var ov_pose := _overlay_pose
+	_overlay_t += dt
+	if ov_id != &"" and PoseLibrary.HOLDS.has(ov_id) and PoseLibrary.HOLDS[ov_id].has("ramp"):
+		# A "ramp" hold as an overlay grows the same way (the throw wind-up).
+		var od: Dictionary = PoseLibrary.HOLDS[ov_id]
+		ov_pose = _ramp_pose(od["poses"], _overlay_t, float(od["ramp"]))
 	if ov_id == &"" and _eff_style == &"carry":
 		ov_id = &"carry_hold"
 		ov_pose = _carry
@@ -1342,6 +1428,8 @@ func _refresh_aim(force: bool) -> void:
 		t = Basis(Vector3.UP, deg_to_rad((sd.get("hips", Vector3.ZERO) as Vector3).y)) * t
 	var dyaw := clampf(wrapf(atan2(-local.x, -local.z) - atan2(-t.x, -t.z), -PI, PI), -AIM_MAX_YAW, AIM_MAX_YAW)
 	var dh := clampf(local.y - t.y, -AIM_MAX_HEIGHT, AIM_MAX_HEIGHT)
+	if PoseLibrary.AIM_YAW_ONLY.has(_move_id):
+		dh = 0.0   # Round 7: the move's height is the point of it (gut, thigh, head kick)
 	if Vector2(local.x, local.z).length() < 0.2:
 		dyaw = 0.0
 	for key in _keys:

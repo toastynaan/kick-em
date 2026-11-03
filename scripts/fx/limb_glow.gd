@@ -5,8 +5,8 @@ extends Node3D
 ## tell reads from the gameplay camera at 7 m. Rides the bone's
 ## BoneAttachment3D. Free it to stop; with duration > 0 it frees itself.
 ## Duration counts the fighter's own time: world time for enemies (a tell
-## stretches with slow motion and Focus like the attack it announces), player
-## time for the player (TimeDirector.player_delta).
+## stretches with slow motion like the attack it announces), player time for
+## the player (TimeDirector.player_delta).
 ## OWNER: agent F (blood & fx). Created only by BloodFX.
 
 const POP_TIME := 0.08      ## s: the glow pops in brighter
@@ -72,6 +72,13 @@ func set_intensity(v: float) -> void:
 ## A short flare (a charge reaching the next level).
 func pulse() -> void:
 	_pulse_age = 0.0
+
+## Light more mesh parts with this glow (Round 7: the throwing arm's upper arm
+## and hand join the forearm's glow, under one halo and one light).
+func add_parts(extra: Array) -> void:
+	for p in extra:
+		if p is MeshInstance3D and is_instance_valid(p) and not parts.has(p):
+			parts.append(p)
 
 ## Fade out over FADE_OUT s, then free (an abrupt queue_free also works).
 func stop() -> void:

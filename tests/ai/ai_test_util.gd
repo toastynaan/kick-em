@@ -29,6 +29,18 @@ static func spawn_fake(parent: Node, archetype: StringName, team: int, pos: Vect
 	ensure_wired(f)
 	return f
 
+## An enemy FakeFighter with its real AIBrain (FighterFactory.spawn_enemy's
+## wiring), so its down / hitstun / reaction state can be forced.
+static func spawn_fake_enemy(parent: Node, archetype: StringName, pos: Vector3, facing := Vector3.ZERO) -> Fighter:
+	var f := spawn_fake(parent, archetype, Fighter.TEAM_ENEMY, pos)
+	f.name = "Fake" + String(archetype).capitalize() + "Enemy"
+	if facing.length() > 0.01 and f.has_method(&"snap_facing"):
+		f.snap_facing(facing)
+	var brain := AIBrain.new()
+	brain.name = "AIBrain"
+	f.add_child(brain)
+	return f
+
 ## Stub fighters build nothing; give them a CombatController and groups.
 static func ensure_wired(f: Fighter) -> void:
 	if f.combat == null:

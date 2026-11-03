@@ -1,14 +1,18 @@
 class_name HUD
 extends CanvasLayer
-## In-round overlay: player HP bar (100 scale) and Focus (3 bars with fill),
-## wave counter, duel opponent bar, counter-bonus cue, parry / teleport /
-## sidestep feedback, off-screen attack arrows (orange strike, blue grab, from
-## the wind-up to the first active frame), the sprint target marker, lock-on
-## brackets, combo / charge meters, world popups, bowling chain, controls help
-## (F1) and the Round 5 debug overlay (F3, mirrors Tuning.debug_overlay).
-## The layer sits above ScreenFX's, so Focus mode's tint never dims it.
-## Title, pause, debug settings and results panels live in GameMenus. Built
-## entirely in code. No health bars over enemies.
+## In-round overlay (Round 7: HUD): player HP bar (100 scale), wave counter,
+## duel opponent bar, the combo counter (GameEvents.chain_hit / chain_ended),
+## counter prompts over every enemy whose counter window is open on the player
+## (GameEvents.counter_window: orange = Counter, blue = dodge only), the
+## pursuit cues of the god path ("DASH: PURSUE" near a body the player just
+## launched, then "ATTACK: LAUNCH  /  BACK + ATTACK: SPIKE" during the pursuit
+## hang), TELEPORT / SIDESTEP feedback, off-screen attack arrows, world popups,
+## bowling chain, controls help (F1) and the debug
+## overlay (F3, mirrors Tuning.debug_overlay: move, string, chain, glide, the
+## combat target's reaction state).
+## The layer sits above ScreenFX's, so screen effects never dim it.
+## Title, pause and results panels live in GameMenus. Built entirely in code.
+## No health bars over enemies.
 ## OWNER: agent J (HUD, flow & menus).
 
 const HUD_LAYER := 10           ## at least this; always above ScreenFX's layers
@@ -29,20 +33,31 @@ const POPUP_MARGIN_TOP := 120.0 ## px: popups stay below the top HUD rows
 const POPUP_MARGIN_BOTTOM := 70.0
 const BANNER_CLEAR := 8.0       ## px gap kept between a popup and a banner
 const CHAIN_MERGE_TIME := 1.0   ## s: THROUGH N WALLS replaces a WALL BREAK banner this recent
-const POP_SIZE := 76            ## px, WALL BREAK / PARRY / TELEPORT pop text
-const POP_Y_FRAC := -0.31       ## pop text centre at 19% of the screen height (was 30%)
-const CHARGE_FLASH := 0.35      ## s the charge meter stays up after the release
-const COMBO_HOLD := 1.6         ## s the combo counter stays after the last hit
-const LOCK_MARKER_M := 0.5      ## m half-size of the lock brackets around the target's chest
-const LOCK_MARKER_MIN := 26.0   ## px minimum half-size
-## Sprint target marker (Prototype 2 at 1.9 s / 16.3 s): small white corner brackets.
-const SPRINT_MARKER_M := 0.38   ## m half-size at the target's chest
-const SPRINT_MARKER_MIN := 16.0 ## px minimum half-size
-const SPRINT_MARKER_IN := 0.12  ## s the brackets take to close in on a new target
-## A Block tap with no attack in its window reads LATE when an enemy attack went
-## active this recently (real s); EARLY when one is still further than the window away.
-const PARRY_LATE_WINDOW := 0.25
-const FOCUS_GHOST_TIME := 0.4   ## s a spent Focus bar takes to fade out
+const POP_SIZE := 76            ## px, WALL BREAK / COUNTER pop text
+const POP_Y_FRAC := -0.31       ## pop text centre at 19% of the screen height
+## Combo counter (Round 7: HUD): left side, a big number that pops on each hit.
+const COMBO_MIN := 2            ## chain hits before the counter shows (one hit is not a combo)
+const COMBO_SIZE := 128         ## px, the number
+const COMBO_POP := 1.45         ## scale of the number on the hit frame, settling to 1
+const COMBO_POP_TIME := 0.16    ## s for the pop to settle
+const COMBO_END_HOLD := 0.45    ## s the final count stays after chain_ended
+const COMBO_FADE := 0.4         ## s fade-out after that
+const COMBO_STALE := 3.0        ## s without a chain_hit: fade even if chain_ended never came
+const COMBO_HOT := 10           ## the number reaches the accent colour at this many hits
+## Counter prompts: a key badge over each attacker whose window is open on the player.
+const PROMPT_HEAD_UP := 0.15    ## m above the top of the attacker's head (the pointer tip)
+const PROMPT_H := 44.0          ## px badge height (a circle for one-letter keys, a pill for longer)
+const PROMPT_GAP := 12.0        ## px between the pointer tip and the badge
+const PROMPT_IN := 0.12         ## s the badge takes to pop in
+const PROMPT_MAX_AGE := 3.0     ## s: no window lasts this long; drops a prompt whose close was missed
+const PROMPT_MARGIN := 16.0     ## px the badge stays inside the screen
+const PROMPT_REOPEN_GAP := 0.25 ## s after a close event in which Defence's poll may not reopen a prompt
+## Pursuit cues (Round 7 amendment: God path).
+const PURSUE_CAPTION := "DASH: PURSUE"
+const HANG_TEXT := "ATTACK: LAUNCH  /  BACK + ATTACK: SPIKE"
+const PURSUE_ABOVE := 0.7       ## m above the flying body's centre of mass
+const LAUNCH_HITSTOP_FALLBACK := 0.11 ## real s for a launch HitInfo with no hitstop (Defence's value)
+const HANG_GRACE := 0.35        ## real s after Tuning.PURSUIT_HANG the hang cue may stay (Defence's strike grace)
 
 var player: Fighter
 var mode: StringName = &"duel"
@@ -50,7 +65,6 @@ var mode: StringName = &"duel"
 var _root: Control
 var _bars: _Bars
 var _hp_label: Label
-var _focus_label: Label
 var _mode_label: Label
 var _sub_label: Label
 var _chain_label: Label
@@ -61,25 +75,35 @@ var _banner_sub: Label
 var _flash: ColorRect
 var _hurt: ColorRect
 var _arrows: _Arrows
+var _prompts_draw: _Prompts
 var _help: PanelContainer
 var _debug_panel: PanelContainer
 var _debug_label: Label
 var _hint: Label
-var _charge: _Charge
-var _prompt: Label
-var _reticle: _Reticle
-var _lock_marker: _LockMarker
-var _sprint_marker: _LockMarker
-var _counter_label: Label
-var _combo_label: Label
-var _combo_sub: Label
-var _combo_count := 0
-var _combo_at := -100.0
-var _charging := false
-var _charge_level := 0
-var _charge_t0 := 0.0
-var _charge_move: StringName = &""
-var _charge_release_at := -100.0
+var _combo_box: VBoxContainer
+var _combo_num: Label
+var _combo_hits: Label
+var _combo_move_label: Label
+var _combo_count := 0                       ## hits in the player's live (or just ended) chain
+var _combo_hit_at := -100.0                 ## real s of the last chain_hit
+var _combo_end_at := -1.0                   ## real s the chain ended (-1 = live)
+var _combo_move: StringName = &""
+var _combo_polled := false                  ## get_chain_count() reported this chain (fallback path)
+## Open counter windows on the player: attacker instance id -> {fighter,
+## counterable, t0, seen_open}. Drawn each frame by _prompts_draw.
+var _prompts := {}
+var _prompt_items: Array = []               ## last drawn prompts (tests)
+var _prompt_closed_at := {}                 ## attacker instance id -> real s its close event came
+## Pursuit window after the player's launch (local mirror of Defence's rule
+## until Defence answers get_pursuit_window_target()). Untyped: may be freed.
+var _pursue_victim = null
+var _pursue_until := -INF                   ## real s the window closes
+var _pursue_t0 := -INF
+var _hang_victim = null                     ## pursuit event's body (fallback for get_pursuit_target)
+var _hang_until := -INF
+var _cue_t0 := -INF                         ## real s the current cue appeared
+var _cue_kind: StringName = &""
+var _cue: Dictionary = {}                   ## last drawn pursuit cue (tests)
 var _popups: _Popups
 var _popup_items: Array[Dictionary] = []   ## {pos, text, color, size, t0, dur}
 var _suppressed_walls := {}                 ## wall instance id -> true (staged breaches)
@@ -104,7 +128,6 @@ var _chain_at := -100.0
 ## Enemy wind-ups in progress: {fighter, kind, left (game s to the first active
 ## frame), arrow (started off screen)}. Arrows draw for the off-screen ones.
 var _tells: Array[Dictionary] = []
-var _last_enemy_active := -100.0            ## real s an enemy attack last went active
 var _last_real := 0.0
 var _debug_t := 0.0
 var _hint_until := 0.0
@@ -112,12 +135,6 @@ var _wave_index := 0
 var _wave_total := 0
 var _enemies_left := 0
 var _round_over := false
-var _counter_bonus := 0.0                   ## live counter bonus on the player's next hit
-var _counter_t0 := -100.0
-var _focus_last := -1.0
-var _focus_mode_t0 := -100.0
-var _sprint_target: Fighter
-var _sprint_target_at := -100.0
 
 func _ready() -> void:
 	layer = UIKit.layer_above_screen_fx(get_tree(), HUD_LAYER)
@@ -125,32 +142,26 @@ func _ready() -> void:
 	_last_real = TimeDirector.now()
 	_build()
 	_debug_panel.visible = Tuning.debug_overlay
-	GameEvents.perfect_dodge.connect(_on_perfect_dodge)
-	GameEvents.teleport_counter.connect(_on_teleport_counter)
 	GameEvents.wall_broken.connect(_on_wall_broken)
 	GameEvents.body_bowled.connect(_on_body_bowled)
 	GameEvents.attack_tell.connect(_on_attack_tell)
 	GameEvents.attack_active.connect(_on_attack_active)
 	GameEvents.grab_broken.connect(_on_grab_broken)
-	GameEvents.pursuit.connect(_on_pursuit)
-	GameEvents.air_recovery.connect(_on_air_recovery)
 	GameEvents.hit_landed.connect(_on_hit_landed)
 	GameEvents.wave_started.connect(_on_wave_started)
 	GameEvents.impact_damaged.connect(_on_impact_damaged)
 	GameEvents.wall_chain.connect(_on_wall_chain)
 	GameEvents.armor_absorbed.connect(_on_armor_absorbed)
-	GameEvents.charge_started.connect(_on_charge_started)
-	GameEvents.charge_level_changed.connect(_on_charge_level_changed)
-	GameEvents.charge_released.connect(_on_charge_released)
-	GameEvents.combo_progress.connect(_on_combo_progress)
-	GameEvents.combo_ended.connect(_on_combo_ended)
-	# Round 5 defence and Focus.
-	GameEvents.parried.connect(_on_parried)
-	GameEvents.parry_whiffed.connect(_on_parry_whiffed)
+	# Round 7: combo counter and counter prompts.
+	GameEvents.chain_hit.connect(_on_chain_hit)
+	GameEvents.chain_ended.connect(_on_chain_ended)
+	GameEvents.counter_window.connect(_on_counter_window)
+	GameEvents.countered.connect(_on_countered)
+	GameEvents.counter_whiffed.connect(_on_counter_whiffed)
+	# God path: teleport and pursuit feedback.
+	GameEvents.pursuit.connect(_on_pursuit)
 	GameEvents.teleported.connect(_on_teleported)
 	GameEvents.sidestepped.connect(_on_sidestepped)
-	GameEvents.counter_bonus_changed.connect(_on_counter_bonus_changed)
-	GameEvents.focus_started.connect(_on_focus_started)
 	_hint_until = TimeDirector.now() + HINT_TIME
 
 # --- Public API ----------------------------------------------------------------
@@ -160,7 +171,6 @@ func set_player(f: Fighter) -> void:
 		_hp_shown = f.hp / maxf(f.max_hp, 1.0)
 		_hp_delayed = _hp_shown
 		_hp_last = f.hp
-		_focus_last = f.focus
 
 func set_mode(m: StringName) -> void:
 	mode = m
@@ -184,7 +194,7 @@ func show_banner(text: String, sub := "", duration := 1.8) -> void:
 	_pop(_banner_label, 1.35, duration)
 	_pop(_banner_sub, 1.0, duration)
 
-## Short pop text ("PARRY", "TELEPORT", "WALL BREAK").
+## Short pop text ("COUNTER", "WALL BREAK").
 func pop_text(text: String, color := UIKit.TEXT, duration := 0.9) -> void:
 	_pop_label.text = text
 	_pop_label.add_theme_color_override(&"font_color", color)
@@ -220,7 +230,7 @@ func get_debug_text() -> String:
 func is_help_visible() -> bool:
 	return _help.visible
 
-## Duel mode: show the opponent's HP bar and Focus pips (waves keep no enemy bars).
+## Duel mode: show the opponent's HP bar (waves keep no enemy bars).
 func set_opponent(f: Fighter) -> void:
 	opponent = f
 	_opp_root.visible = f != null
@@ -263,8 +273,15 @@ func set_round_over() -> void:
 	_tells.clear()
 	_arrows.items = []
 	_arrows.queue_redraw()
-	_sprint_marker.visible = false
-	_counter_label.visible = false
+	_prompts.clear()
+	_prompt_items = []
+	_cue = {}
+	_pursue_victim = null
+	_hang_victim = null
+	_prompts_draw.items = []
+	_prompts_draw.queue_redraw()
+	_combo_count = 0
+	_combo_box.modulate.a = 0.0
 	_chain_label.modulate.a = 0.0
 	_chain_sub.modulate.a = 0.0
 
@@ -272,16 +289,40 @@ func set_round_over() -> void:
 func get_arrows() -> Array:
 	return _arrows.items
 
-## The enemy the sprint marker is on (null = hidden).
-func get_sprint_marker_target() -> Fighter:
-	return _sprint_target if _sprint_marker.visible else null
+## Combo counter: the count shown (0 = hidden), its text, opacity, the number's
+## scale (> 1 right after a hit) and the move name under it.
+func get_combo_count() -> int:
+	return _combo_count if _combo_box.modulate.a > 0.05 else 0
 
-func get_sprint_marker_rect() -> Rect2:
-	return Rect2(_sprint_marker.center - Vector2.ONE * _sprint_marker.half, Vector2.ONE * _sprint_marker.half * 2.0)
+func get_combo_text() -> String:
+	return _combo_num.text if _combo_box.modulate.a > 0.05 else ""
 
-## Live counter bonus shown on the HUD (0 = no cue).
-func get_counter_cue() -> float:
-	return _counter_bonus if _counter_label.visible else 0.0
+func get_combo_alpha() -> float:
+	return _combo_box.modulate.a
+
+func get_combo_scale() -> float:
+	return _combo_num.scale.x
+
+func get_combo_move() -> String:
+	return _combo_move_label.text if _combo_box.modulate.a > 0.05 else ""
+
+## Counter prompts drawn this frame: [{fighter, counterable, color, key,
+## caption, center (badge, screen px), tip (pointer), on_screen, alpha}].
+func get_counter_prompts() -> Array:
+	return _prompt_items
+
+## The pursuit cue drawn this frame ({} = none): {kind (&"pursue" | &"hang"),
+## fighter (the flying body), text ("DASH: PURSUE" or the hang's choice), key,
+## center, on_screen}.
+func get_pursuit_cue() -> Dictionary:
+	return _cue
+
+## Attackers with an open counter window on the player (drawn or not).
+func get_prompt_attackers() -> Array:
+	var out: Array = []
+	for id in _prompts:
+		out.append(_prompts[id]["fighter"])
+	return out
 
 # --- Build -----------------------------------------------------------------------
 func _build() -> void:
@@ -313,15 +354,12 @@ func _build() -> void:
 	_root.add_child(name_l)
 	_bars = _Bars.new()
 	_bars.position = Vector2(36, 48)
-	_bars.size = Vector2(_Bars.HP_W, 80)
+	_bars.size = Vector2(_Bars.HP_W, _Bars.HP_H)
 	_bars.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root.add_child(_bars)
 	_hp_label = UIKit.label("100", 24, Color.WHITE, true, 6)
 	_hp_label.position = Vector2(36 + _Bars.HP_W + 14, 44)
 	_root.add_child(_hp_label)
-	_focus_label = UIKit.label("FOCUS", 18, UIKit.FOCUS_COLOR, true, 5)
-	_focus_label.position = Vector2(36 + _Bars.FOCUS_W * 3 + _Bars.FOCUS_GAP * 3 + 4, 84)
-	_root.add_child(_focus_label)
 
 	# Mode / wave counter, top-centre.
 	var top := VBoxContainer.new()
@@ -361,6 +399,31 @@ func _build() -> void:
 	_chain_sub.modulate.a = 0.0
 	chain_box.add_child(_chain_sub)
 
+	# Combo counter, left side: a big "7" with "HITS" beside it, the move under.
+	_combo_box = VBoxContainer.new()
+	_combo_box.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	_combo_box.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_combo_box.offset_left = 48.0
+	_combo_box.offset_right = 420.0
+	_combo_box.offset_top = -110.0
+	_combo_box.offset_bottom = 70.0
+	_combo_box.add_theme_constant_override(&"separation", -18)
+	_combo_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_combo_box.modulate.a = 0.0
+	_root.add_child(_combo_box)
+	var combo_row := HBoxContainer.new()
+	combo_row.add_theme_constant_override(&"separation", 10)
+	combo_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	combo_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_combo_box.add_child(combo_row)
+	_combo_num = UIKit.label("", COMBO_SIZE, Color.WHITE, true, 16)
+	combo_row.add_child(_combo_num)
+	_combo_hits = UIKit.label("HITS", 34, UIKit.ACCENT, true, 7)
+	_combo_hits.size_flags_vertical = Control.SIZE_SHRINK_END
+	combo_row.add_child(_combo_hits)
+	_combo_move_label = UIKit.label("", 26, UIKit.TEXT, true, 6)
+	_combo_box.add_child(_combo_move_label)
+
 	# Pop text (upper third) and banner (centre).
 	# Upper band, off the screen centre: when the player faces a wall the hole
 	# is at the centre and must stay visible (anchored by fraction, so it holds
@@ -371,96 +434,27 @@ func _build() -> void:
 	_banner_sub.add_theme_font_override(&"font", UIKit.heavy_font())
 
 	# Key hint, bottom-left.
-	_hint = UIKit.label("F1 controls     F3 debug     Esc pause", 18, UIKit.TEXT_DIM, false, 5)
+	_hint = UIKit.label("F1 controls     F3 debug     Esc pause     %s restart" % UIKit.key_label(&"restart", false),
+		18, UIKit.TEXT_DIM, false, 5)
 	_hint.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_hint.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_hint.position = Vector2(36, -48)
 	_root.add_child(_hint)
 
-	# (Focus mode's world tint is ScreenFX's, below this layer.)
-	# Lock-on marker: corner brackets around the locked target's chest.
-	_lock_marker = _LockMarker.new()
-	_lock_marker.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_lock_marker.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_root.add_child(_lock_marker)
-
-	# Sprint target marker: small white corner brackets on the enemy a sprint
-	# attack would hit (PlayerController.get_sprint_target()).
-	_sprint_marker = _LockMarker.new()
-	_sprint_marker.color = Color(1, 1, 1, 0.95)
-	_sprint_marker.width = 2.5
-	_sprint_marker.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_sprint_marker.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_sprint_marker.visible = false
-	_root.add_child(_sprint_marker)
-
-	# Centre reticle: zone aiming is from the screen centre.
-	_reticle = _Reticle.new()
-	_reticle.set_anchors_preset(Control.PRESET_CENTER)
-	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_root.add_child(_reticle)
-
-	# Counter bonus cue under the reticle ("+2.5 COUNTER") while the bonus is live;
-	# the reticle ring drains over Tuning.COUNTER_BONUS_TIME.
-	_counter_label = UIKit.label("", 26, UIKit.COUNTER_COLOR, true, 6)
-	_counter_label.set_anchors_preset(Control.PRESET_CENTER)
-	_counter_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_counter_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_counter_label.offset_left = -160
-	_counter_label.offset_right = 160
-	_counter_label.offset_top = 30
-	_counter_label.offset_bottom = 64
-	_counter_label.visible = false
-	_root.add_child(_counter_label)
-
-	# Combo counter, left of centre: "4 HITS" over "DMG 80%".
-	var combo_box := VBoxContainer.new()
-	combo_box.set_anchors_preset(Control.PRESET_CENTER_LEFT)
-	combo_box.offset_left = 40.0
-	combo_box.offset_right = 360.0
-	combo_box.offset_top = -40.0
-	combo_box.offset_bottom = 90.0
-	combo_box.add_theme_constant_override(&"separation", -14)
-	combo_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_root.add_child(combo_box)
-	_combo_label = UIKit.label("", 64, Color.WHITE, true, 10)
-	_combo_label.modulate.a = 0.0
-	combo_box.add_child(_combo_label)
-	_combo_sub = UIKit.label("", 24, UIKit.ACCENT, true, 6)
-	_combo_sub.modulate.a = 0.0
-	combo_box.add_child(_combo_sub)
-
-	_charge = _Charge.new()
-	_charge.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_charge.offset_left = -_Charge.W * 0.5
-	_charge.offset_right = _Charge.W * 0.5
-	_charge.offset_top = -190
-	_charge.offset_bottom = -140
-	_charge.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_charge.visible = false
-	_root.add_child(_charge)
-
-	# Action prompts (Upgrade 2 paths, while B still has them): "COUNTER!", "PURSUIT  Dash".
-	_prompt = UIKit.label("", 40, UIKit.ACCENT, true, 8)
-	_prompt.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_prompt.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	_prompt.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_prompt.offset_left = -400
-	_prompt.offset_right = 400
-	_prompt.offset_top = -270
-	_prompt.offset_bottom = -210
-	_prompt.visible = false
-	_root.add_child(_prompt)
-
-	# World popups (impact numbers, ARMOR, EARLY/LATE), drawn under the banners.
+	# World popups (impact numbers, ARMOR, WHIFF), drawn under the banners.
 	_popups = _Popups.new()
 	_popups.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_popups.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_root.add_child(_popups)
 	_root.move_child(_popups, _arrows.get_index() + 1)
 
-	# Duel opponent, top-right: name, HP bar with damage trail, Focus pips.
+	# Counter prompts over the attackers, above the popups.
+	_prompts_draw = _Prompts.new()
+	_prompts_draw.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_prompts_draw.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(_prompts_draw)
+
+	# Duel opponent, top-right: name, HP bar with damage trail.
 	_opp_root = Control.new()
 	_opp_root.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	_opp_root.offset_left = -(OPP_W + 36.0 + 70.0)
@@ -475,9 +469,8 @@ func _build() -> void:
 	_opp_root.add_child(opp_name)
 	_opp_bars = _Bars.new()
 	_opp_bars.hp_w = OPP_W
-	_opp_bars.pips = true
 	_opp_bars.position = Vector2(70.0, 30.0)
-	_opp_bars.size = Vector2(OPP_W, 70)
+	_opp_bars.size = Vector2(OPP_W, _Bars.HP_H)
 	_opp_bars.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_opp_root.add_child(_opp_bars)
 	_opp_hp_label = UIKit.label("200", 24, Color.WHITE, true, 6)
@@ -557,9 +550,12 @@ func _process(_delta: float) -> void:
 	_update_opponent(t, dt)
 	_update_popups(t)
 	_update_chain(t)
+	_update_combo(t)
+	_update_prompts(t)
+	_update_pursuit_cue(t)
+	_prompts_draw.items = _prompt_items + ([_cue] if not _cue.is_empty() else [])
+	_prompts_draw.queue_redraw()
 	_update_arrows(t, dt)
-	_update_sprint_marker(t)
-	_update_counter_cue(t)
 	if _hint.visible and t > _hint_until:
 		_hint.modulate.a = maxf(_hint.modulate.a - dt * 1.5, 0.0)
 		if _hint.modulate.a <= 0.0:
@@ -572,6 +568,10 @@ func _process(_delta: float) -> void:
 		if _debug_t <= 0.0:
 			_debug_t = DEBUG_REFRESH
 			_debug_label.text = _debug_text()
+
+## Prompts name the device the player is using: every event updates it.
+func _input(event: InputEvent) -> void:
+	UIKit.note_input(event)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed(&"help"):
@@ -599,88 +599,16 @@ func _update_player_bars(t: float, dt: float) -> void:
 		_hp_delayed = move_toward(_hp_delayed, _hp_shown, dt * HP_DRAIN)
 	_bars.hp = _hp_shown
 	_bars.hp_delayed = _hp_delayed
-	_update_focus_bars(t)
-	var focus_on := TimeDirector.is_focus_active()
-	_reticle.visible = not _round_over and not player.is_down()
-	_reticle.focus = focus_on
-	_update_lock_marker(t)
-	_reticle.queue_redraw()
-	if _combo_count > 0 and t - _combo_at > COMBO_HOLD:
-		_combo_count = 0
-		var tw := _tween()
-		tw.tween_property(_combo_label, ^"modulate:a", 0.0, 0.3)
-		tw.parallel().tween_property(_combo_sub, ^"modulate:a", 0.0, 0.3)
 	_bars.low = frac < 0.25
 	_bars.pulse = t
 	_bars.queue_redraw()
-	_update_combat_cues(t)
 	_hp_label.text = "%d" % ceili(player.hp)
-
-## Focus: 3 bars, full bars bright (each costs a whole one), the partial one
-## dim. A spent bar flashes out; Focus mode shows its 2 s draining under the bars.
-func _update_focus_bars(t: float) -> void:
-	var f := player.focus
-	if _focus_last >= 0.0 and f < _focus_last - 0.05:
-		_bars.ghost_from = f
-		_bars.ghost_to = _focus_last
-		_bars.ghost_t0 = t
-	elif _focus_last >= 0.0 and floorf(f + 1e-4) > floorf(_focus_last + 1e-4):
-		_bars.filled_bar = int(floorf(f + 1e-4)) - 1
-		_bars.filled_t0 = t
-	_focus_last = f
-	_bars.focus = f
-	_bars.now = t
-	var focus_on := TimeDirector.is_focus_active()
-	if focus_on and not _bars.focus_active and t - _focus_mode_t0 > 0.1:
-		_focus_mode_t0 = t  # Focus mode began without a focus_started from the player
-	_bars.focus_active = focus_on
-	_bars.mode_left =clampf(1.0 - (t - _focus_mode_t0) / Tuning.FOCUS_MODE_TIME, 0.0, 1.0) if focus_on else -1.0
-	_focus_label.text = "FOCUS MODE" if focus_on else "FOCUS"
-
-## Charge meter and action prompts from the player's CombatController
-## (called dynamically: these queries are B's additions to the contract).
-func _update_combat_cues(t: float) -> void:
-	var c: Node = player.combat
-	if c == null or player.is_dead():
-		_charge.visible = false
-		_prompt.visible = false
-		return
-	# Charge: events drive it (charge_started / level / released); polling
-	# get_charge_level() covers a missed event.
-	var polled: int = c.call(&"get_charge_level") if c.has_method(&"get_charge_level") else 0
-	if polled > 0 and not _charging:
-		_charging = true
-		_charge_t0 = t - Tuning.CHARGE_LEVELS[clampi(polled - 1, 0, 2)]
-	if _charging:
-		_charge_level = maxi(_charge_level, polled)
-	var show_charge := _charging or t - _charge_release_at < CHARGE_FLASH
-	_charge.visible = show_charge
-	if show_charge:
-		_charge.level = _charge_level
-		_charge.fill = clampf((t - _charge_t0) / Tuning.CHARGE_LEVELS[2], 0.0, 1.0) if _charging else 1.0
-		_charge.released = not _charging
-		_charge.move_name = String(_charge_move).to_upper()
-		_charge.pulse = t
-		_charge.queue_redraw()
-	var text := ""
-	var color := UIKit.ACCENT
-	if c.has_method(&"can_counter") and c.call(&"can_counter"):
-		text = "COUNTER!   Punch / Kick"
-	elif c.has_method(&"can_pursue") and c.call(&"can_pursue"):
-		text = "PURSUIT   Dash"
-		color = UIKit.FOCUS_COLOR
-	_prompt.visible = text != ""
-	if _prompt.visible:
-		_prompt.text = text
-		_prompt.add_theme_color_override(&"font_color", color)
-		_prompt.modulate.a = 0.75 + 0.25 * sin(t * 20.0)
 
 func _update_opponent(t: float, dt: float) -> void:
 	if not _opp_root.visible:
 		return
 	if not is_instance_valid(opponent):
 		_opp_bars.hp = 0.0
-		_opp_bars.focus = 0.0
 		_opp_hp_label.text = "0"
 		_opp_bars.queue_redraw()
 		return
@@ -696,7 +624,6 @@ func _update_opponent(t: float, dt: float) -> void:
 		_opp_hp_delayed = move_toward(_opp_hp_delayed, frac, dt * HP_DRAIN)
 	_opp_bars.hp = frac
 	_opp_bars.hp_delayed = _opp_hp_delayed
-	_opp_bars.focus = f.focus
 	_opp_bars.pulse = t
 	_opp_bars.queue_redraw()
 	_opp_hp_label.text = "%d" % ceili(f.hp)
@@ -769,31 +696,6 @@ func get_banner_rects() -> Array[Rect2]:
 func get_popup_rects() -> Array[Rect2]:
 	return _popup_rects
 
-## Corner brackets on the locked target (sized to ~0.5 m at its distance, at
-## least LOCK_MARKER_MIN px so it reads at 7 m and at any resolution).
-func _update_lock_marker(t: float) -> void:
-	var rig := get_tree().get_first_node_in_group(&"camera_rig") as CameraRig
-	var lock: Fighter = rig.get_lock_target() if rig != null else null
-	_reticle.locked = lock != null
-	var cam := get_viewport().get_camera_3d()
-	if lock == null or cam == null or _round_over:
-		_lock_marker.visible = false
-		return
-	var chest := lock.get_aim_point()
-	if cam.is_position_behind(chest):
-		_lock_marker.visible = false
-		return
-	var c := cam.unproject_position(chest)
-	var edge := cam.unproject_position(chest + cam.global_basis.x * LOCK_MARKER_M)
-	_lock_marker.visible = true
-	_lock_marker.center = c
-	_lock_marker.half = maxf(c.distance_to(edge), LOCK_MARKER_MIN)
-	_lock_marker.pulse = t
-	_lock_marker.queue_redraw()
-
-func is_lock_marker_visible() -> bool:
-	return _lock_marker.visible
-
 func _update_chain(t: float) -> void:
 	if _chain > 0 and t - _chain_at > CHAIN_HOLD:
 		_chain = 0
@@ -801,10 +703,294 @@ func _update_chain(t: float) -> void:
 		tw.tween_property(_chain_label, ^"modulate:a", 0.0, 0.3)
 		tw.parallel().tween_property(_chain_sub, ^"modulate:a", 0.0, 0.3)
 
+# --- Combo counter -----------------------------------------------------------------
+## Chain hits from GameEvents.chain_hit (count, move); the counter shows from
+## COMBO_MIN hits, pops on each, holds COMBO_END_HOLD after chain_ended and
+## fades over COMBO_FADE. Fallback: CombatController.get_chain_count(), once it
+## has reported this chain, ends it when it drops to 0 (a missed chain_ended).
+func _update_combo(t: float) -> void:
+	_poll_chain(t)
+	if _combo_count > 0 and _combo_end_at < 0.0 and t - _combo_hit_at > COMBO_STALE:
+		_combo_end_at = t - COMBO_END_HOLD  # no hit and no chain_ended for a while: fade now
+	var a := 0.0
+	if _combo_count >= COMBO_MIN and not _round_over:
+		a = 1.0
+		if _combo_end_at >= 0.0:
+			a = clampf(1.0 - (t - _combo_end_at - COMBO_END_HOLD) / COMBO_FADE, 0.0, 1.0)
+	if _combo_end_at >= 0.0 and a <= 0.0:
+		_combo_count = 0
+		_combo_end_at = -1.0
+		_combo_polled = false
+	_combo_box.modulate.a = a
+	var k := clampf((t - _combo_hit_at) / COMBO_POP_TIME, 0.0, 1.0)
+	_combo_num.pivot_offset = Vector2(0.0, _combo_num.size.y * 0.6)
+	_combo_num.scale = Vector2.ONE * lerpf(COMBO_POP, 1.0, ease(k, 0.4))
+
+func _poll_chain(t: float) -> void:
+	if player == null or not is_instance_valid(player) or player.combat == null:
+		return
+	var n := player.combat.get_chain_count()
+	if n > 0:
+		_combo_polled = true
+		if n > _combo_count:
+			_set_combo(n, player.combat.current_move_id(), t)
+	elif _combo_polled and _combo_count > 0 and _combo_end_at < 0.0:
+		_combo_end_at = t
+		_combo_polled = false
+
+func _set_combo(count: int, move_id: StringName, t: float) -> void:
+	_combo_count = count
+	_combo_hit_at = t
+	_combo_end_at = -1.0
+	if move_id != &"":
+		_combo_move = move_id
+	_combo_num.text = "%d" % count
+	var heat := clampf(float(count - COMBO_MIN) / float(COMBO_HOT - COMBO_MIN), 0.0, 1.0)
+	_combo_num.add_theme_color_override(&"font_color", Color.WHITE.lerp(UIKit.ACCENT, heat))
+	_combo_move_label.text = String(_combo_move).replace("_", " ").to_upper()
+
+func _on_chain_hit(attacker: Node3D, _victim: Node3D, move_id: StringName, count: int) -> void:
+	if not _is_player(attacker) or _round_over:
+		return
+	_set_combo(maxi(count, 1), move_id, TimeDirector.now())
+
+func _on_chain_ended(attacker: Node3D, count: int) -> void:
+	if not _is_player(attacker) or _combo_count <= 0:
+		return
+	if count > _combo_count:
+		_set_combo(count, _combo_move, _combo_hit_at)
+	_combo_end_at = TimeDirector.now()
+	_combo_polled = false
+
+# --- Counter prompts ----------------------------------------------------------------
+func _on_counter_window(attacker: Node3D, target: Node3D, open: bool, counterable: bool) -> void:
+	if not _is_player(target) or attacker == null:
+		return
+	var id := attacker.get_instance_id()
+	if open and not _round_over and attacker is Fighter:
+		_prompts[id] = {"fighter": attacker, "counterable": counterable, "t0": TimeDirector.now(), "seen_open": false}
+	else:
+		_prompts.erase(id)
+		_prompt_closed_at[id] = TimeDirector.now()
+
+## Cross-check with Defence, which reads the same windows: an open window whose
+## counter_window event was missed still gets its prompt, and the colour follows
+## the attacker's current attack (Defence.get_counterable_attackers /
+## get_uncounterable_attackers). A prompt its close event ended stays closed for
+## PROMPT_REOPEN_GAP, so the poll never flickers it back.
+func _cross_check_prompts(t: float) -> void:
+	if _round_over or player == null or not is_instance_valid(player) or player.defence == null:
+		return
+	var d := player.defence
+	for counterable: bool in [true, false]:
+		var list: Array = []
+		if counterable:
+			list = d.get_counterable_attackers()
+		elif d.has_method(&"get_uncounterable_attackers"):
+			list = d.call(&"get_uncounterable_attackers")
+		for f in list:
+			if not is_instance_valid(f):
+				continue
+			var id: int = (f as Object).get_instance_id()
+			if _prompts.has(id):
+				_prompts[id]["counterable"] = counterable
+			elif t - float(_prompt_closed_at.get(id, -INF)) > PROMPT_REOPEN_GAP:
+				_prompts[id] = {"fighter": f, "counterable": counterable, "t0": t, "seen_open": true}
+	if _prompt_closed_at.size() > 64:
+		_prompt_closed_at.clear()
+
+## Badges over the attackers (or at the screen edge toward one off screen),
+## from counter_window events cross-checked with Defence's open windows.
+## A prompt goes when its window closes, the attacker dies, goes down, reacts
+## to a hit, is grabbed or freed, or after PROMPT_MAX_AGE. When the attacker's CombatController has
+## reported its window open (is_counter_window_open), it closing ends the prompt too.
+func _update_prompts(t: float) -> void:
+	_cross_check_prompts(t)
+	var cam := get_viewport().get_camera_3d()
+	var items: Array = []
+	for id in _prompts.keys():
+		var e: Dictionary = _prompts[id]
+		var fv = e["fighter"]  # untyped: may be a freed instance
+		var gone := _round_over or not is_instance_valid(fv) or not (fv is Fighter)
+		if not gone:
+			var f := fv as Fighter
+			# Reacting or held fighters cannot attack: their window is over even
+			# if the close event has not arrived yet.
+			gone = f.is_dead() or f.is_down() or f.is_reacting() or f.is_held() \
+				or t - float(e["t0"]) > PROMPT_MAX_AGE
+			if not gone and f.combat != null and player != null and is_instance_valid(player):
+				if f.combat.is_counter_window_open(player):
+					e["seen_open"] = true
+				elif e["seen_open"]:
+					gone = true
+		if gone:
+			_prompts.erase(id)
+			continue
+		if cam == null:
+			continue
+		items.append(_prompt_item(cam, fv as Fighter, bool(e["counterable"]), t - float(e["t0"]), t))
+	_prompt_items = items
+
+func _prompt_item(cam: Camera3D, f: Fighter, counterable: bool, age: float, t: float) -> Dictionary:
+	var head := f.get_ground_position() + Vector3.UP * (f.get_height() + PROMPT_HEAD_UP)
+	var it := _badge_item(cam, head, UIKit.key_label(&"counter" if counterable else &"dash"),
+		"COUNTER" if counterable else "DODGE", UIKit.TELL_STRIKE if counterable else UIKit.TELL_GRAB, age, t)
+	it["fighter"] = f
+	it["counterable"] = counterable
+	return it
+
+## A badge with `key` written in it and `caption` above, pointing at world
+## point `anchor` (or toward the screen edge when it is off screen).
+func _badge_item(cam: Camera3D, anchor: Vector3, key: String, caption: String, color: Color, age: float, t: float) -> Dictionary:
+	var font := UIKit.heavy_font()
+	var key_size := _Prompts.key_font_size(key)
+	var w := maxf(PROMPT_H, font.get_string_size(key, HORIZONTAL_ALIGNMENT_LEFT, -1, key_size).x + 26.0)
+	var half := Vector2(w, PROMPT_H) * 0.5
+	var vp := get_viewport().get_visible_rect().size
+	var on_screen := _is_on_screen(cam, anchor)
+	var tip: Vector2
+	var dir: Vector2  # pointer direction, badge -> anchor
+	if on_screen:
+		tip = cam.unproject_position(anchor)
+		dir = Vector2.DOWN
+	else:
+		var edge := _edge_arrow(cam, anchor)
+		tip = edge["pos"]
+		dir = Vector2.from_angle(float(edge["angle"]))
+	var reach := absf(dir.x) * half.x + absf(dir.y) * half.y
+	var center := tip - dir * (reach + PROMPT_GAP)
+	var top := half.y + _Prompts.CAPTION_SIZE + PROMPT_MARGIN  # room for the caption above
+	center.x = clampf(center.x, half.x + PROMPT_MARGIN, maxf(vp.x - half.x - PROMPT_MARGIN, half.x + PROMPT_MARGIN))
+	center.y = clampf(center.y, top, maxf(vp.y - half.y - PROMPT_MARGIN, top))
+	var k := clampf(age / PROMPT_IN, 0.0, 1.0)
+	return {"color": color, "key": key, "key_size": key_size, "caption": caption,
+		"center": center, "tip": tip, "dir": dir, "size": Vector2(w, PROMPT_H), "on_screen": on_screen,
+		"scale": lerpf(1.6, 1.0, ease(k, 0.4)), "alpha": k, "pulse": fposmod(t * 2.2, 1.0)}
+
+# --- Pursuit cues (God path) --------------------------------------------------------
+## After a launch the player caused, while Dash would pursue: "DASH: PURSUE"
+## (the Dash key in the badge) near the flying body. During the pursuit hang:
+## "ATTACK: LAUNCH  /  BACK + ATTACK: SPIKE" at the body. Sources, most
+## authoritative first: Defence.get_pursuit_target() for the hang, Defence's
+## get_pursuit_window_target() for the window when it has one, else this HUD's
+## mirror of Defence's rule (a launch hit_landed by the player opens it for the
+## hit's hitstop + Tuning.PURSUIT_WINDOW; no window with Tuning.debug_pursuit_max
+## at 0 or the chain spent, or for a spike).
+func _update_pursuit_cue(t: float) -> void:
+	var kind: StringName = &""
+	var body: Fighter = null
+	if not _round_over and player != null and is_instance_valid(player) and not player.is_dead():
+		var d := player.defence
+		var hang = null
+		if d != null and d.has_method(&"get_pursuit_target"):
+			hang = d.call(&"get_pursuit_target")
+		elif t <= _hang_until:
+			hang = _hang_victim
+		if is_instance_valid(hang) and hang is Fighter and not (hang as Fighter).is_dead():
+			kind = &"hang"
+			body = hang as Fighter
+		else:
+			var pv = null
+			if d != null and d.has_method(&"get_pursuit_window_target"):
+				pv = d.call(&"get_pursuit_window_target")
+			elif t <= _pursue_until:
+				pv = _pursue_victim
+			if is_instance_valid(pv) and pv is Fighter and _pursuable(pv as Fighter):
+				kind = &"pursue"
+				body = pv as Fighter
+	var cam := get_viewport().get_camera_3d()
+	if kind == &"" or cam == null:
+		_cue = {}
+		_cue_kind = &""
+		return
+	if kind != _cue_kind:
+		_cue_t0 = t
+		_cue_kind = kind
+	var at := body.get_center_of_mass() + Vector3.UP * PURSUE_ABOVE
+	if kind == &"pursue":
+		_cue = _badge_item(cam, at, UIKit.key_label(&"dash"), PURSUE_CAPTION, UIKit.PURSUIT_COLOR, t - _cue_t0, t)
+		_cue["text"] = PURSUE_CAPTION
+	else:
+		_cue = _badge_item(cam, at, HANG_TEXT, "", UIKit.PURSUIT_COLOR, t - _cue_t0, t)
+		_cue["text"] = HANG_TEXT
+	_cue["kind"] = kind
+	_cue["fighter"] = body
+
+## A launched body Dash may still chase: flying, alive, pursuit unlocked
+## (Tuning.debug_pursuit_max) and the chain on this flight not spent.
+func _pursuable(v: Fighter) -> bool:
+	if v.is_dead() or not v.is_launched() or Tuning.debug_pursuit_max <= 0:
+		return false
+	var d := player.defence
+	if d != null and d.has_method(&"pursuit_chain") and int(d.call(&"pursuit_chain", v)) >= Tuning.debug_pursuit_max:
+		return false
+	return true
+
+## A launch by the player opens the pursuit window, the mirror of Defence's
+## rule (a launch tier, or Reaction.LAUNCH for an untiered hit); a spike
+## (HitInfo.react &"spike") closes it for that body.
+func _note_player_launch(info: HitInfo) -> void:
+	var v := info.victim as Fighter
+	if v == null or not is_instance_valid(v) or info.result != HitInfo.Result.HIT:
+		return
+	if _hang_victim == v:
+		_hang_victim = null  # the pursuit hit landed
+	if info.react == &"spike":
+		if _pursue_victim == v:
+			_pursue_victim = null
+		return
+	var launch := HitInfo.is_launch_tier(info.tier) if info.tier != HitInfo.Tier.NONE \
+		else info.reaction == HitInfo.Reaction.LAUNCH
+	if not launch or v.is_dead():
+		return
+	var now := TimeDirector.now()
+	var stop := info.hitstop if info.hitstop > 0.0 else LAUNCH_HITSTOP_FALLBACK
+	_pursue_victim = v
+	_pursue_t0 = now
+	_pursue_until = now + stop + Tuning.PURSUIT_WINDOW
+
+func _on_pursuit(attacker: Node3D, victim: Node3D) -> void:
+	if not _is_player(attacker):
+		return
+	_pursue_victim = null  # this launch's window is used; the relaunch opens the next
+	_pursue_until = -INF
+	_hang_victim = victim
+	_hang_until = TimeDirector.now() + Tuning.PURSUIT_HANG + HANG_GRACE
+
+func _on_teleported(fighter: Node3D, _from: Vector3, _to: Vector3, kind: StringName) -> void:
+	if _is_player(fighter) and kind != &"pursuit":
+		pop_text("TELEPORT", UIKit.PURSUIT_COLOR, 0.7)
+
+## Teleport with no free spot behind the attacker: a sidestep instead.
+func _on_sidestepped(fighter: Node3D, _direction: Vector3) -> void:
+	if _is_player(fighter) and player != null:
+		popup_at(player.get_aim_point() + Vector3.UP * 0.7, "SIDESTEP", Color(0.85, 0.9, 1.0), 28, 0.7)
+
+func _on_countered(defender: Node3D, attacker: Node3D) -> void:
+	if attacker != null:
+		_prompts.erase(attacker.get_instance_id())
+		_prompt_closed_at[attacker.get_instance_id()] = TimeDirector.now()
+	if _is_player(defender):
+		pop_text("COUNTER", UIKit.TELL_STRIKE, 0.7)
+
+## A Counter press with nothing to counter: WHIFF, or DODGE IT when a blue
+## (uncounterable) attack is the one coming.
+func _on_counter_whiffed(defender: Node3D) -> void:
+	if not _is_player(defender) or player == null:
+		return
+	var blue := false
+	for id in _prompts:
+		if not bool(_prompts[id]["counterable"]):
+			blue = true
+	popup_at(player.get_aim_point() + Vector3.UP * 0.7, "DODGE IT" if blue else "WHIFF",
+		UIKit.TELL_GRAB if blue else UIKit.TEXT_DIM, 28, 0.7)
+
+# --- Off-screen arrows -------------------------------------------------------------
 ## Off-screen attack arrows (Feel Reference: Off-screen attackers): from a
 ## wind-up that started off screen until its first active frame (attack_active),
-## orange for strikes, blue for grabs. The wind-up's own clock is game time
-## (enemy frame data slows in Focus mode), so the fallback expiry is too.
+## orange for strikes, blue for the rest (grabs, the charge). An attacker with a
+## counter prompt shows the prompt at the screen edge instead. The wind-up's own
+## clock is game time, so the fallback expiry is too.
 func _update_arrows(t: float, dt: float) -> void:
 	var game_dt := 0.0 if get_tree().paused else dt * Engine.time_scale
 	var cam := get_viewport().get_camera_3d()
@@ -816,18 +1002,18 @@ func _update_arrows(t: float, dt: float) -> void:
 		var fv = e["fighter"]  # untyped: may be a freed instance
 		var ended := false
 		if is_instance_valid(fv) and fv is Fighter and (fv as Fighter).combat != null:
-			# Wind-up over once the attack we saw stops (parried, interrupted, cancelled).
+			# Wind-up over once the attack we saw stops (countered, interrupted, cancelled).
 			if (fv as Fighter).combat.is_attacking():
 				e["seen_attacking"] = true
 			elif e.get("seen_attacking", false):
 				ended = true
 		if ended or float(e["left"]) < -ARROW_GRACE or not is_instance_valid(fv) or not (fv is Fighter) or fv.is_dead() or fv.is_down():
 			_tells.remove_at(i)
-		elif e["arrow"] and cam != null and not _round_over:
+		elif e["arrow"] and cam != null and not _round_over and not _prompts.has((fv as Object).get_instance_id()):
 			var p: Vector3 = (fv as Fighter).get_aim_point()
 			if not _is_on_screen(cam, p):
 				var a := _edge_arrow(cam, p)
-				a["color"] = UIKit.TELL_GRAB if e["kind"] == &"grab" else UIKit.TELL_STRIKE
+				a["color"] = UIKit.TELL_STRIKE if e["kind"] == &"strike" else UIKit.TELL_GRAB
 				a["alpha"] = 0.75 + 0.25 * sin(t * 18.0)
 				a["fighter"] = fv
 				items.append(a)
@@ -841,45 +1027,6 @@ func _is_on_screen(cam: Camera3D, p: Vector3) -> bool:
 	if rig != null and rig.get_camera() == cam:
 		return rig.is_on_screen(p)
 	return _on_screen(cam, p)
-
-## F2: white corner brackets on the enemy a sprint attack would hit, while sprinting.
-func _update_sprint_marker(t: float) -> void:
-	var target: Fighter = null
-	if player != null and is_instance_valid(player) and not _round_over and not player.is_down() \
-			and player.brain != null and player.brain.has_method(&"get_sprint_target"):
-		target = player.brain.call(&"get_sprint_target") as Fighter
-	var cam := get_viewport().get_camera_3d()
-	if target == null or not is_instance_valid(target) or cam == null:
-		_sprint_target = null
-		_sprint_marker.visible = false
-		return
-	var chest := target.get_aim_point()
-	if cam.is_position_behind(chest):
-		_sprint_marker.visible = false
-		return
-	if target != _sprint_target:
-		_sprint_target = target
-		_sprint_target_at = t
-	var c := cam.unproject_position(chest)
-	var edge := cam.unproject_position(chest + cam.global_basis.x * SPRINT_MARKER_M)
-	var k := clampf((t - _sprint_target_at) / SPRINT_MARKER_IN, 0.0, 1.0)
-	_sprint_marker.visible = true
-	_sprint_marker.center = c
-	_sprint_marker.half = maxf(c.distance_to(edge), SPRINT_MARKER_MIN) * lerpf(1.6, 1.0, ease(k, 0.4))
-	_sprint_marker.alpha = k
-	_sprint_marker.pulse = 0.0
-	_sprint_marker.queue_redraw()
-
-## Counter bonus cue: "+2.5 COUNTER" under the reticle, the ring drains over the
-## bonus's real-time window; gone when it is used or runs out.
-func _update_counter_cue(t: float) -> void:
-	var left := 1.0 - (t - _counter_t0) / Tuning.COUNTER_BONUS_TIME
-	var live := _counter_bonus > 0.0 and left > 0.0 and not _round_over
-	_counter_label.visible = live
-	_reticle.counter_left = left if live else -1.0
-	if live:
-		_counter_label.text = "+%s COUNTER" % String.num(_counter_bonus, 1)
-		_counter_label.modulate.a = 0.8 + 0.2 * sin(t * 16.0)
 
 func _on_screen(cam: Camera3D, p: Vector3) -> bool:
 	if cam.is_position_behind(p):
@@ -905,16 +1052,6 @@ func _edge_arrow(cam: Camera3D, p: Vector3) -> Dictionary:
 # --- Events -------------------------------------------------------------------------
 func _is_player(n: Node3D) -> bool:
 	return player != null and n == player
-
-func _on_perfect_dodge(defender: Node3D, _attacker: Node3D) -> void:
-	if not _is_player(defender):
-		return
-	flash(Color(0.75, 0.93, 1.0, 0.42), 0.3)
-	pop_text("PERFECT", UIKit.PERFECT_COLOR, 0.8)
-
-func _on_teleport_counter(defender: Node3D, _target: Node3D) -> void:
-	if _is_player(defender):
-		pop_text("COUNTER", UIKit.ACCENT, 0.9)
 
 func _on_wall_broken(wall: Node3D, _position: Vector3, _energy: float, _velocity: Vector3) -> void:
 	if wall != null and _suppressed_walls.has(wall.get_instance_id()):
@@ -973,16 +1110,12 @@ func _on_grab_broken(_grabber: Node3D, victim: Node3D, reversal: bool) -> void:
 	if _is_player(victim):
 		pop_text("REVERSAL" if reversal else "GRAB BREAK", Color(1.0, 0.55, 0.5), 0.8)
 
-func _on_pursuit(attacker: Node3D, _victim: Node3D) -> void:
-	if _is_player(attacker):
-		pop_text("PURSUIT", UIKit.FOCUS_COLOR, 0.6)
-
-func _on_air_recovery(f: Node3D) -> void:
-	if _is_player(f):
-		pop_text("RECOVER", UIKit.FOCUS_COLOR, 0.6)
-
 func _on_hit_landed(info: HitInfo) -> void:
-	if info == null or not _is_player(info.victim):
+	if info == null:
+		return
+	if _is_player(info.attacker):
+		_note_player_launch(info)
+	if not _is_player(info.victim):
 		return
 	_hurt.modulate.a = clampf(0.45 + info.damage / 120.0, 0.45, 1.0)
 	var tw := _tween()
@@ -998,8 +1131,8 @@ func _on_body_bowled(_flyer: Node3D, _victim: Node3D, _energy: float, chain: int
 	_chain_sub.modulate.a = 1.0
 	_pop(_chain_label, 1.7, CHAIN_HOLD + 1.0)
 
-## Every enemy wind-up is tracked (parry EARLY / LATE reads them); one that
-## starts off screen gets an edge arrow until its first active frame.
+## Every enemy wind-up is tracked; one that starts off screen gets an edge
+## arrow until its first active frame.
 func _on_attack_tell(attacker: Node3D, kind: StringName, duration: float) -> void:
 	var f := attacker as Fighter
 	if f == null or _is_player(f) or _round_over:
@@ -1014,147 +1147,147 @@ func _on_attack_tell(attacker: Node3D, kind: StringName, duration: float) -> voi
 func _on_attack_active(attacker: Node3D, _move_id: StringName) -> void:
 	if attacker == null or _is_player(attacker):
 		return
-	_last_enemy_active = TimeDirector.now()
 	for i in range(_tells.size() - 1, -1, -1):
 		if _tells[i]["fighter"] == attacker:
 			_tells.remove_at(i)
-
-# --- Round 5 defence feedback ------------------------------------------------------------
-func _on_parried(defender: Node3D, attacker: Node3D) -> void:
-	if _is_player(defender):
-		pop_text("PARRY", Color.WHITE, 0.7)
-	# The parry cancels the attack before its active frame: its arrow goes now.
-	for i in range(_tells.size() - 1, -1, -1):
-		if _tells[i]["fighter"] == attacker:
-			_tells.remove_at(i)
-
-## A Block tap with nothing in its window: say whether it came early or late
-## against the nearest enemy wind-up (nothing when no attack was coming).
-func _on_parry_whiffed(defender: Node3D) -> void:
-	if not _is_player(defender) or player == null:
-		return
-	var text := parry_whiff_text()
-	if text != "":
-		popup_at(player.get_aim_point() + Vector3.UP * 0.7, text, Color(1.0, 0.92, 0.45), 30, 0.7)
-
-## "EARLY" when an enemy wind-up is still more than the parry window from its
-## first active frame, "LATE" when one went active within PARRY_LATE_WINDOW, else "".
-func parry_whiff_text() -> String:
-	var soonest := INF
-	for e in _tells:
-		var fv = e["fighter"]
-		if is_instance_valid(fv):
-			soonest = minf(soonest, float(e["left"]) / maxf(Engine.time_scale, 0.05))  # real s to active
-	if soonest < INF and soonest > Tuning.PARRY_WINDOW:
-		return "EARLY"
-	if TimeDirector.now() - _last_enemy_active < PARRY_LATE_WINDOW:
-		return "LATE"
-	return ""
-
-func _on_teleported(fighter: Node3D, _from: Vector3, _to: Vector3, kind: StringName) -> void:
-	if not _is_player(fighter):
-		return
-	if kind == &"pursuit":
-		pop_text("PURSUIT", UIKit.FOCUS_COLOR, 0.6)
-	else:
-		pop_text("TELEPORT", UIKit.FOCUS_COLOR, 0.8)
-
-func _on_sidestepped(fighter: Node3D, _direction: Vector3) -> void:
-	if not _is_player(fighter):
-		return
-	var short := player.focus + 1e-4 < Tuning.TELEPORT_COST
-	popup_at(player.get_aim_point() + Vector3.UP * 0.7, "SIDESTEP" if not short else "SIDESTEP  ·  NO FOCUS",
-		Color(0.85, 0.9, 1.0), 28, 0.7)
-
-func _on_counter_bonus_changed(fighter: Node3D, bonus: float) -> void:
-	if not _is_player(fighter):
-		return
-	_counter_bonus = maxf(bonus, 0.0)
-	_counter_t0 = TimeDirector.now()
-
-func _on_focus_started(fighter: Node3D) -> void:
-	if _is_player(fighter):
-		_focus_mode_t0 = TimeDirector.now()
-
-func _on_charge_started(fighter: Node3D, move_id: StringName) -> void:
-	if not _is_player(fighter):
-		return
-	_charging = true
-	_charge_level = 0
-	_charge_move = move_id
-	_charge_t0 = TimeDirector.now()
-
-func _on_charge_level_changed(fighter: Node3D, level: int) -> void:
-	if not _is_player(fighter):
-		return
-	if not _charging:
-		_charging = true
-		_charge_t0 = TimeDirector.now() - Tuning.CHARGE_LEVELS[clampi(level - 1, 0, 2)]
-	_charge_level = level
-	_charge.level_pulse = 1.0
-
-func _on_charge_released(fighter: Node3D, _move_id: StringName, level: int) -> void:
-	if not _is_player(fighter):
-		return
-	_charge_level = level
-	_charging = false
-	_charge_release_at = TimeDirector.now()
-
-func _on_combo_progress(attacker: Node3D, count: int, damage_scale: float) -> void:
-	if not _is_player(attacker) or count < 2:
-		return
-	_combo_count = count
-	_combo_at = TimeDirector.now()
-	_combo_label.text = "%d HITS" % count
-	_combo_sub.text = "DMG %d%%" % roundi(damage_scale * 100.0)
-	_combo_sub.add_theme_color_override(&"font_color", UIKit.TEXT if damage_scale >= 0.99 else UIKit.ACCENT)
-	_combo_sub.modulate.a = 1.0
-	_pop(_combo_label, 1.3, COMBO_HOLD + 1.0)
-
-func _on_combo_ended(attacker: Node3D, _count: int) -> void:
-	if not _is_player(attacker):
-		return
-	_combo_at = minf(_combo_at, TimeDirector.now() - COMBO_HOLD + 0.4)
-
-func get_combo_text() -> String:
-	return _combo_label.text if _combo_label.modulate.a > 0.05 else ""
-
-func get_charge_state() -> Dictionary:
-	return {"visible": _charge.visible, "level": _charge_level, "charging": _charging}
 
 func _on_wave_started(index: int, total: int) -> void:
 	set_wave(index, total)
 
 # --- Debug -----------------------------------------------------------------------------
-## The parts of a hit's power score P for the overlay: base, charge_mult, their
-## product, speed / counter / finisher bonuses, P and the tier. HitInfo.power_base
-## may hold the raw base or base x charge: whichever adds up to P is used.
-static func power_breakdown(info: HitInfo) -> Dictionary:
-	var cm := Power.charge_mult(info.charge_level)
-	var rest := info.speed_bonus + info.counter_bonus + info.finisher_bonus
-	var base := info.power_base
-	if absf(info.power_base + rest - info.power) < 0.02 and absf(info.power_base * cm + rest - info.power) >= 0.02:
-		base = info.power_base / cm  # power_base already holds base x charge
-	return {"base": base, "charge_mult": cm, "base_part": base * cm, "speed": info.speed_bonus,
-		"counter": info.counter_bonus, "finisher": info.finisher_bonus, "power": info.power,
-		"tier": HitInfo.tier_name(info.tier)}
-
+## One player hit for the overlay: move, Round 7 reaction, damage, weight, push,
+## stun, chain index, payoff (on the victim's state), counter / drive.
 static func describe_hit(info: HitInfo) -> String:
 	if info == null:
 		return "-"
-	var b := power_breakdown(info)
+	var react := String(info.react) if info.react != &"" else String(HitInfo.tier_name(info.tier))
 	var flags := PackedStringArray()
-	if info.sprint:
-		flags.append("sprint")
-	if info.ground_strike:
-		flags.append("ground")
-	if info.pursuit:
-		flags.append("pursuit")
-	if info.charge_level > 0:
-		flags.append("L%d" % info.charge_level)
-	return "P %5.2f %-11s %s %s  dmg %.1f\n  = base %.2f x charge %.2f (%.2f) + speed %.2f + counter %.2f + finisher %.2f" % [
-		b["power"], String(b["tier"]).to_upper(), String(info.move_id), " ".join(flags), info.damage,
-		b["base"], b["charge_mult"], b["base_part"], b["speed"], b["counter"], b["finisher"]]
+	if info.payoff:
+		flags.append("PAYOFF on %s" % (String(info.victim_state) if info.victim_state != &"" else "?"))
+	if info.counter:
+		flags.append("COUNTER")
+	if info.drive:
+		flags.append("DRIVE")
+	return "%-11s %-9s dmg %5.1f  w %.2f  push %.2f  stun %.2f  chain #%d  %s" % [
+		String(info.move_id), react.to_upper(), info.damage, info.weight, info.push, info.stun,
+		info.chain_index, " ".join(flags)]
+
+## The player's combat state for the overlay, read through the Round 7 contract
+## (CombatController, Defence, Traversal, Carry, Fighter stubs) and, when B adds
+## them, get_strike_debug()'s "buffered" / "phase" keys.
+func gather_combat_debug() -> Dictionary:
+	var d := {"move": &"", "phase": "IDLE", "string_index": 0, "chain": 0, "glide": false,
+		"buffered": "-", "target": "", "target_react": &"", "target_left": 0.0, "target_dist": -1.0,
+		"target_down": false, "target_lifted": false, "hud_combo": _combo_count}
+	if player == null or not is_instance_valid(player) or player.combat == null:
+		return d
+	var c := player.combat
+	d["move"] = c.current_move_id()
+	if c.is_attack_active():
+		d["phase"] = "ACTIVE"
+	elif c.is_in_recovery():
+		d["phase"] = "RECOVERY"
+	elif c.is_attacking():
+		d["phase"] = "STARTUP"
+	d["string_index"] = c.get_string_index()
+	d["chain"] = c.get_chain_count()
+	d["glide"] = c.is_gliding()
+	if c.has_method(&"get_strike_debug"):
+		var sd: Dictionary = c.call(&"get_strike_debug")
+		for k in ["buffered", "buffer"]:
+			if sd.has(k) and str(sd[k]) != "":
+				d["buffered"] = str(sd[k])
+		if sd.has("phase"):
+			d["phase"] = str(sd["phase"]).to_upper()
+	var target: Fighter = c.get_combat_target()
+	var how := "combat target"
+	if target == null and c.last_dealt != null and is_instance_valid(c.last_dealt.victim) \
+			and c.last_dealt.victim is Fighter and not (c.last_dealt.victim as Fighter).is_dead():
+		target = c.last_dealt.victim as Fighter
+		how = "last hit"
+	if target != null and is_instance_valid(target):
+		d["target"] = "%s (%s)" % [target.name, how]
+		d["target_react"] = target.get_react_state()
+		d["target_left"] = target.get_react_time_left()
+		d["target_down"] = target.is_down()
+		d["target_lifted"] = target.is_lifted()
+		d["target_dist"] = player.get_ground_position().distance_to(target.get_ground_position())
+	return d
+
+## Overlay lines for gather_combat_debug()'s dictionary.
+static func combat_debug_lines(d: Dictionary) -> PackedStringArray:
+	var lines := PackedStringArray()
+	var idx := clampi(int(d.get("string_index", 0)), 0, Tuning.R7_PUNCH_STRING.size() - 1)
+	var move := String(d.get("move", &""))
+	lines.append("MOVE       %-11s %-8s  buffered %s" % [move if move != "" else "-", d.get("phase", "IDLE"), d.get("buffered", "-")])
+	lines.append("STRING     %d/%d (next punch: %s)   CHAIN %d hits (HUD %d)   GLIDE %s" % [idx + 1,
+		Tuning.R7_PUNCH_STRING.size(), String(Tuning.R7_PUNCH_STRING[idx]).to_upper(), int(d.get("chain", 0)),
+		int(d.get("hud_combo", 0)), "ON" if d.get("glide", false) else "off"])
+	var target: String = d.get("target", "")
+	if target == "":
+		lines.append("TARGET     -")
+	else:
+		var react := String(d.get("target_react", &""))
+		var state := react.to_upper() if react != "" else "none"
+		if d.get("target_down", false) and react != "down":
+			state += " DOWN"
+		if d.get("target_lifted", false):
+			state += " LIFTED"
+		lines.append("TARGET     %s  react %s %.2f s  %.1f m" % [target, state, float(d.get("target_left", 0.0)),
+			float(d.get("target_dist", 0.0))])
+	return lines
+
+func _debug_text() -> String:
+	var lines := PackedStringArray()
+	if player != null and is_instance_valid(player):
+		lines.append_array(combat_debug_lines(gather_combat_debug()))
+		var c := player.combat
+		lines.append("LAST HIT   " + describe_hit(c.last_dealt if c != null else null))
+		lines.append("TAKEN      " + describe_hit(c.last_received if c != null else null))
+		var tr := player.traversal
+		var speed := Vector2(player.velocity.x, player.velocity.z).length()
+		var moving := PackedStringArray()
+		if tr != null:
+			if tr.has_method(&"get_speed"):
+				speed = maxf(float(tr.call(&"get_speed")), speed)
+			if tr.has_method(&"is_sprinting") and tr.call(&"is_sprinting"):
+				moving.append("SPRINT")
+			if tr.is_dodging():
+				moving.append("DODGE")
+			if tr.is_driving():
+				moving.append("DRIVE %.1f m/s" % tr.get_drive_speed())
+		if player.carry != null and player.carry.get_throw_windup() > 0.0:
+			moving.append("WINDUP %.2f" % player.carry.get_throw_windup())
+		lines.append("SPEED      %5.2f m/s  %s" % [speed, " ".join(moving)])
+		var st := player.get_state()
+		var names := RagdollController.State.keys()
+		var own := String(player.get_react_state())
+		lines.append("YOU        HP %.0f / %.0f   state %s   react %s%s%s" % [player.hp, player.max_hp,
+			names[st] if st >= 0 and st < names.size() else str(st), own if own != "" else "-",
+			"  INVULN" if player.is_invulnerable() else "",
+			"  COUNTERING" if player.defence != null and player.defence.is_countering() else ""])
+		lines.append("UPGRADES   speed cap %d m/s  ram %d  teleport %s  pursuit x%d   cue %s" % [
+			roundi(Tuning.debug_speed_cap), Tuning.debug_ram_level, "ON" if Tuning.debug_teleport else "off",
+			Tuning.debug_pursuit_max, String(_cue.get("text", "-"))])
+		lines.append("PROMPTS    %d open (%d counterable)" % [_prompts.size(),
+			_prompts.values().filter(func(e: Dictionary) -> bool: return bool(e["counterable"])).size()])
+	lines.append("FPS %d   physics %.2f ms   process %.2f ms" % [
+		Performance.get_monitor(Performance.TIME_FPS),
+		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0])
+	lines.append(TimeDirector.get_debug_text())
+	var holders := PackedStringArray()
+	for h in AttackDirector.get_token_holders():
+		if is_instance_valid(h):
+			holders.append(h.name)
+	lines.append("tokens [%s]  wave %d" % [", ".join(holders), AttackDirector.wave_index])
+	lines.append("enemies %d  fighters %d" % [get_tree().get_nodes_in_group(&"enemies").size(),
+		get_tree().get_nodes_in_group(&"fighters").size()])
+	lines.append(world_debug_line())
+	var rig := get_tree().get_first_node_in_group(&"camera_rig") as CameraRig
+	if rig and rig.has_method(&"get_debug_text"):
+		lines.append(str(rig.call(&"get_debug_text")))
+	return "\n".join(lines)
 
 ## Round 6 destruction at a glance: debris against its cap, clutter and props
 ## broken, wall holes, collapses, floor damage by level and the decal budgets.
@@ -1174,72 +1307,16 @@ static func world_debug_line() -> String:
 		int(fl.get("rubble", 0)), int(fl.get("tiles", 0)), int(dc.get("marks", 0)), Tuning.FLOOR_DECAL_MAX,
 		int(dc.get("blood", BloodFX.decal_count())), Tuning.BLOOD_DECAL_MAX]
 
-func _debug_text() -> String:
-	var lines := PackedStringArray()
-	if player != null and is_instance_valid(player):
-		var c := player.combat
-		var dealt: HitInfo = c.last_dealt if c != null else null
-		var got: HitInfo = c.last_received if c != null else null
-		lines.append("LAST HIT   " + describe_hit(dealt))
-		lines.append("TAKEN      " + describe_hit(got))
-		var tr := player.traversal
-		var speed := tr.get_speed() if tr != null else 0.0
-		if speed <= 0.0:
-			speed = Vector2(player.velocity.x, player.velocity.z).length()
-		var charge := tr.sprint_charge if tr != null else 0.0
-		var cap := tr.get_speed_cap() if tr != null else Tuning.debug_speed_cap
-		lines.append("SPEED      %5.2f m/s  sprint_charge %.2f  cap %.0f%s  ram %d" % [speed, charge, cap,
-			"  SPRINT" if tr != null and tr.is_sprinting() else "", Tuning.debug_ram_level])
-		lines.append("FOCUS      %.2f / %.0f bars%s   HP %.0f / %.0f   counter +%.1f" % [player.focus, Tuning.FOCUS_MAX,
-			"  (MODE)" if TimeDirector.is_focus_active() else "", player.hp, player.max_hp, _counter_bonus if _counter_label.visible else 0.0])
-		var st := player.get_state()
-		var names := RagdollController.State.keys()
-		lines.append("state %s%s" % [names[st] if st >= 0 and st < names.size() else str(st),
-			"  INVULN" if player.is_invulnerable() else ""])
-	lines.append("FPS %d   physics %.2f ms   process %.2f ms" % [
-		Performance.get_monitor(Performance.TIME_FPS),
-		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
-		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0])
-	lines.append(TimeDirector.get_debug_text())
-	var holders := PackedStringArray()
-	for h in AttackDirector.get_token_holders():
-		if is_instance_valid(h):
-			holders.append(h.name)
-	lines.append("tokens [%s]  wave %d" % [", ".join(holders), AttackDirector.wave_index])
-	lines.append("enemies %d  fighters %d" % [get_tree().get_nodes_in_group(&"enemies").size(),
-		get_tree().get_nodes_in_group(&"fighters").size()])
-	lines.append(world_debug_line())
-	var rig := get_tree().get_first_node_in_group(&"camera_rig") as CameraRig
-	if rig:
-		lines.append(rig.get_debug_text())
-	return "\n".join(lines)
-
 # --- Drawing ---------------------------------------------------------------------------
-## HP bar with a trailing "damage taken" bar, and Focus as 3 bars with fill.
+## HP bar with a trailing "damage taken" bar.
 class _Bars extends Control:
 	const HP_W := 460.0
 	const HP_H := 26.0
-	const FOCUS_W := 92.0
-	const FOCUS_H := 12.0
-	const FOCUS_GAP := 8.0
 	var hp_w := HP_W
-	var pips := false   ## Focus as 3 round pips (opponent) instead of bars
-	var focus_active := false
 	var hp := 1.0
 	var hp_delayed := 1.0
-	var focus := 0.0
 	var low := false
 	var pulse := 0.0
-	var now := 0.0
-	## Focus mode time left 0..1 (-1 = not in Focus mode).
-	var mode_left := -1.0
-	## A spent stretch of Focus (bars) fading out from ghost_t0.
-	var ghost_from := 0.0
-	var ghost_to := 0.0
-	var ghost_t0 := -100.0
-	## The bar that just filled up, flashing from filled_t0.
-	var filled_bar := -1
-	var filled_t0 := -100.0
 
 	func _draw() -> void:
 		var back := Rect2(Vector2.ZERO, Vector2(hp_w, HP_H))
@@ -1255,124 +1332,67 @@ class _Bars extends Control:
 		for q in range(1, 4):
 			var x := hp_w * q * 0.25
 			draw_line(Vector2(x, HP_H * 0.6), Vector2(x, HP_H), Color(0, 0, 0, 0.45), 2.0)
-		var y := HP_H + 12.0
-		if pips:
-			for i in 3:
-				var c := Vector2(10.0 + i * 26.0, y + 8.0)
-				draw_circle(c, 9.0, Color(0, 0, 0, 0.75))
-				draw_circle(c, 7.0, Color(0.05, 0.12, 0.16, 0.9))
-				var fill := clampf(focus - i, 0.0, 1.0)
-				if fill > 0.0:
-					draw_circle(c, 7.0 * fill, UIKit.FOCUS_COLOR if fill >= 1.0 else UIKit.FOCUS_COLOR.darkened(0.35))
-			return
-		var ghost_k := 1.0 - (now - ghost_t0) / FOCUS_GHOST_TIME
-		var filled_k := 1.0 - (now - filled_t0) / 0.35
-		for i in 3:
-			var x := i * (FOCUS_W + FOCUS_GAP)
-			var r := Rect2(Vector2(x, y), Vector2(FOCUS_W, FOCUS_H))
-			draw_rect(r.grow(2.0), Color(0, 0, 0, 0.75))
-			draw_rect(r, Color(0.05, 0.12, 0.16, 0.9))
-			# Spent Focus flashes out (Focus mode, a teleport or a pursuit takes a whole bar).
-			if ghost_k > 0.0:
-				var g0 := clampf(ghost_from - i, 0.0, 1.0)
-				var g1 := clampf(ghost_to - i, 0.0, 1.0)
-				if g1 > g0:
-					draw_rect(Rect2(r.position + Vector2(FOCUS_W * g0, 0.0), Vector2(FOCUS_W * (g1 - g0), FOCUS_H)),
-						Color(1, 1, 1, 0.9 * ghost_k))
-			var fill := clampf(focus - i, 0.0, 1.0)
-			if fill > 0.0:
-				# A full bar is spendable: bright. The partial one is dim.
-				var c := UIKit.FOCUS_COLOR if fill >= 1.0 - 1e-4 else UIKit.FOCUS_COLOR.darkened(0.45)
-				if focus_active:
-					c = c.lerp(Color.WHITE, 0.25 + 0.2 * sin(pulse * 10.0))
-				if i == filled_bar and filled_k > 0.0:
-					c = c.lerp(Color.WHITE, filled_k)
-				draw_rect(Rect2(r.position, Vector2(FOCUS_W * fill, FOCUS_H)), c)
-			if focus_active:
-				draw_rect(r.grow(2.0), Color(UIKit.FOCUS_COLOR, 0.9), false, 2.0)
-		# Focus mode: its real-time 2 s draining under the bars.
-		if mode_left >= 0.0:
-			var w := 3.0 * FOCUS_W + 2.0 * FOCUS_GAP
-			var r := Rect2(Vector2(0.0, y + FOCUS_H + 6.0), Vector2(w, 4.0))
-			draw_rect(r.grow(1.0), Color(0, 0, 0, 0.7))
-			draw_rect(Rect2(r.position, Vector2(w * mode_left, r.size.y)), Color(0.85, 0.97, 1.0, 0.95))
 
-## Power punch charge: 0..1 with marks where it starts to launch and at full.
-class _Charge extends Control:
-	const W := 320.0
-	const H := 16.0
-	var level := 0          ## 0..3 reached
-	var fill := 0.0         ## 0..1 of the time to level 3
-	var released := false
-	var move_name := ""
-	var pulse := 0.0
-	var level_pulse := 0.0
+## Counter prompts: a key badge (circle for one-letter keys, a pill otherwise)
+## in the tell colour, the caption above it, a pointer to the attacker's head
+## (or toward the screen edge for one off screen) and a ring that pulses out.
+class _Prompts extends Control:
+	const CAPTION_SIZE := 18
+	var items: Array = []
+	var _box := StyleBoxFlat.new()
+	var _ring := StyleBoxFlat.new()
+
+	static func key_font_size(key: String) -> int:
+		if key.length() <= 2:
+			return 26
+		return 20 if key.length() <= 10 else 18
+
+	func _init() -> void:
+		_box.set_border_width_all(3)
+		_ring.draw_center = false
+		_ring.set_border_width_all(3)
 
 	func _draw() -> void:
-		var font := get_theme_default_font()
-		var label := "CHARGE %d" % level if level > 0 else "CHARGE"
-		if move_name != "":
-			label = move_name + "  " + label
-		level_pulse = maxf(level_pulse - 0.05, 0.0)
-		draw_string(font, Vector2(0, 14), label, HORIZONTAL_ALIGNMENT_CENTER, W, 18 + int(6.0 * level_pulse),
-			UIKit.ACCENT if level >= 2 else UIKit.TEXT)
-		var r := Rect2(Vector2(0, 26), Vector2(W, H))
-		draw_rect(r.grow(3.0), Color(0, 0, 0, 0.75))
-		draw_rect(r, Color(0.12, 0.1, 0.08, 0.9))
-		var col := UIKit.TEXT.lerp(UIKit.ACCENT, clampf(fill * 1.3, 0.0, 1.0))
-		if level >= 3 or released:
-			col = col.lerp(Color.WHITE, 0.5 + 0.5 * sin(pulse * 24.0))
-		draw_rect(Rect2(r.position, Vector2(W * fill, H)), col)
-		# Level marks at Tuning.CHARGE_LEVELS (time held, as a share of level 3).
-		for i in 3:
-			var x := W * Tuning.CHARGE_LEVELS[i] / Tuning.CHARGE_LEVELS[2]
-			var reached := level > i
-			draw_line(Vector2(minf(x, W - 1.0), 22), Vector2(minf(x, W - 1.0), 26 + H + 4),
-				UIKit.ACCENT if reached else Color(1, 1, 1, 0.7), 3.0 if reached else 2.0)
-
-## Corner brackets around a target: lock-on (accent) and the sprint target (white).
-class _LockMarker extends Control:
-	var center := Vector2.ZERO
-	var half := 30.0
-	var pulse := 0.0
-	var color := UIKit.ACCENT
-	var width := 4.0
-	var alpha := 1.0
-
-	func _draw() -> void:
-		var h := half * (1.0 + 0.04 * sin(pulse * 6.0))
-		var arm := maxf(h * 0.4, 8.0)
-		var col := Color(color, color.a * alpha)
-		for sx: float in [-1.0, 1.0]:
-			for sy: float in [-1.0, 1.0]:
-				var corner := center + Vector2(sx * h, sy * h)
-				var pts := PackedVector2Array([corner + Vector2(0, -sy * arm), corner, corner + Vector2(-sx * arm, 0)])
-				draw_polyline(pts, Color(0, 0, 0, 0.7 * alpha), width + 3.0)
-				draw_polyline(pts, col, width)
-
-## Small centre reticle: strikes and grabs aim at the zone under it. A gold
-## ring drains around it while a counter bonus is live.
-class _Reticle extends Control:
-	var focus := false
-	var locked := false
-	var counter_left := -1.0   ## 0..1 of the counter bonus window left; < 0 = none
-
-	func _draw() -> void:
-		var col := Color(1, 1, 1, 0.55) if not focus else Color(UIKit.FOCUS_COLOR, 0.95)
-		var gap := 6.0 if not focus else 4.0
-		var tick := 7.0
-		if locked:
-			col = Color(UIKit.ACCENT, 0.95)
-			draw_arc(Vector2.ZERO, 13.0, 0.0, TAU, 32, Color(0, 0, 0, 0.6), 4.0)
-			draw_arc(Vector2.ZERO, 13.0, 0.0, TAU, 32, col, 2.0)
-		if counter_left > 0.0:
-			var a0 := -PI * 0.5
-			draw_arc(Vector2.ZERO, 21.0, 0.0, TAU, 40, Color(0, 0, 0, 0.55), 6.0)
-			draw_arc(Vector2.ZERO, 21.0, a0, a0 + TAU * counter_left, 40, UIKit.COUNTER_COLOR, 3.5)
-		draw_circle(Vector2.ZERO, 2.0, col)
-		for d: Vector2 in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
-			draw_line(d * gap, d * (gap + tick), Color(0, 0, 0, col.a * 0.6), 4.0)
-			draw_line(d * gap, d * (gap + tick), col, 2.0)
+		var font := UIKit.heavy_font()
+		for it: Dictionary in items:
+			var col: Color = it["color"]
+			var a: float = it["alpha"]
+			var sc: float = it["scale"]
+			var size: Vector2 = it["size"] * sc
+			var c: Vector2 = it["center"]
+			var dir: Vector2 = it["dir"]
+			var tip: Vector2 = it["tip"]
+			var rect := Rect2(c - size * 0.5, size)
+			var radius := int(size.y * 0.5)
+			# Pointer from the badge toward the attacker.
+			var side := dir.orthogonal()
+			var reach := absf(dir.x) * size.x * 0.5 + absf(dir.y) * size.y * 0.5
+			var base := c + dir * (reach - 2.0)
+			var point := base + dir * minf(maxf((tip - base).dot(dir), 6.0), 14.0)
+			draw_colored_polygon(PackedVector2Array([point + dir * 3.0, base + side * 11.0, base - side * 11.0]), Color(0, 0, 0, 0.7 * a))
+			draw_colored_polygon(PackedVector2Array([point, base + side * 8.0, base - side * 8.0]), Color(col, a))
+			# Pulsing ring.
+			var p: float = it["pulse"]
+			_ring.set_corner_radius_all(radius + int(10.0 * p))
+			_ring.border_color = Color(col, 0.7 * a * (1.0 - p))
+			draw_style_box(_ring, rect.grow(4.0 + 10.0 * p))
+			# Badge.
+			_box.set_corner_radius_all(radius)
+			_box.bg_color = Color(col, a)
+			_box.border_color = Color(0, 0, 0, 0.8 * a)
+			draw_style_box(_box, rect)
+			var key: String = it["key"]
+			var fs := int(float(it["key_size"]) * sc)
+			var kw := font.get_string_size(key, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+			draw_string(font, c + Vector2(-kw * 0.5, fs * 0.36), key, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.06, 0.05, 0.05, a))
+			# Caption above the badge.
+			var cap: String = it["caption"]
+			if cap == "":
+				continue
+			var cw := font.get_string_size(cap, HORIZONTAL_ALIGNMENT_LEFT, -1, CAPTION_SIZE).x
+			var at := Vector2(c.x - cw * 0.5, rect.position.y - 6.0)
+			draw_string_outline(font, at, cap, HORIZONTAL_ALIGNMENT_LEFT, -1, CAPTION_SIZE, 5, Color(0, 0, 0, 0.85 * a))
+			draw_string(font, at, cap, HORIZONTAL_ALIGNMENT_LEFT, -1, CAPTION_SIZE, Color(col, a))
 
 ## World popups projected to the screen: outlined heavy text, pop-in, drift up, fade.
 class _Popups extends Control:
@@ -1395,7 +1415,7 @@ class _Popups extends Control:
 			draw_string(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, col)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-## Off-screen attack arrows: orange = strike (parry it), blue = grab (break it).
+## Off-screen attack arrows: orange = a strike (counter it), blue = a grab or charge (dodge it).
 class _Arrows extends Control:
 	var items: Array = []
 

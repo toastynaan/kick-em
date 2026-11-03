@@ -3,8 +3,9 @@ extends Node3D
 ## move; the charge hum (seamless loop, pitch rising with the level, stopped
 ## by the release, which whooshes and suppresses the move's own whoosh;
 ## auto-stop without a release), jump / land / crouch, arm break, wall slam,
-## stumble and trip, Focus stings, and Focus pitch: the player's own sounds
-## stay at normal pitch while the world slows. OWNER: agent F.
+## stumble and trip, and slow-motion pitch: the player's own sounds stay at
+## normal pitch while the world slows. Round 7 removed Focus mode and its
+## stings: focus_started / focus_ended play nothing. OWNER: agent F.
 
 const U := preload("res://tests/fx/fx_test_util.gd")
 
@@ -98,31 +99,35 @@ func _ready() -> void:
 		if not played.has(spec[0]):
 			fails.append("%s did not play (got %s)" % [spec[0], played])
 
-	# Focus: stings, and the player's sounds keep their pitch.
+	# Round 7: no Focus stings.
+	await U.physics_frames(get_tree(), 6)
 	played.clear()
-	if TimeDirector.begin_focus():
-		GameEvents.focus_started.emit(player)
+	GameEvents.focus_started.emit(player)
+	GameEvents.focus_ended.emit(player)
+	print("focus_started / focus_ended (Focus removed) played %s" % [played])
+	if not played.is_empty():
+		fails.append("removed Focus stings still play: %s" % [played])
+
+	# Slow motion: the player's sounds keep their pitch.
+	if U.slow_world(0.3):
 		await get_tree().create_timer(0.3).timeout
 		var factor := AudioFX.player_pitch_factor()
 		AudioFX.play(&"whoosh", Vector3.ZERO, 0.0, 1.0, player)
 		var own := _last_owned()
 		AudioFX.play(&"thud", Vector3.ZERO, 0.0, 1.0, enemy)
 		await get_tree().process_frame
-		print("focus: time scale %.2f, pitch factor %.2f, player sound pitch %.2f (base %.2f)" % [
+		print("slow motion: time scale %.2f, pitch factor %.2f, player sound pitch %.2f (base %.2f)" % [
 			Engine.time_scale, factor, own[1], own[0]])
 		if factor < 2.5:
-			fails.append("player pitch factor %.2f in Focus" % factor)
+			fails.append("player pitch factor %.2f in slow motion" % factor)
 		if own[0] <= 0.0 or absf(own[1] - own[0] * factor) > 0.05:
 			fails.append("player sound not pitch-compensated")
-		TimeDirector.end_focus()
-		GameEvents.focus_ended.emit(player)
+		U.normal_time()
 		await get_tree().create_timer(0.5).timeout
 		if absf(AudioFX.player_pitch_factor() - 1.0) > 0.01:
-			fails.append("pitch factor stuck after Focus")
-		if not (played.has(&"focus_in") and played.has(&"focus_out")):
-			fails.append("focus stings missing: %s" % [played])
+			fails.append("pitch factor stuck after slow motion")
 	else:
-		print("note: begin_focus refused; Focus pitch not checked")
+		print("note: TimeDirector refused slow motion; pitch not checked")
 	U.finish(get_tree(), "test_upgrade2_audio", fails, errlog)
 
 ## [base pitch, current pitch_scale] of the most recent player-owned 3D sound.

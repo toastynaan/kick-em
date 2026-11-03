@@ -1,11 +1,26 @@
 class_name CameraRig
 extends Node3D
-## Third-person combat camera: Round 4 free camera and lock-on, Round 5 framing
-## (Feel Reference: Effects that sell power > Camera). In group "camera_rig".
+## Third-person combat camera: Round 7 freeflow camera (docs/Round 7 — Freeflow
+## Combat.md: Camera, Hit feel) on the Round 5 framing (Feel Reference: Effects
+## that sell power > Camera). In group "camera_rig".
 ## OWNER: agent E (camera & time).
 ##
-## Free by default: in play only mouse / right-stick input turns the camera.
+## Free orbit: in play only mouse / right-stick input turns the camera; it never
+## rotates back behind the player. Round 7 removed lock-on: get_lock_target()
+## is always null and is_locked() false (kept while callers remain);
+## get_soft_target() is the player's CombatController.get_combat_target().
 ## Automatic, never fighting the player's input:
+## - Follow: the look point tracks the player with a critically damped spring
+##   (FOLLOW_OMEGA), so an 11 m/s glide is followed with no overshoot, no jolt
+##   in speed and a lag of at most ~0.8 m.
+## - Combat lean (Round 7): the look-at leans toward the combat target (the glide
+##   target while a glide runs) by Tuning.R7_CAM_LEAN of the way, on a spring
+##   (LEAN_OMEGA), never so far that the player leaves LEAN_PLAYER_SAFE of the
+##   frame. The yaw turns on its own only when that target would leave the frame
+##   (beyond COMBAT_TARGET_SAFE of the half width), just back to that line, at
+##   most Tuning.R7_CAM_AUTO_YAW_RATE, eased, never within Tuning.CAM_MOUSE_IDLE
+##   s of camera input, and never for a target the player's own input turned
+##   away from (until the player engages it again).
 ## - Crowd framing: Tuning.CAM_CROWD_DIST (7 m with CROWD_FROM enemies alive,
 ##   9 m with a full field) and CAM_CROWD_HEIGHT higher, pulled further back
 ##   when the player and the nearest CAM_CROWD_FRAME enemies would not fit; one
@@ -13,6 +28,10 @@ extends Node3D
 ## - Sprint: FOV Tuning.CAM_FOV -> CAM_FOV_SPRINT (CAM_FOV_SPRINT_MAX at the
 ##   upgraded caps), CAM_SPRINT_PULLBACK further, CAM_SPRINT_DROP lower, all
 ##   by the player's Traversal.sprint_charge.
+## - Drive (Round 7, carry.is_driving()): FOV + R7_CAM_DRIVE_FOV, pulled back
+##   R7_CAM_DRIVE_PULLBACK, R7_CAM_DRIVE_DROP lower, eased in and out (the larger
+##   of the sprint and drive framing applies). Throw wind-up: the FOV narrows by
+##   carry.get_throw_windup() x R7_CAM_THROW_ZOOM_FOV and eases back on release.
 ## - Launch (F1): a body launched or thrown (GameEvents.thrown) near the player pulls the camera
 ##   back (up to CAM_LAUNCH_DIST) until the player and the body both fit; the
 ##   look point leans toward the body for at most CAM_LAUNCH_FOLLOW s; yaw turns
@@ -26,20 +45,26 @@ extends Node3D
 ## - Wall run: shift CAM_WALLRUN_SHIFT toward the open side (in place of the
 ##   shoulder shift), roll CAM_WALLRUN_ROLL away from the wall, the wall left
 ##   out of the arm's casts.
+## - Teleport and pursuit (Round 7 amendment, the god path): a teleport never
+##   cuts the follow (the spring swoops to the new spot in about 0.2 s); a
+##   teleport counter punches the FOV. A pursuit and each relaunch in its chain
+##   keep the flying body framed (the launch framing carries on at full lean,
+##   its window restarting at every link).
+## - Spike: the spiked body's floor impact (the player's shockwave right after a
+##   spike hit, or the body's own fall stopping) pitches the view down
+##   (SPIKE_PITCH_PUNCH) and shakes it hard (SPIKE_TRAUMA).
 ## - Shake: trauma (0..1) from GameEvents, shake = trauma^2, decaying
-##   Tuning.TRAUMA_DECAY per s. screen_shake stays for one-offs.
+##   Tuning.TRAUMA_DECAY per s. screen_shake stays for one-offs. Round 7: a
+##   player hit (HitInfo.react set) punches by its weight (FOV kick weight x
+##   R7_CAM_PUNCH_FOV, trauma weight x R7_CAM_PUNCH_TRAUMA) in place of the
+##   tier trauma; enemy hits on the player keep the tier trauma; drive impacts
+##   shake by speed (DRIVE_TRAUMA: slam big, break medium); the Battering Ram
+##   shakes by Tuning.TRAUMA ram.
 ## Cinematics the player does not control: the player's own knockdown (keep the
 ## pelvis in view), the last-kill close-up (GameEvents.last_kill: a cut to a side
 ## angle at CAM_LAST_KILL_DIST for TimeDirector's last-kill slow motion, then an
 ## ease back), the death orbit (the player's fighter_died: a slow orbit at
 ## CAM_DEATH_ORBIT around the ragdoll).
-##
-## Lock-on (toggle, Controls `lock_on`, cycle with `lock_next` / `lock_prev`):
-## the camera stays behind the player's shoulder and keeps an aim point on the
-## target at the screen centre, turning at most Tuning.LOCK_TURN_SPEED (the
-## launch rate while the target is down). Mouse / stick motion moves that aim
-## point over the target's body so the screen-centre zone aim (H) picks the zone.
-## get_soft_target() returns the lock target while locked.
 ##
 ## Placement (every mode): pivot = look point shifted toward the shoulder (the
 ## shift is cast against WORLD, so it never pokes into concrete); the camera
@@ -57,8 +82,7 @@ const SETTINGS_PATH := "user://settings.cfg"
 
 # Local tuning (candidates for Tuning).
 const PITCH_DEFAULT := -0.24           ## rad (~-14 deg)
-const FRAME_RADIUS := 16.0             ## m, opponents further than this are not framed / soft targets
-const LOOK_RATE := 9.0                 ## 1/s look point tracking (free; a teleport moves < 0.5 m per frame)
+const FRAME_RADIUS := 16.0             ## m, opponents further than this are not framed
 const DIST_RATE := 3.0                 ## 1/s distance smoothing
 const CLOSEUP_DIST_RATE := 8.0
 const ARM_RADIUS := 0.25               ## m, hard clamp cast
@@ -81,14 +105,6 @@ const DOWN_LOOK_RATE := 4.0            ## 1/s: lag on the pelvis while the playe
 const DOWN_MAX_LAG := 1.0              ## ...but the look point stays within this of it (keeps it in view)
 const DOWN_SPEED_PULLBACK := 0.15      ## m extra distance per m/s of the flying body
 const DOWN_PULLBACK_MAX := 2.0
-const SOFT_HOLD := 0.6                 ## s a soft target is held before it may change
-const SOFT_SWITCH_MARGIN := 1.0        ## score margin a new soft target must win by
-const RECENTRE_TIME := 0.25            ## s, lock_on with nothing to lock eases behind the player
-const LOCK_AIM_SENS := 2.5             ## aim units (body half-extents) per rad of camera input
-const LOCK_PITCH_RATE := 10.0          ## 1/s pitch tracking while locked
-const LOCK_DIST_BASE := 2.6            ## m camera behind the shoulder while locked...
-const LOCK_DIST_PER_M := 0.25          ## ...plus this per m between the fighters
-const LOCK_AIM_RATE := 20.0            ## 1/s aim point smoothing on the target
 const FADE_MASK := Layers.DESTRUCTIBLE | Layers.DEBRIS | Layers.DEBRIS_SMALL | Layers.RAGDOLL | Layers.CAPSULE
 const FADE_MAX_HITS := 6
 const FADE_RATE := 5.0                 ## 1/s back to opaque once nothing blocks
@@ -126,7 +142,6 @@ const DUEL_DROP := 0.35                ## m lower than the default height: "low 
 const FIT_STEP := 0.25                 ## m steps when fitting a distance
 const CROWD_SAFE := 0.85               ## share of the half frame the framed enemies must sit inside
 const HEIGHT_RATE := 2.0               ## 1/s height smoothing
-const LOCK_HEIGHT_RATE := 8.0          ## 1/s: locking drops the height offset quickly (aim point on the centre ray)
 ## Launch framing (F1).
 const LAUNCH_PLAYER_SAFE := 0.7        ## the lean never puts the player beyond this share of the half frame
 const LAUNCH_BODY_SAFE := 0.9          ## the body counts as framed inside this share
@@ -167,7 +182,7 @@ const SHAKE_FREQ := 22.0
 const HARD_LANDING_TRAUMA := 0.15      ## the landing table's "light shake" (no Tuning row)
 const FURNITURE_TRAUMA := 0.15         ## broken furniture / clutter / door frames: a small shake, no wall-break punch
 const FURNITURE_GROUP := 0.1           ## s: things breaking together (one flight through a shelf and a table) shake once
-const HEAVY_DEDUPE := 0.25             ## s: a body slam and its heavy landing shake once
+const HEAVY_DEDUPE := 0.25             ## s: one heavy landing reported twice shakes once
 ## Round 6: a falling structure piece (a pillar's beam and sign, a lintel) landing:
 ## a heavy thump, Tuning.TRAUMA heavy_landing at THUMP_FULL_ENERGY J and up,
 ## less for lighter pieces, faded with distance like other far events.
@@ -187,13 +202,54 @@ const DEATH_ORBIT_RATE := 0.5          ## rad/s: about 30 deg over the 1.0 s slo
 const DEATH_PITCH := -0.38             ## rad
 const DEATH_LOOK_RATE := 5.0
 
+# Round 7 (local; Tuning holds the doc's numbers: R7_CAM_*).
+## Follow: a critically damped spring on the player's aim point. Lag at a
+## steady speed v is 2 v / omega: 0.4 m walking, 0.9 m for an 11 m/s glide
+## (it lasts at most 0.35 s, so the peak is ~0.8 m); speed never overshoots.
+const FOLLOW_OMEGA := 24.0             ## rad/s
+const FOLLOW_CUT := 3.0                ## m the player moved in one frame: a teleport, the follow cuts instead of swinging
+const LEAN_OMEGA := 6.0                ## rad/s: the lean is a critically damped spring too (95% in ~0.8 s; its speed never jumps on a new target)
+const LEAN_MAX := 2.0                  ## m at most (R7_CAM_LEAN of R7_TARGET_RANGE + R7_TARGET_KEEP_EXTRA)
+const LEAN_UP := Vector2(-0.3, 0.5)    ## m the lean may move the look point down / up (a lifted target)
+const LEAN_PLAYER_SAFE := 0.75         ## the lean never puts the player beyond this share of the half frame
+const COMBAT_TARGET_SAFE := 0.8        ## auto-yaw turns only when the target sits beyond this share of the half width
+const COMBAT_YAW_REACH := 100.0        ## degrees: a target further round than this is not chased (the player looked away)
+const COMBAT_YAW_GAIN := 6.0           ## 1/s: the turn slows as the target nears the safe line (no overshoot)
+const COMBAT_YAW_ACCEL := 240.0        ## degrees/s^2: the turn eases in and out (full rate in 1/6 s)
+const COMBAT_YAW_DEADBAND := 0.002     ## rad past the line below which it stops (settles to exactly 0)
+const GLIDE_GRACE := 0.05              ## s past a glide's expected end (glide_started) that it still counts
+const DRIVE_RISE_RATE := 6.0           ## 1/s into the drive framing (95% in 0.5 s)...
+const DRIVE_FALL_RATE := 4.0           ## ...and out of it
+const WINDUP_RISE_RATE := 20.0         ## 1/s: the throw zoom follows the wind-up closely...
+const WINDUP_FALL_RATE := 8.0          ## ...and eases back after the release (no 5 deg snap)
+## Drive impacts (G's drive_impact, the player driving): trauma at
+## R7_DRIVE_MAX_SPEED, scaled by speed down to DRIVE_TRAUMA_MIN_SHARE. Raised to,
+## never stacked on the trauma a wall's own wall_broken already added.
+const DRIVE_TRAUMA := {&"slam": 0.6, &"break": 0.3, &"bowl": 0.15, &"shove": 0.08}
+const DRIVE_TRAUMA_MIN_SHARE := 0.4
+## Round 7 amendment (god path): teleport, pursuit and spike.
+const TELEPORT_NO_CUT := 0.1           ## s after the player's teleport in which the follow swoops instead of cutting
+## Spike: a pursuit hit driving the body down (HitInfo.pursuit with a launch
+## velocity at least this steep, or react &"spike") starts a watch for its floor impact.
+const SPIKE_DOWN_DOT := 0.7            ## launch_velocity.normalized().y below minus this counts as downward
+const SPIKE_WATCH := 0.8               ## s after the spike hit the floor impact is looked for
+const SPIKE_IMPACT_FROM := 4.0         ## m/s falling: the body's own fall stopping below half its peak is the impact
+const SPIKE_NEAR := 1.0                ## m beyond R7_SPIKE_BLAST_RADIUS a player shockwave may land from the spiked body
+const SPIKE_TRAUMA := 0.6              ## big: above a wall break (0.5), raised to (never stacked)
+const SPIKE_PITCH_PUNCH := 7.0         ## degrees the view pitches down at the impact (the downward punch)...
+const SPIKE_KICK := 0.2                ## m the camera jolts down with it
+const PITCH_PUNCH_RISE := 0.04         ## s: ...rising this fast,
+const PITCH_PUNCH_HOLD := 0.1          ## held to here,
+const PITCH_PUNCH_END := 0.5           ## and eased back by here
+
 ## Player settings (pause menu, saved to SETTINGS_PATH).
 static var sensitivity := 1.0
 static var invert_y := false
 static var _settings_loaded := false
 
 var target: Fighter
-## False ignores lock input (round over, menus).
+## Set false by GameMode once the round is decided. Round 7 removed lock-on, the
+## only input it gated; kept so GameMode's write stays valid.
 var input_enabled := true
 
 var camera: Camera3D
@@ -235,10 +291,8 @@ var _blend_time := 0.25
 var _blend_look := Vector3.ZERO
 var _blend_dist := 4.0
 
-## Untyped on purpose: may hold freed fighters (a freed object in a typed
+## Untyped on purpose (these may hold freed fighters: a freed object in a typed
 ## variable or parameter is a script error before is_instance_valid runs).
-var _soft = null
-var _soft_changed_at := -100.0
 var _framed: Array[Fighter] = []
 var _closeup_on = null
 var _closeup_until := -100.0
@@ -249,13 +303,6 @@ var _restore_yaw := 0.0
 var _restore_pitch := PITCH_DEFAULT
 var _restore_pending := false
 var _ko_on = null
-var _lock = null
-var _lock_aim := Vector2.ZERO    ## x: across the body (arms), y: up (head) / down (legs); -1..1
-var _lock_aim_point := Vector3.ZERO
-var _lock_hidden := 0.0
-var _recentre_t0 := -100.0
-var _recentre_from := 0.0
-var _recentre_to := 0.0
 var _squeezed := false
 var _fades := {}
 var _blocker_names := PackedStringArray()
@@ -280,7 +327,7 @@ var _fall_sign := 1.0
 var _wall_k := 0.0
 var _wall_normal := Vector3.ZERO
 var _wall_until := -100.0         ## the run wall stays out of the casts until this real time
-var _exclude: Array[RID] = []     ## colliders left out of the arm casts (run wall + low obstacles)
+var _exclude: Array[RID] = []     ## colliders left out of the arm casts (the run wall)
 var _wall_rids: Array[RID] = []   ## the wall being run on
 var _floor_y := 0.0               ## the player's floor height this frame (low-geometry rule)
 var _shape_boxes := {}            ## CollisionShape3D instance id -> world AABB (static geometry)
@@ -304,9 +351,40 @@ var _launch_w := 0.0              ## lean envelope 0..1 this frame
 var _launch_lean := Vector3.ZERO  ## smoothed look offset toward the body
 var _launch_dist := 0.0           ## fitted distance this frame (0 = none)
 var _launch_body_framed := false
-var _auto_yaw_rate := 0.0         ## rad/s of launch yaw this frame (tests)
+var _auto_yaw_rate := 0.0         ## rad/s of automatic yaw (launch or combat) this frame (tests)
 var _view_corrected := 0.0        ## rad the player-in-frame pass turned the view this frame
 var _death := false               ## the KO orbit is the player's death orbit
+
+# Round 7 state.
+var _follow := Vector3.ZERO       ## spring-followed player aim point
+var _follow_v := Vector3.ZERO     ## its velocity (m/s)
+var _follow_prev := Vector3.ZERO  ## the player's aim point last frame (teleport cut)
+var _combat_lean := Vector3.ZERO  ## smoothed look offset toward the combat / glide target
+var _combat_lean_v := Vector3.ZERO ## its velocity (m/s)
+var _combat_yaw_v := 0.0          ## rad/s of combat auto-yaw (signed, eased)
+## Untyped: a target the player's own camera input put out of frame. Never
+## chased until it is back in frame, the target changes, or the player engages
+## it again (a glide to it, a hit on it).
+var _yaw_veto = null
+var _lean_on = null               ## untyped: the fighter leaned toward this frame (may be freed)
+var _combat_yaw_rate := 0.0       ## rad/s of combat auto-yaw this frame (tests)
+var _glide_target = null          ## untyped: the target of the last glide_started
+var _glide_until := -100.0        ## real time the last glide is over (glide_started)
+var _drive_k := 0.0               ## 0..1 eased drive framing
+var _windup_k := 0.0              ## 0..1 eased throw wind-up zoom
+var _r7_punches := 0              ## Round 7 weight punches (tests, debug)
+var _no_cut_until := -100.0       ## real time: the player teleported, the follow swoops (no cut)
+var _teleports := 0               ## the player's teleports seen (tests, debug)
+var _pursuits := 0                ## the player's pursuits seen (tests, debug)
+var _spike_body = null            ## untyped: the body a spike drove down (watched for its floor impact)
+var _spike_t0 := -100.0
+var _spike_peak := 0.0            ## m/s: its fastest fall since the spike
+var _spike_hits := 0              ## spike hits seen (tests, debug)
+var _spike_impacts := 0           ## floor impacts that punched (tests, debug)
+var _spike_info := {}             ## the last impact: {"by", "pos", "trauma"}
+var _pitch_amp := 0.0             ## rad of the downward punch at its peak
+var _pitch_age := 10.0            ## s since it started
+var _pitch_punch := 0.0           ## rad of downward punch this frame
 
 func _ready() -> void:
 	add_to_group(&"camera_rig")
@@ -341,18 +419,21 @@ func _ready() -> void:
 	GameEvents.fighter_launched.connect(_on_fighter_launched)
 	GameEvents.thrown.connect(_on_thrown)
 	GameEvents.hit_landed.connect(_on_hit_landed)
-	GameEvents.teleport_counter.connect(_on_teleport_counter)
-	GameEvents.teleported.connect(_on_teleported)
 	GameEvents.wall_broken.connect(_on_wall_broken)
 	GameEvents.limb_severed.connect(_on_limb_severed)
 	GameEvents.landing.connect(_on_landing)
-	GameEvents.rammed.connect(_on_rammed)
 	GameEvents.last_kill.connect(_on_last_kill)
 	GameEvents.fighter_died.connect(_on_fighter_died)
+	GameEvents.furniture_broken.connect(_on_furniture_broken)
+	GameEvents.glide_started.connect(_on_glide_started)
+	GameEvents.drive_impact.connect(_on_drive_impact)
+	GameEvents.teleport_counter.connect(_on_teleport_counter)
+	GameEvents.teleported.connect(_on_teleported)
+	GameEvents.pursuit.connect(_on_pursuit)
+	GameEvents.shockwave.connect(_on_shockwave)
+	GameEvents.rammed.connect(_on_rammed)
 	GameEvents.wall_run_started.connect(_on_wall_run_started)
 	GameEvents.wall_run_ended.connect(_on_wall_run_ended)
-	GameEvents.body_slammed.connect(_on_body_slammed)
-	GameEvents.furniture_broken.connect(_on_furniture_broken)
 	if target == null:
 		target = Targeting.player(get_tree())
 	snap_behind()
@@ -433,7 +514,7 @@ func get_enemies_alive() -> int:
 func get_crowd_factor() -> float:
 	return _crowd_k
 
-## m the camera sits above the plain orbit (crowd height, duel drop, sprint drop).
+## m the camera sits above the plain orbit (crowd height, duel drop, sprint / drive drop).
 func get_height() -> float:
 	return _out_height
 
@@ -441,15 +522,70 @@ func get_height() -> float:
 func get_roll_degrees() -> float:
 	return rad_to_deg(_roll)
 
-## Framing FOV (sprint), before the FOV punch.
+## Framing FOV (sprint, drive, throw zoom), before the FOV punch.
 func get_fov() -> float:
 	return _fov
+
+## Look point (world) the camera aims through this frame, after the mode blend:
+## the followed player plus the combat and launch leans.
+func get_look_point() -> Vector3:
+	return _out_look
+
+## Smoothed combat lean (world offset of the look point toward the combat or
+## glide target), and the fighter it leans toward (null when none).
+func get_combat_lean() -> Vector3:
+	return _combat_lean
+
+func get_lean_target() -> Fighter:
+	return _lean_on if _targetable(_lean_on) else null
+
+## Rad/s the combat auto-yaw turned this frame (0 when it did not).
+func get_combat_yaw_rate() -> float:
+	return _combat_yaw_rate
+
+## 0..1 eased drive framing and throw wind-up zoom.
+func get_drive_k() -> float:
+	return _drive_k
+
+func get_windup_k() -> float:
+	return _windup_k
+
+## True while a glide runs (CombatController.is_gliding() or glide_started).
+func is_glide_followed() -> bool:
+	return _is_gliding()
+
+## Downward punch (spike) this frame, degrees (0 almost always).
+func get_pitch_punch() -> float:
+	return rad_to_deg(_pitch_punch)
+
+## Spike hits seen and floor impacts that punched; the last impact
+## ({"by": &"shockwave" | &"fall", "pos", "trauma"}).
+func get_spike_hits() -> int:
+	return _spike_hits
+
+func get_spike_impacts() -> int:
+	return _spike_impacts
+
+func get_last_spike() -> Dictionary:
+	return _spike_info
+
+## The player's teleports and pursuits seen (tests, debug).
+func get_teleport_count() -> int:
+	return _teleports
+
+func get_pursuit_count() -> int:
+	return _pursuits
+
+## The target the player's own camera input turned away from (never chased
+## until engaged again), or null.
+func get_yaw_veto() -> Fighter:
+	return _yaw_veto if _targetable(_yaw_veto) else null
 
 ## Launch framing: the body being framed (null when none) and its lean 0..1.
 func get_launch_body() -> Fighter:
 	return _launch_body if _alive_node(_launch_body) and _launch_w > 0.0 else null
 
-## Rad/s the launch framing turned the yaw this frame (0 when it did not).
+## Rad/s the launch or combat framing turned the yaw this frame (0 when neither did).
 func get_auto_yaw_rate() -> float:
 	return _auto_yaw_rate
 
@@ -470,33 +606,20 @@ func get_cinematic() -> StringName:
 		return &"death" if _death else &"ko"
 	return &""
 
-## Combat aim target: the lock target while locked, else a stable soft target
-## (held SOFT_HOLD s, picked by facing / stick and distance). Never downed.
+## Round 7: the player's combat target (CombatController.get_combat_target():
+## the last enemy struck while it is still a valid freeflow target), never a
+## downed or dead one; null when there is none.
 func get_soft_target() -> Fighter:
-	if is_instance_valid(_lock) and _alive(_lock):
-		return _lock
-	return _soft if _targetable(_soft) else null
+	var c = _combat_target()
+	return c if _targetable(c) and c != target else null
 
-## Lock-on target (null when the camera is free). H reads this.
+## Round 7 removed lock-on: always null. Kept until no caller is left.
 func get_lock_target() -> Fighter:
-	return _lock if is_instance_valid(_lock) and _alive(_lock) else null
+	return null
 
+## Round 7 removed lock-on: always false. Kept until no caller is left.
 func is_locked() -> bool:
-	return get_lock_target() != null
-
-## Locked and the target is not flying: the lock frames it. While a locked
-## target is launched the launch framing takes over (the lock stays).
-func _lock_framing() -> bool:
-	var lf := get_lock_target()
-	return lf != null and not lf.is_launched()
-
-## Aim point on the locked target's body (world), or Vector3.ZERO when free.
-func get_lock_aim_point() -> Vector3:
-	return _lock_aim_point if is_locked() else Vector3.ZERO
-
-## -1..1 aim offset on the locked body (x: arms, y: head / legs).
-func get_lock_aim() -> Vector2:
-	return _lock_aim
+	return false
 
 ## There is no follow-cam in play. Kept for AttackDirector, which asks.
 func is_follow_cam_active() -> bool:
@@ -579,7 +702,6 @@ func start_orbit(focus: Node3D) -> void:
 		return
 	_ko_on = focus
 	_death = focus == target
-	unlock()
 	if _alive_node(focus):
 		_yaw = _best_clear_yaw(_point_of(focus), _yaw, _orbit_dist())
 	if _mode != Mode.CLOSEUP:
@@ -596,163 +718,6 @@ func start_follow(_victim: Fighter) -> void:
 func stop_follow() -> void:
 	AttackDirector.camera_busy = false
 
-# --- Lock-on -------------------------------------------------------------------
-## lock_on: lock the enemy nearest the screen centre in range and in view;
-## locked: unlock; nothing to lock: recentre behind the player.
-func toggle_lock() -> void:
-	if is_locked():
-		unlock()
-		return
-	var best := _pick_lock_candidate()
-	if best != null:
-		_set_lock(best)
-	else:
-		recentre()
-
-func unlock() -> void:
-	if _lock != null:
-		_lock = null
-		_lock_aim = Vector2.ZERO
-		_pitch = clampf(_view_pitch_v, _pitch_min(), _pitch_max())
-		_emit_lock(null)
-
-## +1: next enemy to the right on screen, -1: to the left.
-func cycle_lock(direction: int) -> void:
-	if not is_locked():
-		return
-	var cur: Fighter = _lock
-	var cur_x := _screen_x(cur)
-	var best: Fighter = null
-	var best_dx := INF
-	for f in _lock_candidates(true):
-		if f == cur:
-			continue
-		var dx := (_screen_x(f) - cur_x) * float(direction)
-		if dx > 0.0 and dx < best_dx:
-			best_dx = dx
-			best = f
-	if best != null:
-		_set_lock(best)
-
-## Ease behind the player in RECENTRE_TIME (lock_on with nothing to lock).
-func recentre() -> void:
-	if not _alive_node(target):
-		return
-	_recentre_from = _yaw
-	_recentre_to = _yaw_behind(target)
-	_recentre_t0 = TimeDirector.now()
-
-func _set_lock(f: Fighter) -> void:
-	if f == _lock:
-		return
-	_lock = f
-	_lock_aim = Vector2.ZERO  # chest
-	_lock_hidden = 0.0
-	if _alive(f):
-		_lock_aim_point = _body_point(f, _lock_aim)
-	_emit_lock(f)
-
-func _emit_lock(f: Fighter) -> void:
-	GameEvents.lock_on_changed.emit(target if _alive_node(target) else null, f)
-
-func _lock_candidates(need_view: bool) -> Array[Fighter]:
-	var out: Array[Fighter] = []
-	if not _alive_node(target):
-		return out
-	var origin := target.get_ground_position()
-	for f in Targeting.opponents_of(target):
-		if _flat_dist(origin, f.get_ground_position()) > Tuning.LOCK_RANGE:
-			continue
-		if need_view and not camera.is_position_in_frustum(f.get_aim_point()):
-			continue
-		out.append(f)
-	return out
-
-func _pick_lock_candidate() -> Fighter:
-	var best: Fighter = null
-	var best_angle := INF
-	var fwd := -camera.global_basis.z
-	for f in _lock_candidates(true):
-		var to := (f.get_aim_point() - camera.global_position).normalized()
-		var ang := fwd.angle_to(to)
-		if ang < best_angle:
-			best_angle = ang
-			best = f
-	return best
-
-func _screen_x(f: Fighter) -> float:
-	var p := f.get_aim_point()
-	var right := camera.global_basis.x
-	return (p - camera.global_position).dot(right)
-
-## Drops on range, hidden too long or the player's death; retargets on KO.
-func _update_lock_validity(dt: float) -> void:
-	if _lock == null:
-		return
-	if not _alive_node(target) or target.is_dead():
-		unlock()
-		return
-	if not is_instance_valid(_lock) or not _alive(_lock):
-		_lock = null
-		var next: Fighter = null
-		if Tuning.LOCK_RETARGET_ON_KO:
-			var best_d := INF
-			for f in _lock_candidates(false):
-				var d := _flat_dist(target.get_ground_position(), f.get_ground_position())
-				if d < best_d:
-					best_d = d
-					next = f
-		if next != null:
-			_set_lock(next)
-		else:
-			_lock_aim = Vector2.ZERO
-			_emit_lock(null)
-		return
-	var lf: Fighter = _lock
-	if _flat_dist(target.get_ground_position(), lf.get_ground_position()) > Tuning.LOCK_BREAK_RANGE:
-		unlock()
-		return
-	var q := PhysicsRayQueryParameters3D.create(target.get_aim_point(), lf.get_aim_point(), Layers.WORLD)
-	if not get_world_3d().direct_space_state.intersect_ray(q).is_empty():
-		_lock_hidden += dt
-		if _lock_hidden > Tuning.LOCK_LOS_GRACE:
-			unlock()
-	else:
-		_lock_hidden = 0.0
-
-## World point on `f`'s body for an aim offset: y 1 = head, 0 = chest,
-## -1 = lower legs; x moves toward the forearm on that screen side. Uses the
-## hurtbox capsule centres (what H's zone aim tests), else bone positions.
-func _body_point(f: Fighter, aim: Vector2) -> Vector3:
-	if f.rig == null or not is_instance_valid(f.rig):
-		return f.get_aim_point() + Vector3.UP * aim.y * 0.5
-	var chest := _part_center(f, Bones.CHEST)
-	var p := chest
-	if aim.y >= 0.0:
-		p = chest.lerp(_part_center(f, Bones.HEAD), aim.y)
-	else:
-		var hips := _part_center(f, Bones.HIPS)
-		var shins := (_part_center(f, Bones.L_LOWER_LEG) + _part_center(f, Bones.R_LOWER_LEG)) * 0.5
-		var y := -aim.y
-		p = chest.lerp(hips, minf(y * 2.0, 1.0)) if y <= 0.5 else hips.lerp(shins, (y - 0.5) * 2.0)
-	if absf(aim.x) > 0.01:
-		var right := camera.global_basis.x
-		var la := (f.rig.get_bone_global_position(Bones.L_LOWER_ARM) + f.rig.get_bone_global_position(Bones.L_HAND)) * 0.5
-		var ra := (f.rig.get_bone_global_position(Bones.R_LOWER_ARM) + f.rig.get_bone_global_position(Bones.R_HAND)) * 0.5
-		var side_arm := la if (la - ra).dot(right) * signf(aim.x) > 0.0 else ra
-		p = p.lerp(side_arm, absf(aim.x))
-	return p
-
-## Centre of the fighter's hurtbox capsule on `bone`, else the bone position.
-func _part_center(f: Fighter, bone: StringName) -> Vector3:
-	if "hurtboxes" in f:
-		for hb in f.get(&"hurtboxes"):
-			if is_instance_valid(hb) and hb.get(&"bone") == bone:
-				for c in (hb as Node).get_children():
-					if c is CollisionShape3D:
-						return (c as CollisionShape3D).global_position
-	return f.rig.get_bone_global_position(bone)
-
 # --- Debug --------------------------------------------------------------------
 func get_debug_text() -> String:
 	var soft := get_soft_target()
@@ -765,38 +730,30 @@ func get_debug_text() -> String:
 		what = "pelvis of " + _label_of(target)
 	elif soft != null:
 		what = _label_of(soft)
-	var line := "cam %s%s  target %s  dist %.1f arm %.1f h %+.1f  pitch %.0f  fov %.0f  trauma %.2f" % [
-		MODE_NAMES[_mode], " LOCKED" if is_locked() else " free", what, _out_dist, _arm_len, _height,
+	var line := "cam %s  target %s  dist %.1f arm %.1f h %+.1f  pitch %.0f  fov %.0f  trauma %.2f" % [
+		MODE_NAMES[_mode], what, _out_dist, _arm_len, _height,
 		rad_to_deg(_view_pitch_v), camera.fov if camera else 0.0, _trauma]
-	line += "\nenemies %d crowd %.2f  sprint %.2f  launch %.2f%s  fall %.2f  wall %.2f  roll %.1f" % [
-		_enemies_alive, _crowd_k, _sprint_k, _launch_w, " (framed)" if _launch_body_framed else "",
-		_fall_k, _wall_k, rad_to_deg(_roll)]
-	if is_locked():
-		line += "  aim (%.2f, %.2f)" % [_lock_aim.x, _lock_aim.y]
+	line += "\nenemies %d crowd %.2f  sprint %.2f  drive %.2f  windup %.2f  launch %.2f%s  fall %.2f  wall %.2f  roll %.1f" % [
+		_enemies_alive, _crowd_k, _sprint_k, _drive_k, _windup_k, _launch_w,
+		" (framed)" if _launch_body_framed else "", _fall_k, _wall_k, rad_to_deg(_roll)]
+	line += "\nlean %.2f m%s  glide %s  auto-yaw %.0f deg/s  follow lag %.2f m  teleports %d pursuits %d spikes %d/%d" % [
+		_combat_lean.length(), (" to " + _label_of(_lean_on)) if _targetable(_lean_on) else "",
+		"yes" if _is_gliding() else "no", rad_to_deg(_auto_yaw_rate),
+		(_follow - target.get_aim_point()).length() if _alive_node(target) else 0.0,
+		_teleports, _pursuits, _spike_impacts, _spike_hits]
 	line += "\nblocking: %s%s" % [", ".join(_blocker_names) if not _blocker_names.is_empty() else "nothing",
 		"  (squeezed by concrete)" if _squeezed else ""]
 	return line
 
 # --- Input -------------------------------------------------------------------
+## Mouse motion only (the right stick is read in _read_manual_input). Round 7:
+## no camera buttons (lock-on is gone).
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_mouse_delta += (event as InputEventMouseMotion).screen_relative * mouse_scale()
-		return
-	if not input_enabled or get_tree().paused or _mode == Mode.KO:
-		return
-	if event.is_action_pressed(&"lock_on"):
-		toggle_lock()
-		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed(&"lock_next"):
-		cycle_lock(1)
-		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed(&"lock_prev"):
-		cycle_lock(-1)
-		get_viewport().set_input_as_handled()
 
-## Mouse / right stick, already in radians at sensitivity 1. Free: turns the
-## camera. Locked: moves the aim point over the target's body. Ignored during
-## the last-kill close-up and the death orbit (cinematics own the view).
+## Mouse / right stick, already in radians at sensitivity 1: turns the camera.
+## Ignored during the last-kill close-up and the death orbit (cinematics own the view).
 func apply_manual_input(d: Vector2) -> void:
 	if d.length_squared() <= 0.0:
 		return
@@ -805,11 +762,6 @@ func apply_manual_input(d: Vector2) -> void:
 	_last_manual = TimeDirector.now()
 	if invert_y:
 		d.y = -d.y
-	if is_locked():
-		_lock_aim.x = clampf(_lock_aim.x + d.x * LOCK_AIM_SENS, -1.0, 1.0)
-		_lock_aim.y = clampf(_lock_aim.y - d.y * LOCK_AIM_SENS, -1.0, 1.0)
-		return
-	_recentre_t0 = -100.0
 	_restore_pending = false
 	_yaw -= d.x
 	_pitch = clampf(_pitch - d.y, _pitch_min(), _pitch_max())
@@ -829,22 +781,24 @@ func _process(_delta: float) -> void:
 		target = Targeting.player(get_tree())
 	_update_projection()
 	_auto_yaw_rate = 0.0
+	_combat_yaw_rate = 0.0
 	_read_manual_input(dt)
-	_update_lock_validity(dt)
+	if _alive_node(target):
+		_update_follow(dt, target.get_aim_point())
 	var desired := _desired_mode(t)
 	# Cinematic modes and the player's own knockdown cut in at once; the rest
 	# obeys the rate limit (CAM_MODE_GAP).
 	_request_mode(desired, t, desired == Mode.CLOSEUP or desired == Mode.KO or desired == Mode.DOWN \
 		or _mode == Mode.CLOSEUP)
 
-	_update_traversal_framing(dt)
+	_update_speed_framing(dt)
 	var want_look := _look
 	var want_dist := _dist
 	var want_height := 0.0
-	var look_rate := LOOK_RATE
+	var look_rate := 0.0
+	var direct_look := false  # combat: the follow spring and the leans are already smooth
 	var dist_rate := DIST_RATE
 	var shoulder := 0.0
-	var lift := 0.0
 	var subject: Vector3 = _out_look
 	var play := false
 	_launch_w = 0.0
@@ -891,39 +845,37 @@ func _process(_delta: float) -> void:
 		_:
 			if _alive_node(target):
 				play = true
-				_update_soft_target(t)
 				var p := target.get_aim_point()
-				if _lock_framing():
-					var r := _lock_frame(dt)
-					want_look = r[0]
-					want_dist = r[1]
-					lift = r[2]
+				var r := _crowd_frame(dt)
+				want_dist = r[0]
+				want_height = r[1]
+				_restore_after_cine(dt)
+				# Sprint or drive: further and lower (the larger of the two applies).
+				want_dist += maxf(Tuning.CAM_SPRINT_PULLBACK * _sprint_k, Tuning.R7_CAM_DRIVE_PULLBACK * _drive_k)
+				want_height -= maxf(Tuning.CAM_SPRINT_DROP * _sprint_k, Tuning.R7_CAM_DRIVE_DROP * _drive_k)
+				var lf := _launch_frame(t, dt, p, want_dist, want_height)
+				var launching: bool = lf[0]
+				if launching and lf[1] > want_dist:
+					want_dist = lf[1]
+					dist_rate = LAUNCH_DIST_RATE
+				# Round 7 combat lean and auto-yaw (the launch framing has its own).
+				_update_combat_lean(dt, p, launching)
+				if not launching:
+					_combat_yaw(t, dt, p + _combat_lean, want_dist, want_height)
 				else:
-					var r := _crowd_frame(dt)
-					want_look = p
-					want_dist = r[0]
-					want_height = r[1]
-					_update_recentre(t)
-					_restore_after_cine(dt)
-				# Sprint: further and lower by sprint_charge. Locked, no height
-				# offset (the view must pass through the lock aim point).
-				want_dist += Tuning.CAM_SPRINT_PULLBACK * _sprint_k
-				if not _lock_framing():
-					want_height -= Tuning.CAM_SPRINT_DROP * _sprint_k
-					var lf := _launch_frame(t, dt, p, want_dist, want_height)
-					if lf[0]:
-						want_look = p + _launch_lean
-						if lf[1] > want_dist:
-							want_dist = lf[1]
-							dist_rate = LAUNCH_DIST_RATE
-						look_rate = LAUNCH_LOOK_RATE
-				else:
-					_launch_lean = Vector3.ZERO
+					_combat_yaw_v = 0.0
+				want_look = _follow + _combat_lean + _launch_lean
+				direct_look = true
 				shoulder = 1.0
 				subject = p
 
 	if not play:
 		_launch_lean = Vector3.ZERO
+		_combat_lean = Vector3.ZERO
+		_combat_lean_v = Vector3.ZERO
+		_combat_yaw_v = 0.0
+		_lean_on = null
+		_yaw_veto = null
 	if _snap:
 		_look = want_look
 		_dist = want_dist
@@ -935,18 +887,17 @@ func _process(_delta: float) -> void:
 		_soft_len = want_dist
 		_blend_t0 = -100.0
 	else:
-		_look = _look.lerp(want_look, 1.0 - exp(-look_rate * dt))
+		_look = want_look if direct_look else _look.lerp(want_look, 1.0 - exp(-look_rate * dt))
 		_dist = lerpf(_dist, want_dist, 1.0 - exp(-dist_rate * dt))
 		# Cinematics use their own height at once (the mode blend eases into it).
-		var hr := LOCK_HEIGHT_RATE if _lock_framing() else HEIGHT_RATE
-		_height = lerpf(_height, want_height, 1.0 - exp(-hr * dt)) if _mode == Mode.COMBAT else want_height
+		_height = lerpf(_height, want_height, 1.0 - exp(-HEIGHT_RATE * dt)) if _mode == Mode.COMBAT else want_height
 	var w := smoothstep(0.0, 1.0, clampf((t - _blend_t0) / maxf(_blend_time, 0.001), 0.0, 1.0))
 	_out_look = _blend_look.lerp(_look, w)
 	_out_height = lerpf(_blend_height, _height, w)
 	_out_dist = maxf(lerpf(_blend_dist, _dist, w),
 		Tuning.CAM_LAST_KILL_DIST * 0.8 if _mode == Mode.CLOSEUP else Tuning.CAM_MIN_DIST)
 
-	_place_camera(dt, shoulder, lift, subject)
+	_place_camera(dt, shoulder, subject)
 	_snap = false
 	_update_fades(dt)
 	_update_ring(dt)
@@ -1113,26 +1064,31 @@ func _launch_frame(t: float, dt: float, p: Vector3, base_dist: float, height: fl
 			_auto_yaw_rate = step / maxf(dt, 0.0001)
 	return [true, chosen_d]
 
-## Sprint, fall tilt and wall run from the player's Traversal (smoothed).
-func _update_traversal_framing(dt: float) -> void:
+## Sprint, fall tilt and wall run from the player's Traversal, drive and throw
+## wind-up from its Carry (all smoothed). Traversal is read by name, so a
+## reader M changes never breaks the camera.
+func _update_speed_framing(dt: float) -> void:
 	var tr: Traversal = target.traversal if _alive_node(target) and not target.is_dead() else null
 	var sc := 0.0
 	var fall := 0.0
 	var running := false
 	var cap := Tuning.SPRINT_CAPS[0]
 	if tr != null and is_instance_valid(tr):
-		sc = clampf(tr.sprint_charge, 0.0, 1.0)
-		if tr.is_airborne() and tr.get_fall_height() > 0.02:
-			# Descending: the whole drop is what fell so far plus what is left.
-			fall = tr.get_fall_height() + _height_above_floor()
-		running = tr.is_wall_running()
-		cap = tr.get_speed_cap()
+		sc = clampf(float(_trav_get(tr, &"sprint_charge", 0.0)), 0.0, 1.0)
+		if bool(_trav_call(tr, &"is_airborne", false)):
+			var fallen := float(_trav_call(tr, &"get_fall_height", 0.0))
+			if fallen > 0.02:
+				# Descending: the whole drop is what fell so far plus what is left.
+				fall = fallen + _height_above_floor()
+		cap = float(_trav_call(tr, &"get_speed_cap", cap))
+		running = bool(_trav_call(tr, &"is_wall_running", false))
 		if running:
-			var n := tr.get_wall_normal()
+			var n: Vector3 = _trav_call(tr, &"get_wall_normal", Vector3.ZERO)
 			n.y = 0.0
 			if n.length() > 0.1:
 				_wall_normal = n.normalized()
-	if _mode != Mode.COMBAT:
+	var combat := _mode == Mode.COMBAT
+	if not combat:
 		sc = 0.0
 		fall = 0.0
 		running = false
@@ -1142,7 +1098,18 @@ func _update_traversal_framing(dt: float) -> void:
 	var caps := Tuning.SPRINT_CAPS
 	var up := clampf((cap - caps[0]) / maxf(caps[caps.size() - 1] - caps[0], 0.01), 0.0, 1.0)
 	_fov_top = lerpf(Tuning.CAM_FOV_SPRINT, Tuning.CAM_FOV_SPRINT_MAX, up)
-	_fov = Tuning.CAM_FOV + (_fov_top - Tuning.CAM_FOV) * _sprint_k
+	# Round 7 drive (eased in and out) and throw wind-up zoom (follows the
+	# wind-up, eases back after the release).
+	var dk := 1.0 if combat and _is_driving() else 0.0
+	_drive_k = dk if _snap else lerpf(_drive_k, dk, 1.0 - exp(-(DRIVE_RISE_RATE if dk > _drive_k else DRIVE_FALL_RATE) * dt))
+	if absf(_drive_k - dk) < 0.001:
+		_drive_k = dk
+	var wk := clampf(_throw_windup(), 0.0, 1.0) if combat else 0.0
+	_windup_k = wk if _snap else lerpf(_windup_k, wk, 1.0 - exp(-(WINDUP_RISE_RATE if wk > _windup_k else WINDUP_FALL_RATE) * dt))
+	if absf(_windup_k - wk) < 0.001:
+		_windup_k = wk
+	_fov = Tuning.CAM_FOV + maxf((_fov_top - Tuning.CAM_FOV) * _sprint_k, Tuning.R7_CAM_DRIVE_FOV * _drive_k) \
+		- Tuning.R7_CAM_THROW_ZOOM_FOV * _windup_k
 	# Fall tilt past CAM_FALL_FROM.
 	var fk := clampf((fall - Tuning.CAM_FALL_FROM) / FALL_RAMP, 0.0, 1.0)
 	_fall_k = lerpf(_fall_k, fk, 1.0 - exp(-(FALL_RISE_RATE if fk > _fall_k else FALL_RATE) * dt))
@@ -1164,6 +1131,13 @@ func _update_traversal_framing(dt: float) -> void:
 		+ deg_to_rad(Tuning.CAM_WALLRUN_ROLL) * _wall_k * wall_side
 	_pitch_off = -deg_to_rad(FALL_PITCH) * _fall_k
 
+static func _trav_call(tr: Object, method: StringName, fallback: Variant) -> Variant:
+	return tr.call(method) if tr.has_method(method) else fallback
+
+static func _trav_get(tr: Object, prop: StringName, fallback: Variant) -> Variant:
+	var v = tr.get(prop)
+	return v if v != null else fallback
+
 ## Metres from the player's feet down to the floor or platform below (WORLD or
 ## a wall top), 0 when nothing is found.
 func _height_above_floor() -> float:
@@ -1176,35 +1150,135 @@ func _height_above_floor() -> float:
 		return 0.0
 	return maxf(target.global_position.y - (hit["position"] as Vector3).y, 0.0)
 
-## Locked: yaw toward the aim point (capped at LOCK_TURN_SPEED, the launch rate
-## while the target is down), the pivot lifted so the shoulder -> aim line has
-## the lock pitch; returns [look, dist, lift].
-func _lock_frame(dt: float) -> Array:
-	var lf: Fighter = _lock
-	_enemies_alive = Targeting.opponents_of(target).size()
-	var goal := _body_point(lf, _lock_aim)
-	_lock_aim_point = _lock_aim_point.lerp(goal, 1.0 - exp(-LOCK_AIM_RATE * dt))
-	var p := target.get_aim_point()
-	# Yaw from the shoulder pivot (last frame's), so the aim point lands on the centre.
-	var from := _pivot if _pivot != Vector3.ZERO else p
-	var to := _lock_aim_point - from
-	var flat := Vector2(to.x, to.z).length()
-	if flat > 0.2:
-		var want_yaw := atan2(-to.x, -to.z)
-		var rate := Tuning.CAM_LAUNCH_YAW_RATE if lf.is_down() else Tuning.LOCK_TURN_SPEED
-		var cap := deg_to_rad(rate) * dt
-		_yaw += clampf(wrapf(want_yaw - _yaw, -PI, PI), -cap, cap)
-	var sep := maxf(flat, 0.5)
-	var lift := maxf(sep * tan(deg_to_rad(-Tuning.LOCK_PITCH)) - (_lock_aim_point.y - p.y), 0.0)
-	var dist := clampf(LOCK_DIST_BASE + sep * LOCK_DIST_PER_M, Tuning.CAM_MIN_DIST, Tuning.CAM_CROWD_DIST.x)
-	return [p, dist, lift]
+# --- Round 7: follow, combat lean, auto-yaw, glide, drive ---------------------------
+## The look point's player part: a critically damped spring on the player's aim
+## point (exact step, stable for any frame length). It never overshoots, its
+## speed never jumps, and it lags 2 v / FOLLOW_OMEGA behind a steady speed v.
+## A jump of more than FOLLOW_CUT in one frame cuts instead, except right after
+## the player's own teleport (counter or pursuit): that one the spring swoops
+## (no overshoot, ~0.2 s), so the player never pops across the screen.
+func _update_follow(dt: float, p: Vector3) -> void:
+	var cut := p.distance_to(_follow_prev) > FOLLOW_CUT and TimeDirector.now() > _no_cut_until
+	if _snap or _follow == Vector3.ZERO or cut:
+		_follow = p
+		_follow_v = Vector3.ZERO
+	else:
+		var r := _spring(_follow, _follow_v, p, FOLLOW_OMEGA, dt)
+		_follow = r[0]
+		_follow_v = r[1]
+	_follow_prev = p
 
-func _update_recentre(t: float) -> void:
-	var k := (t - _recentre_t0) / RECENTRE_TIME
-	if k < 0.0 or k > 1.0:
+## One exact step of a critically damped spring (omega rad/s) from position x
+## and velocity v toward a goal held for dt. Returns [x, v].
+static func _spring(x: Vector3, v: Vector3, goal: Vector3, omega: float, dt: float) -> Array:
+	var e := x - goal
+	var k := v + e * omega
+	var ex := exp(-omega * dt)
+	return [goal + (e + k * dt) * ex, (v - k * (omega * dt)) * ex]
+
+## The fighter the look-at leans toward: the glide target while a glide runs,
+## else the combat target; null during a launch (it frames the body itself).
+func _lean_target_now(launching: bool):
+	if launching:
+		return null
+	if _is_gliding() and _targetable(_glide_target) and _glide_target != target:
+		return _glide_target
+	var c = get_soft_target()
+	if c != null and _flat_dist(target.get_ground_position(), (c as Fighter).get_ground_position()) \
+			> Tuning.R7_TARGET_RANGE + Tuning.R7_TARGET_KEEP_EXTRA + 1.0:
+		return null
+	return c
+
+## Round 7 combat lean: R7_CAM_LEAN of the way toward the lean target, at most
+## LEAN_MAX, and only as much as keeps the player inside LEAN_PLAYER_SAFE of the
+## half frame (largest of LEAN_STEPS that fits). A critically damped spring at
+## LEAN_OMEGA (out at the launch rate when a launch takes over the framing), so a
+## new target or a glide never starts the look point moving with a jolt.
+func _update_combat_lean(dt: float, p: Vector3, launching: bool) -> void:
+	_lean_on = _lean_target_now(launching)
+	var goal := Vector3.ZERO
+	if _lean_on != null:
+		var lean := ((_lean_on as Fighter).get_aim_point() - p) * Tuning.R7_CAM_LEAN
+		lean.y = clampf(lean.y, LEAN_UP.x, LEAN_UP.y)
+		lean = lean.limit_length(LEAN_MAX)
+		var pts := _player_points()
+		for k: float in LEAN_STEPS:
+			if _all_inside(_view_from(p + lean * k, _out_dist, _out_height, _pitch), pts, LEAN_PLAYER_SAFE):
+				goal = lean * k
+				break
+	if _snap:
+		_combat_lean = goal
+		_combat_lean_v = Vector3.ZERO
 		return
-	_yaw = lerp_angle(_recentre_from, _recentre_to, smoothstep(0.0, 1.0, k))
-	_pitch = lerpf(_pitch, PITCH_DEFAULT, smoothstep(0.0, 1.0, k))
+	var r := _spring(_combat_lean, _combat_lean_v, goal, LAUNCH_LOOK_RATE if launching else LEAN_OMEGA, dt)
+	_combat_lean = r[0]
+	_combat_lean_v = r[1]
+
+## Round 7 auto-yaw: only to keep the lean target on screen. When its chest or
+## feet would sit beyond COMBAT_TARGET_SAFE of the half width, turn toward it,
+## slowing as it reaches that line (COMBAT_YAW_GAIN), at most
+## R7_CAM_AUTO_YAW_RATE, easing in and out (COMBAT_YAW_ACCEL). Never against
+## the player's input: never within CAM_MOUSE_IDLE s of camera input (the input
+## stops it at once), and a target the player's own input put out of frame is
+## not chased afterwards (_yaw_veto). Never for a target more than
+## COMBAT_YAW_REACH round. The turn is about the pivot beside the player, and
+## the player-in-frame pass still runs after it.
+func _combat_yaw(t: float, dt: float, look: Vector3, dist: float, height: float) -> void:
+	var excess := 0.0
+	var worst := 0.0
+	if _lean_on != null:
+		var f := _lean_on as Fighter
+		var xf := _view_from(look, minf(dist, _out_dist), height, _pitch)
+		for q: Vector3 in [f.get_aim_point(), f.get_ground_position() + Vector3.UP * 0.1]:
+			var l := xf.basis.transposed() * (q - xf.origin)
+			var ang := atan2(l.x, -l.z)
+			if absf(ang) > absf(worst):
+				worst = ang
+		excess = absf(worst) - atan(COMBAT_TARGET_SAFE * _tan_h)
+	if _yaw_veto != null and (_yaw_veto != _lean_on or excess <= 0.0):
+		_yaw_veto = null  # back in frame, or another target: the veto is over
+	if t - _last_manual < Tuning.CAM_MOUSE_IDLE:
+		_combat_yaw_v = 0.0  # the player's input owns the yaw
+		if _lean_on != null and excess > COMBAT_YAW_DEADBAND and t - _last_manual < 0.1:
+			_yaw_veto = _lean_on  # the player turned away from it
+		return
+	var want := 0.0
+	if _lean_on != null and _lean_on != _yaw_veto:
+		if excess > COMBAT_YAW_DEADBAND and absf(worst) <= deg_to_rad(COMBAT_YAW_REACH):
+			want = -signf(worst) * minf(deg_to_rad(Tuning.R7_CAM_AUTO_YAW_RATE), excess * COMBAT_YAW_GAIN)
+	_combat_yaw_v = move_toward(_combat_yaw_v, want, deg_to_rad(COMBAT_YAW_ACCEL) * dt)
+	if is_zero_approx(_combat_yaw_v):
+		_combat_yaw_v = 0.0
+		return
+	_yaw += _combat_yaw_v * dt
+	_combat_yaw_rate = absf(_combat_yaw_v)
+	_auto_yaw_rate = maxf(_auto_yaw_rate, _combat_yaw_rate)
+
+## The player's combat target from CombatController (untyped: it may be a
+## fighter freed this frame). Tests override this in a subclass.
+func _combat_target():
+	if not _alive_node(target) or target.combat == null or not is_instance_valid(target.combat):
+		return null
+	return target.combat.get_combat_target()
+
+## A glide runs: CombatController.is_gliding(), or inside the time the last
+## glide_started needs at R7_GLIDE_SPEED (at most R7_GLIDE_MAX_TIME).
+func _is_gliding() -> bool:
+	if TimeDirector.now() < _glide_until:
+		return true
+	return _alive_node(target) and target.combat != null and is_instance_valid(target.combat) \
+		and target.combat.is_gliding()
+
+## carry.is_driving() of the player. Tests override this in a subclass.
+func _is_driving() -> bool:
+	return _alive_node(target) and target.carry != null and is_instance_valid(target.carry) \
+		and target.carry.is_driving()
+
+## carry.get_throw_windup() of the player (0..1). Tests override this in a subclass.
+func _throw_windup() -> float:
+	if not _alive_node(target) or target.carry == null or not is_instance_valid(target.carry):
+		return 0.0
+	return target.carry.get_throw_windup()
 
 ## After a close-up the player gets back the yaw / pitch they had (unless they
 ## moved the camera meanwhile).
@@ -1310,7 +1384,7 @@ func _player_points() -> Array[Vector3]:
 	return out
 
 # --- Placement ---------------------------------------------------------------------
-func _place_camera(dt: float, shoulder: float, lift: float, subject: Vector3) -> void:
+func _place_camera(dt: float, shoulder: float, subject: Vector3) -> void:
 	var space := get_world_3d().direct_space_state if is_inside_tree() else null
 	_floor_y = target.get_ground_position().y if _alive_node(target) else 0.0
 	_exclude.clear()
@@ -1336,7 +1410,7 @@ func _place_camera(dt: float, shoulder: float, lift: float, subject: Vector3) ->
 			_soft_len = saved[1]
 			_arm_len = saved[2]
 			_pitch = saved[3]
-		var base := _out_look + Vector3.UP * lift
+		var base := _out_look
 		# Chain of sweeps from the subject (player / pelvis) so no link starts in concrete.
 		if space != null:
 			var reach := base - subject
@@ -1358,14 +1432,9 @@ func _place_camera(dt: float, shoulder: float, lift: float, subject: Vector3) ->
 		_pivot = base + player_side.x * _shoulder
 		global_position = _pivot
 
-		# Pitch: the player's (or the lock geometry), plus the framing offsets and
-		# height; tilted toward the limit when squeezed; kept above the floor.
+		# Pitch: the player's, plus the framing offsets and height; tilted toward
+		# the limit when squeezed; kept above the floor.
 		var p := _pitch
-		if _lock_framing() and _mode == Mode.COMBAT:
-			var to := _lock_aim_point - _pivot
-			var want_p := atan2(to.y, Vector2(to.x, to.z).length())
-			_pitch = lerpf(_pitch, clampf(want_p, _pitch_min(), _pitch_max()), 1.0 - exp(-LOCK_PITCH_RATE * dt))
-			p = _pitch
 		var pd := _raised(p + _pitch_off, _out_dist, _out_height)
 		p = clampf(pd.x, deg_to_rad(PITCH_FLOOR), _pitch_max())
 		arm_want = pd.y
@@ -1437,6 +1506,16 @@ func _place_camera(dt: float, shoulder: float, lift: float, subject: Vector3) ->
 	if shake_rot != Vector2.ZERO:
 		view_basis = Basis(view_basis.y, shake_rot.x) * view_basis
 		view_basis = Basis(view_basis.x, shake_rot.y) * view_basis
+	# Spike: the downward punch (the view nods toward the floor impact, then eases back).
+	_pitch_age += dt
+	var pk := 0.0
+	if _pitch_age < PITCH_PUNCH_RISE:
+		pk = _pitch_age / PITCH_PUNCH_RISE
+	elif _pitch_age < PITCH_PUNCH_END:
+		pk = 1.0 - smoothstep(PITCH_PUNCH_HOLD, PITCH_PUNCH_END, _pitch_age)
+	_pitch_punch = _pitch_amp * pk
+	if _pitch_punch > 0.00001:
+		view_basis = Basis(view_basis.x.normalized(), -_pitch_punch) * view_basis
 	# A squeezed (short) camera can leave the subject outside the view: turn the
 	# view (not the player's yaw / pitch) just enough to keep it inside.
 	# Only while the player is down: in play the player-in-frame pass does it.
@@ -1717,13 +1796,14 @@ func _update_fades(dt: float) -> void:
 	for id in _fades:
 		_fades[id]["hit"] = false
 	if is_inside_tree() and _alive_node(target) and _mode != Mode.KO:
-		var points: Array[Vector3] = [target.get_aim_point(), _point_of(target)]
+		# The player first: anything hiding the player fades, the combat target
+		# too (it may stand between the camera and a player who glided past it).
+		var only_player: Array = [target]
+		for p: Vector3 in [target.get_aim_point(), _point_of(target)]:
+			_cast_blockers(camera.global_position, p, only_player)
 		var soft := get_soft_target()
 		if soft != null:
-			points.append(soft.get_aim_point())
-		var keep: Array = [target, soft]
-		for p in points:
-			_cast_blockers(camera.global_position, p, keep)
+			_cast_blockers(camera.global_position, soft.get_aim_point(), [target, soft])
 	_blocker_names.clear()
 	var drop: Array = []
 	for id in _fades:
@@ -1820,50 +1900,6 @@ static func _owner_fighter(col) -> Fighter:
 		n = (n as Node).get_parent()
 	return null
 
-# --- Soft target ---------------------------------------------------------------
-## Stable: prefer the current target, hold it SOFT_HOLD s, pick by the stick
-## (or the player's facing) and distance, switch only for a clearly better one.
-func _update_soft_target(t: float) -> void:
-	if is_locked():
-		return
-	var dir := Vector3.ZERO
-	if target.brain != null and target.brain.has_method(&"get_stick_world"):
-		dir = target.brain.get_stick_world()
-	if Vector2(dir.x, dir.z).length() < 0.2:
-		dir = target.get_forward()
-	dir.y = 0.0
-	dir = dir.normalized() if dir.length() > 0.01 else Vector3.FORWARD
-	var current_ok := _targetable(_soft) and _flat_dist(target.get_ground_position(), _soft.get_ground_position()) < FRAME_RADIUS
-	if current_ok and t - _soft_changed_at < SOFT_HOLD:
-		return
-	var best: Fighter = null
-	var best_score := INF
-	for f in Targeting.opponents_of(target):
-		if f.is_down():
-			continue
-		var s := _soft_score(f, dir)
-		if s < best_score:
-			best_score = s
-			best = f
-	if not current_ok:
-		_set_soft(best, t)
-	elif best != null and best != _soft and best_score < _soft_score(_soft, dir) - SOFT_SWITCH_MARGIN:
-		_set_soft(best, t)
-
-func _soft_score(f: Fighter, dir: Vector3) -> float:
-	var to := f.get_ground_position() - target.get_ground_position()
-	to.y = 0.0
-	var d := to.length()
-	if d > FRAME_RADIUS:
-		return INF
-	var ang := 0.0 if d < 0.01 else (1.0 - dir.dot(to / d))
-	return ang * 4.0 + d * 0.25
-
-func _set_soft(f: Fighter, t: float) -> void:
-	if f != _soft:
-		_soft = f
-		_soft_changed_at = t
-
 # --- Events --------------------------------------------------------------------
 func _on_screen_shake(trauma: float) -> void:
 	add_trauma(trauma)
@@ -1879,30 +1915,148 @@ func _event_k(pos: Vector3) -> float:
 	var d := target.get_aim_point().distance_to(pos)
 	return lerpf(1.0, TRAUMA_FAR_MIN, clampf((d - TRAUMA_FAR.x) / (TRAUMA_FAR.y - TRAUMA_FAR.x), 0.0, 1.0))
 
+## Round 7: the player's own hits (HitInfo.react set) punch by their weight: an
+## FOV kick of weight x R7_CAM_PUNCH_FOV and weight x R7_CAM_PUNCH_TRAUMA,
+## in place of the tier trauma. Every other hit (enemy hits on the player,
+## thrown bodies, enemy on enemy) keeps the tier trauma by distance.
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null:
 		return
 	var pos := info.hit_position
 	if pos == Vector3.ZERO and is_instance_valid(info.victim):
 		pos = info.victim.global_position
-	_add_event_trauma(Power.trauma_for(info.tier), pos)
+	var mine := _alive_node(target) and is_instance_valid(info.attacker) and info.attacker == target
+	if mine:
+		_yaw_veto = null  # the player engaged a target: frame it again
+	if mine and info.react != &"":
+		var w := clampf(info.weight, 0.0, 1.0)
+		if w > 0.0:
+			punch_fov(w * Tuning.R7_CAM_PUNCH_FOV)
+			add_trauma(w * Tuning.R7_CAM_PUNCH_TRAUMA)
+		_r7_punches += 1
+	else:
+		_add_event_trauma(Power.trauma_for(info.tier), pos)
 	if not _alive_node(target):
 		return
 	if info.attacker == target or info.victim == target:
 		var k := 0.03 + info.damage / KICK_DAMAGE_DIV + info.energy / KICK_ENERGY_DIV
 		add_kick(info.hit_direction, minf(k, KICK_MAX))
-	if HitInfo.is_launch_tier(info.tier) and info.victim != target and info.victim is Fighter:
+	if mine and info.victim is Fighter and info.victim != target and is_spike_hit(info):
+		_start_spike_watch(info.victim as Fighter)
+	var launched := HitInfo.is_launch_tier(info.tier) or info.react == &"launch"
+	if launched and info.victim != target and info.victim is Fighter:
 		_track_launch(info.victim as Fighter)
-		if info.tier >= HitInfo.Tier.HARD_LAUNCH and (info.attacker == target or info.victim == target):
+		if info.react == &"" and info.tier >= HitInfo.Tier.HARD_LAUNCH and (info.attacker == target or info.victim == target):
 			punch_fov()
+
+## Round 7 weight punches so far (tests, debug).
+func get_r7_punch_count() -> int:
+	return _r7_punches
 
 func _on_teleport_counter(defender: Node3D, victim: Node3D) -> void:
 	if defender == target or victim == target:
 		punch_fov()
 
+## The player teleported (H: &"counter" behind an attacker, &"pursuit" to a
+## flying body): the follow swoops to the new spot instead of cutting; a
+## counter teleport punches the FOV.
 func _on_teleported(fighter: Node3D, _from: Vector3, _to: Vector3, kind: StringName) -> void:
-	if kind == &"counter" and fighter == target:
+	if not _alive_node(target) or fighter != target:
+		return
+	_no_cut_until = TimeDirector.now() + TELEPORT_NO_CUT
+	_teleports += 1
+	if kind == &"counter":
 		punch_fov()
+
+## H: the player pursued a flying body. Keep it framed: the launch framing
+## carries on at full lean (its window restarts), so a chain of pursuits and
+## relaunches never drops the body or swings the view back to the player.
+func _on_pursuit(attacker: Node3D, victim: Node3D) -> void:
+	if not _alive_node(target) or attacker != target:
+		return
+	_no_cut_until = maxf(_no_cut_until, TimeDirector.now() + TELEPORT_NO_CUT)
+	_pursuits += 1
+	if victim is Fighter:
+		_track_launch(victim as Fighter)
+
+## A spike hit: a pursuit hit by the player driving the body down
+## (react &"spike", or a launch velocity steeper than SPIKE_DOWN_DOT).
+static func is_spike_hit(info: HitInfo) -> bool:
+	if info == null:
+		return false
+	if info.react == &"spike":
+		return true
+	var v := info.launch_velocity
+	return info.pursuit and v.length() > 1.0 and v.normalized().y < -SPIKE_DOWN_DOT
+
+func _start_spike_watch(body: Fighter) -> void:
+	_spike_body = body
+	_spike_t0 = TimeDirector.now()
+	_spike_peak = 0.0
+	_spike_hits += 1
+
+## The spiked body's floor impact: the view pitches down (SPIKE_PITCH_PUNCH)
+## with a downward jolt, and the trauma rises to SPIKE_TRAUMA (by distance from
+## the player). Once per spike.
+func _spike_impact(pos: Vector3, by: StringName) -> void:
+	_spike_body = null
+	_pitch_amp = maxf(_pitch_punch, deg_to_rad(SPIKE_PITCH_PUNCH))
+	_pitch_age = PITCH_PUNCH_RISE * clampf(_pitch_punch / maxf(_pitch_amp, 0.0001), 0.0, 1.0)
+	add_kick(Vector3.DOWN, SPIKE_KICK)
+	var felt := SPIKE_TRAUMA * _event_k(pos)
+	_trauma = clampf(maxf(_trauma, felt), 0.0, 1.0)
+	_spike_impacts += 1
+	_spike_info = {"by": by, "pos": pos, "trauma": felt}
+
+## The player's shockwave (M: heavy landing; the spike's floor impact) is the
+## spike's impact only right after a spike hit and near that body: a heavy
+## landing has the same stumble radius (Tuning.SHOCK_STUMBLE_RADIUS).
+func _on_shockwave(fighter: Node3D, position: Vector3, _stumble_radius: float, _knockdown_radius: float) -> void:
+	if not _alive_node(target) or fighter != target or _spike_body == null:
+		return
+	if TimeDirector.now() - _spike_t0 > SPIKE_WATCH or not _alive_node(_spike_body):
+		return
+	var g := (_spike_body as Fighter).get_ground_position()
+	if _flat_dist(g, position) <= Tuning.R7_SPIKE_BLAST_RADIUS + SPIKE_NEAR:
+		_spike_impact(position, &"shockwave")
+
+## No shockwave yet: the spiked body's own fall stopping (falling at
+## SPIKE_IMPACT_FROM or more, then under half that peak) is the impact.
+func _watch_spike() -> void:
+	if _spike_body == null:
+		return
+	if not _alive_node(_spike_body) or TimeDirector.now() - _spike_t0 > SPIKE_WATCH:
+		_spike_body = null
+		return
+	var f := _spike_body as Fighter
+	var vy := f.get_com_velocity().y
+	if vy < 0.0 and -vy >= _spike_peak:
+		_spike_peak = -vy
+	elif _spike_peak >= SPIKE_IMPACT_FROM and -vy < _spike_peak * 0.5:
+		_spike_impact(f.get_ground_position(), &"fall")
+
+func _on_rammed(runner: Node3D, victim: Node3D, _result: StringName, _self_result: StringName) -> void:
+	if runner == target or victim == target:
+		add_trauma(float(Tuning.TRAUMA[&"ram"]))
+
+## B: a strike glides to its target. The follow already covers 11 m/s; the lean
+## (and auto-yaw) turn to the glide target for the glide's length.
+func _on_glide_started(fighter: Node3D, glide_target: Node3D, distance: float) -> void:
+	if not _alive_node(target) or fighter != target:
+		return
+	_glide_target = glide_target
+	_glide_until = TimeDirector.now() + minf(distance / Tuning.R7_GLIDE_SPEED, Tuning.R7_GLIDE_MAX_TIME) + GLIDE_GRACE
+	_yaw_veto = null  # the player engaged a target: frame it again
+
+## G: the player's driven body met something: trauma by speed (DRIVE_TRAUMA:
+## slam big, break medium, bowl and shove small), raised to, never stacked on
+## the trauma the wall's own wall_broken added on the same contact.
+func _on_drive_impact(holder: Node3D, _victim: Node3D, _hit: Node3D, _position: Vector3, speed: float,
+		result: StringName) -> void:
+	if not _alive_node(target) or holder != target or not DRIVE_TRAUMA.has(result):
+		return
+	var share := clampf(speed / Tuning.R7_DRIVE_MAX_SPEED, DRIVE_TRAUMA_MIN_SHARE, 1.0)
+	_trauma = maxf(_trauma, clampf(float(DRIVE_TRAUMA[result]) * share, 0.0, 1.0))
 
 func _on_wall_broken(wall: Node3D, position: Vector3, _energy: float, _velocity: Vector3) -> void:
 	if not TimeDirector.is_real_wall(wall):
@@ -1935,11 +2089,7 @@ func _furniture_shake(position: Vector3) -> void:
 	_last_furniture = t
 	_add_event_trauma(FURNITURE_TRAUMA, position)
 
-## Body slam (G): the holder lands on the body: heavy-landing trauma.
-func _on_body_slammed(holder: Node3D, _victim: Node3D, _position: Vector3) -> void:
-	if holder == target:
-		_heavy_trauma()
-
+## Each physics step: the spiked body's floor impact (_watch_spike), then
 ## Round 6: falling structure pieces (group "falling_pieces": a pillar's beam
 ## and sign, a lintel, a snapped pillar's upper sections) thump when they hit
 ## something: falling at THUMP_MIN_SPEED or more, the speed drops under half
@@ -1952,6 +2102,7 @@ func _physics_process(delta: float) -> void:
 	if not is_inside_tree():
 		return
 	_game_t += delta
+	_watch_spike()
 	var seen := {}
 	for n in get_tree().get_nodes_in_group(&"falling_pieces"):
 		var rb := n as RigidBody3D
@@ -2009,17 +2160,13 @@ func get_thump_count() -> int:
 func get_last_thump() -> Dictionary:
 	return _thump_info
 
-## Heavy landing / slam: once, even when both events report the same landing.
+## Heavy landing: once, even when it is reported twice.
 func _heavy_trauma() -> void:
 	var t := TimeDirector.now()
 	if t - _last_heavy < HEAVY_DEDUPE:
 		return
 	_last_heavy = t
 	add_trauma(float(Tuning.TRAUMA[&"heavy_landing"]))
-
-func _on_rammed(runner: Node3D, victim: Node3D, _result: StringName, _self_result: StringName) -> void:
-	if runner == target or victim == target:
-		add_trauma(float(Tuning.TRAUMA[&"ram"]))
 
 ## Last enemy of a wave down: cut to the close side angle for the last-kill slow motion.
 func _on_last_kill(fighter: Node3D) -> void:
@@ -2063,12 +2210,12 @@ static func is_headline_break(wall) -> bool:
 	var broken := bool(wall.get(&"is_broken")) if "is_broken" in wall else false
 	return holes <= 1 or broken
 
-func _on_fighter_launched(fighter: Node3D, velocity: Vector3) -> void:
+## Frame a launched body. Round 7: the punch comes from the hit's weight
+## (hit_landed), never a second one from the launch itself.
+func _on_fighter_launched(fighter: Node3D, _velocity: Vector3) -> void:
 	var f := fighter as Fighter
 	if f == null or f == target:
 		return
-	if velocity.length() >= Power.launch_speed(Tuning.TIER_BANDS[3]) and _launched_by_player(f):
-		punch_fov()
 	_track_launch(f)
 
 func _on_thrown(_grabber: Node3D, victim: Node3D, _velocity: Vector3) -> void:
@@ -2077,6 +2224,8 @@ func _on_thrown(_grabber: Node3D, victim: Node3D, _velocity: Vector3) -> void:
 		_track_launch(f)
 
 ## Frame this body for CAM_LAUNCH_FOLLOW s (a new launch restarts the window).
+## The same body again while it is still framed (a pursuit, a relaunch in a
+## chain) restarts the window at full lean, so the framing never dips.
 func _track_launch(f: Fighter) -> void:
 	if not _alive_node(target) or not _alive_node(f):
 		return
@@ -2086,15 +2235,13 @@ func _track_launch(f: Fighter) -> void:
 	# The same launch reported twice (fighter_launched and hit_landed) keeps its start.
 	if f == _launch_body and t - _launch_t0 < 0.1:
 		return
+	if f == _launch_body and t - _launch_t0 <= Tuning.CAM_LAUNCH_FOLLOW:
+		_launch_t0 = t - LAUNCH_LEAN_IN
+		return
 	_launch_body = f
 	_launch_t0 = t
 
-func _launched_by_player(f: Fighter) -> bool:
-	if f.combat != null and f.combat.last_received != null:
-		return f.combat.last_received.attacker == target
-	return true
-
-# --- Soft-target ring ------------------------------------------------------------
+# --- Combat-target ring (get_soft_target) ---------------------------------------------
 func _build_ring() -> void:
 	var torus := TorusMesh.new()
 	torus.inner_radius = RING_INNER
@@ -2106,7 +2253,7 @@ func _build_ring() -> void:
 	_ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_ring_mat.albedo_color = Color(UIKit.ACCENT, 0.0)
 	_ring = MeshInstance3D.new()
-	_ring.name = "SoftTargetRing"
+	_ring.name = "CombatTargetRing"
 	_ring.mesh = torus
 	_ring.material_override = _ring_mat
 	_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

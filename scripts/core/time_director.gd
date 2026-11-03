@@ -3,7 +3,8 @@ extends Node
 ## and the real-time clock that all input windows and cooldowns use.
 ## OWNER: agent E (camera & time).
 ##
-## Round 5 rules (Feel Reference: Defence and time > Time, in code, Slow-time table):
+## Round 5 rules (Feel Reference: Defence and time > Time, in code, Slow-time
+## table), with Round 7 (docs/Round 7 — Freeflow Combat.md: Hit feel):
 ## - The table is Tuning.SLOW_TIME. request(event) asks for one row; the old
 ##   request_slowmo(scale, seconds, priority) still works for older callers.
 ## - Only the strongest active request applies (lowest scale). Requests never
@@ -14,18 +15,21 @@ extends Node
 ##   1.0 at real speed after the last cooldown row has finished easing out. A
 ##   request that arrives while a cooldown row is still running joins it (the
 ##   strongest wins), so two events on the same frame never cancel each other.
-##   Teleport, last kill, player death and Focus mode ignore the cooldown and do
-##   not start it.
+##   Teleport, last kill and player death ignore the cooldown and do not start it.
 ## - A request that a stronger active one fully covers (it would never show) is
-##   refused and starts no cooldown, so a parry during Focus does not block the
-##   wall break after it. KO rows are never refused (they also end Focus).
+##   refused and starts no cooldown. KO rows are never refused.
 ## - The player keeps real time in any slow motion: player_time_factor() is
 ##   1 / Engine.time_scale. A KO (last kill, player death, legacy PRIO_KO) ends
-##   that: the player slows with the world for the cinematic, and Focus ends.
-## - Triggers: TimeDirector requests the table itself from GameEvents (the
-##   player's parried and teleported &"counter", wall_broken on a panel or
-##   pillar, limb_severed, last_kill, the player's fighter_died). Focus mode: H calls begin_focus() / end_focus() and owns
-##   the 2.0 s timer and the meter.
+##   that: the player slows with the world for the cinematic.
+## - Triggers: TimeDirector requests the table itself from GameEvents:
+##   hit_landed by the player with HitInfo.react == &"launch" (a Round 7 launch
+##   payoff, a sprint-strike launch, a pursuit relaunch) -> &"finisher", once per
+##   hit; the player's teleported &"counter" -> &"teleport" (the god path keeps
+##   the teleport; a pursuit's teleport does not slow time); wall_broken on a
+##   panel or pillar; limb_severed; last_kill; the player's fighter_died.
+## - Round 7 removed Focus mode and parry. begin_focus() / end_focus() /
+##   is_focus_active() stay as harmless no-ops (false) while callers remain;
+##   the &"parry" row can still be requested directly.
 ## - AudioServer.playback_speed_scale always follows Engine.time_scale (F keeps
 ##   the player's own sounds at normal pitch with player_time_factor()).
 ## - Everything is timed in real seconds (now(), physics ticks). While the tree
@@ -34,7 +38,7 @@ extends Node
 ## Legacy (request_slowmo callers): kept so older code and tests keep working.
 signal slowmo_started(priority: int, scale: float)
 signal slowmo_ended()
-## Focus turned on or off here (H listens: a KO or reset can end it).
+## Round 7: Focus mode is gone; never emitted. Kept while listeners remain.
 signal focus_changed(active: bool)
 ## Round 5: a slow-time table row was granted (event = the Tuning.SLOW_TIME key,
 ## or &"legacy" for request_slowmo).
@@ -45,11 +49,12 @@ const PRIO_BIG_LAUNCH := 2
 const PRIO_WALL_BREAK := 3
 const PRIO_KO := 4
 
-## Rows that are a KO: the player slows with the world and Focus ends.
+## Rows that are a KO: the player slows with the world.
 const KO_EVENTS: Array[StringName] = [&"last_kill", &"player_death"]
 ## Legacy priority each row reports through get_active_priority().
 const _EVENT_PRIO := {&"parry": PRIO_DODGE, &"teleport": PRIO_DODGE, &"sever": PRIO_WALL_BREAK,
-	&"wall_break": PRIO_WALL_BREAK, &"last_kill": PRIO_KO, &"player_death": PRIO_KO, &"focus": PRIO_DODGE}
+	&"wall_break": PRIO_WALL_BREAK, &"last_kill": PRIO_KO, &"player_death": PRIO_KO,
+	&"finisher": PRIO_BIG_LAUNCH}
 const _PRIO_NAMES := {1: "dodge", 2: "big launch", 3: "wall break", 4: "KO"}
 const _EPS := 0.0005
 
@@ -65,15 +70,17 @@ var _frame_delta := 0.0
 var _granted := 0
 var _refused := 0
 var _was_holding := false
-var _focus_active := false
-var _focus_scale := 1.0
 var _last_event: StringName = &""
+## Round 7: &"finisher" requests made from hit_landed (granted or not), and the
+## last HitInfo that asked (one request per launch payoff hit).
+var _finisher_requests := 0
+var _finisher_info: HitInfo = null
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	process_priority = -100
 	_last_real = now()
-	GameEvents.parried.connect(_on_parried)
+	GameEvents.hit_landed.connect(_on_hit_landed)
 	GameEvents.teleported.connect(_on_teleported)
 	GameEvents.wall_broken.connect(_on_wall_broken)
 	GameEvents.limb_severed.connect(_on_limb_severed)
@@ -99,23 +106,22 @@ func real_timer(seconds: float) -> SceneTreeTimer:
 	return get_tree().create_timer(seconds, true, false, true)
 
 # --- The slow-time table ------------------------------------------------------------
-## Ask for one Tuning.SLOW_TIME row (&"parry", &"teleport", &"wall_break",
-## &"sever", &"last_kill", &"player_death", &"focus"). Returns false when
-## refused (cooldown, a stronger request covers it, unknown event). &"focus"
-## is begin_focus() (H owns its timer and calls end_focus()).
+## Ask for one Tuning.SLOW_TIME row (&"finisher", &"teleport", &"wall_break",
+## &"sever", &"last_kill", &"player_death"; &"parry" is still in the table). Returns false when refused (cooldown, a stronger request covers it,
+## unknown event). &"focus" is refused: Round 7 removed Focus mode.
 func request(event: StringName) -> bool:
 	if not Tuning.SLOW_TIME.has(event):
 		push_warning("TimeDirector.request: unknown slow-time event %s" % event)
 		return false
-	var row: Dictionary = Tuning.SLOW_TIME[event]
 	if event == &"focus":
-		return begin_focus(float(row["scale"]))
+		return false
+	var row: Dictionary = Tuning.SLOW_TIME[event]
 	return _grant(event, float(row["scale"]), float(row["time"]), float(row["ease"]),
 		bool(row["cooldown"]), KO_EVENTS.has(event), int(_EVENT_PRIO.get(event, PRIO_DODGE)))
 
 ## Legacy entry point: scale for duration_real s, eased out over
-## Tuning.SLOWMO_EASE. PRIO_KO is a KO (ignores the cooldown, ends Focus, the
-## player slows too); every other priority respects the cooldown. The old
+## Tuning.SLOWMO_EASE. PRIO_KO is a KO (ignores the cooldown, the player slows
+## too); every other priority respects the cooldown. The old
 ## priority stack and 15% budget are gone: the strongest request wins.
 func request_slowmo(scale: float, duration_real: float, priority: int) -> bool:
 	var ko := priority >= PRIO_KO
@@ -135,8 +141,6 @@ func _grant(event: StringName, scale: float, hold: float, ease_s: float, uses_co
 	if not ko and _covered(scale, end):
 		_refuse(event)
 		return false
-	if ko:
-		_end_focus(false)
 	# The same row again (a second teleport, D and the event both asking for one
 	# wall break): extend it instead of adding a copy.
 	var merged := false
@@ -159,11 +163,9 @@ func _grant(event: StringName, scale: float, hold: float, ease_s: float, uses_co
 func _refuse(_event: StringName) -> void:
 	_refused += 1
 
-## A stronger-or-equal request (or Focus) holds at least until `end`: the new
-## one would never show.
+## A stronger-or-equal request holds at least until `end`: the new one would
+## never show.
 func _covered(scale: float, end: float) -> bool:
-	if _focus_active and _focus_scale <= scale + _EPS:
-		return true
 	for r in _active:
 		if float(r["scale"]) <= scale + _EPS and float(r["end"]) >= end - _EPS:
 			return true
@@ -183,44 +185,21 @@ func _refresh_cooldown() -> void:
 			_cooldown_until = maxf(_cooldown_until,
 				float(r["end"]) + float(r["ease"]) + Tuning.SLOW_TIME_COOLDOWN)
 
-# --- Focus (the world slows, the player does not) ---------------------------------------
-## H calls begin/end from the player's Focus button. Focus ignores the cooldown.
-## Refused during a KO.
-func begin_focus(scale := Tuning.FOCUS_SCALE) -> bool:
-	if _ko_holding(now()):
-		return false  # the KO owns time
-	_focus_scale = clampf(scale, 0.01, 1.0)
-	var was := _focus_active
-	_focus_active = true
-	_apply(now())
-	if not was:
-		_last_event = &"focus"
-		focus_changed.emit(true)
-	return true
+# --- Focus (removed in Round 7) -------------------------------------------------------
+## Round 7 removed Focus mode. These stay harmless while callers remain:
+## begin_focus() is refused, end_focus() does nothing, is_focus_active() is false.
+func begin_focus(_scale := 0.0) -> bool:
+	return false
 
 func end_focus() -> void:
-	_end_focus(true)
-
-## soft: the world eases back over the focus row's ease (the player is already
-## in real time). A KO ends Focus hard (its own scale takes over at once).
-func _end_focus(soft: bool) -> void:
-	if not _focus_active:
-		return
-	_focus_active = false
-	var t := now()
-	if soft:
-		var ease_s := float(Tuning.SLOW_TIME[&"focus"]["ease"])
-		_active.append({"event": &"focus", "scale": _focus_scale, "end": t, "ease": ease_s,
-			"ko": false, "cooldown": false, "prio": PRIO_DODGE})
-	_apply(t)
-	focus_changed.emit(false)
+	pass
 
 func is_focus_active() -> bool:
-	return _focus_active
+	return false
 
 ## Player seconds per world second: 1 / Engine.time_scale in any slow motion
-## (Focus, parry, teleport, wall break, sever), so the player keeps real time.
-## 1 during a KO (last kill, player death): the player slows with the world.
+## (finisher, teleport, wall break, sever), so the player keeps real time; 1.0 at normal
+## speed. 1 during a KO (last kill, player death): the player slows with the world.
 func player_time_factor() -> float:
 	if _ko_running(now()):
 		return 1.0
@@ -245,7 +224,6 @@ func get_scale() -> float:
 
 ## Clears all slow motion and the cooldown (round restart).
 func reset() -> void:
-	_end_focus(false)
 	_active.clear()
 	_cooldown_until = -INF
 	_scale = 1.0
@@ -264,12 +242,9 @@ func get_active_priority() -> int:
 	var r := _strongest_holding(t)
 	return int(r["prio"]) if not r.is_empty() else 0
 
-## Table event of the strongest holding request (&"focus" in Focus mode), &"" when none.
+## Table event of the strongest holding request, &"" when none.
 func get_active_event() -> StringName:
-	var t := now()
-	var r := _strongest_holding(t)
-	if _focus_active and (r.is_empty() or _focus_scale <= float(r["scale"])):
-		return &"focus"
+	var r := _strongest_holding(now())
 	return StringName(r["event"]) if not r.is_empty() else &""
 
 func get_active_name() -> String:
@@ -297,9 +272,13 @@ func get_granted() -> int:
 func get_refused() -> int:
 	return _refused
 
+## &"finisher" requests TimeDirector made from hit_landed (granted or refused).
+func get_finisher_requests() -> int:
+	return _finisher_requests
+
 func get_debug_text() -> String:
-	return "time %.2fx  slow-mo %s%s  player x%.2f  cooldown %.2f s  granted %d refused %d" % [
-		Engine.time_scale, get_active_name(), "  FOCUS" if _focus_active else "", player_time_factor(),
+	return "time %.2fx  slow-mo %s  player x%.2f  cooldown %.2f s  granted %d refused %d" % [
+		Engine.time_scale, get_active_name(), player_time_factor(),
 		get_cooldown_left(), _granted, _refused]
 
 # --- Internals ---------------------------------------------------------------
@@ -329,7 +308,7 @@ func _prune(t: float) -> void:
 		if t >= float(r["end"]) + float(r["ease"]):
 			_active.remove_at(i)
 		i -= 1
-	var holding := _focus_active or not _strongest_holding(t).is_empty()
+	var holding := not _strongest_holding(t).is_empty()
 	if _was_holding and not holding:
 		slowmo_ended.emit()
 	_was_holding = holding
@@ -345,13 +324,11 @@ static func _row_scale(r: Dictionary, t: float) -> float:
 		return 1.0
 	return lerpf(float(r["scale"]), 1.0, smoothstep(0.0, 1.0, (t - end) / ease_s))
 
-## World scale now: the strongest request (and Focus). Never a product.
+## World scale now: the strongest request. Never a product.
 func _target_scale(t: float) -> float:
 	var s := 1.0
 	for r in _active:
 		s = minf(s, _row_scale(r, t))
-	if _focus_active:
-		s = minf(s, _focus_scale)
 	return s
 
 func _apply(t: float) -> void:
@@ -384,13 +361,21 @@ func _ko_running(t: float) -> bool:
 	return false
 
 # --- Triggers (GameEvents) ------------------------------------------------------------
-## Parry and teleport slow time are the player's reward: only when the player
-## parries or teleport-counters (the Duelist parrying or teleporting does not
-## slow the world: the player keeps real time and would gain from it).
-func _on_parried(defender: Node3D, _attacker: Node3D) -> void:
-	if _is_player(defender):
-		request(&"parry")
+## Round 7: a launch payoff by the player (HitInfo.react == &"launch") asks for
+## the finisher slow time, once per hit (the same HitInfo reported twice asks
+## once). Enemy launches and the player's other reactions do not.
+func _on_hit_landed(info: HitInfo) -> void:
+	if info == null or info.react != &"launch" or not _is_player(info.attacker):
+		return
+	if info == _finisher_info:
+		return
+	_finisher_info = info
+	_finisher_requests += 1
+	request(&"finisher")
 
+## Teleport slow time is the player's reward for a teleport counter (Dash just
+## before an enemy's hit): only the player's own &"counter" teleports. An
+## enemy's teleport or the player's pursuit teleport does not slow the world.
 func _on_teleported(fighter: Node3D, _from: Vector3, _to: Vector3, kind: StringName) -> void:
 	if kind == &"counter" and _is_player(fighter):
 		request(&"teleport")

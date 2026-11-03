@@ -1,14 +1,18 @@
 class_name GameMenus
 extends CanvasLayer
-## Title menu, pause menu (with the Round 5 debug settings) and the results /
-## round-over panel. Always processes (works while the tree is paused) and owns
-## the Esc / R / F1 handling outside a round's HUD. Emits signals; GameMode does
-## the work. Keyboard and gamepad navigable.
+## Title menu, pause menu and the results / round-over panel. Always processes
+## (works while the tree is paused) and owns Esc (pause), Restart (Backspace /
+## Back: in a round, in the pause menu and on the results) and F1 outside a
+## round's HUD. Emits signals; GameMode does the work. Keyboard and gamepad
+## navigable.
 ## OWNER: agent J (HUD, flow & menus).
 ##
-## Debug settings (Feel Reference F0: speed cap, Battering Ram level, starting
-## Focus, plus the F3 overlay) write Tuning's debug static vars and are saved in
-## user://settings.cfg (section "debug") next to the camera settings.
+## Pause > Debug settings holds the player's upgrades until the progression
+## round (Round 7 amendment: God path): sprint speed cap (8 / 10 / 12 m/s),
+## Battering Ram level (0-3), teleport (on / off), pursuit chain (0-3), plus the
+## F3 overlay. Each writes its Tuning.debug_* static at once and is saved in
+## user://settings.cfg (section "debug") next to the camera settings. The
+## Focus meter is gone, so there is no starting-Focus setting.
 
 signal duel_pressed
 signal waves_pressed
@@ -26,13 +30,16 @@ const LAB_SCENE := "res://scenes/ragdoll_lab.tscn"
 const GRAB_LAB_SCENE := "res://scenes/grab_lab.tscn"
 ## Same file as CameraRig.SETTINGS_PATH; each writer loads it first and keeps the other sections.
 const SETTINGS_PATH := "user://settings.cfg"
-const RAM_LEVELS := 4                         ## Battering Ram 0 (not earned) .. 3
-const START_FOCUS_CHOICES: Array[float] = [0.0, 1.0, 2.0, 3.0]  ## bars (Tuning.FOCUS_MAX = 3)
+const RAM_LEVELS := 4      ## Battering Ram 0 (not earned) .. 3
+const PURSUIT_LEVELS := 4  ## pursuits chained off one launch: 0 (off) .. 3
 
 static var _debug_loaded := false
 
 ## Set by GameMode: true while a round is running and may be paused.
 var can_pause := false
+## Set by GameMode: true from a round's start until it is torn down (the
+## Restart key works in play, in the pause menu and on the results).
+var can_restart := false
 var screen := Screen.NONE
 
 var _root: Control
@@ -50,9 +57,13 @@ var _help: PanelContainer
 var sens_slider: HSlider
 var invert_check: CheckButton
 var _sens_value: Label
+## Pause menu items (tests press them).
+var restart_button: Button
+var debug_settings_button: Button
 var _debug: Control
 var _debug_first: Button
-## Debug setting buttons by key: &"speed_cap", &"ram_level", &"start_focus", &"overlay".
+## Debug setting buttons by key: &"speed_cap", &"ram_level", &"teleport",
+## &"pursuit_max", &"overlay".
 var debug_buttons := {}
 var _over_grid: GridContainer
 ## Last stats shown on the results panel (tests read it).
@@ -88,8 +99,8 @@ func show_pause() -> void:
 
 ## Results screen (Feel Reference F11): the run's stats as GameMode built them
 ## (GameMode.get_run_stats(): mode, won, waves_cleared, wave_reached, kills,
-## time, biggest_hit, biggest_hit_tier, walls_broken, objects_smashed,
-## structures_down, limbs_taken).
+## time, biggest_hit (damage), biggest_hit_move, biggest_hit_react,
+## walls_broken, objects_smashed, structures_down, limbs_taken).
 func show_results(stats: Dictionary) -> void:
 	hide_all()
 	screen = Screen.ROUND_OVER
@@ -125,22 +136,12 @@ static func results_rows(stats: Dictionary) -> Array:
 	var secs := int(stats.get("time", 0.0))
 	@warning_ignore("integer_division")
 	rows.append(["TIME", "%d:%02d" % [secs / 60, secs % 60]])
-	var p := float(stats.get("biggest_hit", 0.0))
-	var tier := String(stats.get("biggest_hit_tier", &"")).replace("_", " ").to_upper()
-	rows.append(["BIGGEST HIT", ("P %.1f  %s" % [p, tier]).strip_edges() if p > 0.0 else "-"])
+	rows.append(["BIGGEST HIT", biggest_hit_text(stats)])
 	rows.append(["WALLS BROKEN", "%d" % int(stats.get("walls_broken", 0))])
 	rows.append(["OBJECTS SMASHED", "%d" % int(stats.get("objects_smashed", 0))])
 	rows.append(["STRUCTURES BROUGHT DOWN", "%d" % int(stats.get("structures_down", 0))])
 	rows.append(["LIMBS TAKEN", "%d" % int(stats.get("limbs_taken", 0))])
 	return rows
-
-## Pause > Debug settings.
-func show_debug() -> void:
-	hide_all()
-	screen = Screen.DEBUG
-	_debug.visible = true
-	_refresh_debug_labels()
-	_debug_first.call_deferred(&"grab_focus")
 
 func hide_all() -> void:
 	screen = Screen.NONE
@@ -151,7 +152,16 @@ func hide_all() -> void:
 		_debug.visible = false
 		_help.visible = false
 
+## F3 may flip the overlay while Debug settings is up: keep its item honest.
+func _process(_delta: float) -> void:
+	if screen == Screen.DEBUG:
+		_refresh_debug_labels()
+
 # --- Input -------------------------------------------------------------------------
+## Key names in the menus follow the device the player is using.
+func _input(event: InputEvent) -> void:
+	UIKit.note_input(event)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_echo():
 		return
@@ -172,7 +182,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					_help.visible = false
 					_handled()
 	elif event.is_action_pressed(&"restart"):
-		if screen in [Screen.PAUSE, Screen.ROUND_OVER, Screen.DEBUG]:
+		if screen in [Screen.PAUSE, Screen.ROUND_OVER, Screen.DEBUG] or (screen == Screen.NONE and can_restart):
 			# Mark first: restart reloads the scene, which takes this node out
 			# of the tree before emit() returns.
 			_handled()
@@ -254,14 +264,7 @@ func _build_title() -> void:
 	box.add_theme_constant_override(&"separation", 6)
 	panel.add_child(box)
 	box.add_child(UIKit.label("HOW TO FIGHT", 28, UIKit.ACCENT, true, 4))
-	for line: Array in [
-		["Move", "WASD", "Camera", "Mouse"],
-		["Light", "LMB", "Heavy", "RMB"],
-		["Kick", "E", "Sweep", "S + E"],
-		["Block / parry", "Q", "Grab", "G"],
-		["Dash / sprint", "Shift", "Focus", "F"],
-		["Jump", "Space", "Crouch", "C"],
-	]:
+	for line: Array in title_key_lines():
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override(&"separation", 8)
 		box.add_child(row)
@@ -273,18 +276,45 @@ func _build_title() -> void:
 			var key_l := UIKit.label(line[k * 2 + 1], 20, Color.WHITE, true, 3)
 			key_l.custom_minimum_size.x = 110
 			row.add_child(key_l)
-	var tips := UIKit.label(
-		"Orange glow: a strike. Tap Block just before it lands to parry,\nor Dash to teleport behind them (1 Focus bar).\nBlue glow: a grab. Press Grab to break it, or teleport.\nHold Shift to sprint: speed is power. Hold any attack to charge.\nLaunch bodies into walls and into each other.",
-		18, UIKit.TEXT, false, 3)
-	box.add_child(tips)
+	box.add_child(UIKit.label(title_tips(), 18, UIKit.TEXT, false, 3))
 	box.add_child(UIKit.label("Gamepad works too.  F1: every control", 17, UIKit.TEXT_DIM, false, 3))
+
+## [name, key, name, key] rows of the title's HOW TO FIGHT panel (keyboard + mouse).
+static func title_key_lines() -> Array:
+	var k := func(action: StringName) -> String: return UIKit.key_label(action, false)
+	return [
+		["Move", "WASD", "Camera", "Mouse"],
+		["Punch", k.call(&"punch"), "Leg kick", k.call(&"leg_kick")],
+		["Gut punch", k.call(&"gut_punch"), "Uppercut", k.call(&"uppercut")],
+		["Front kick", k.call(&"front_kick"), "Roundhouse", k.call(&"roundhouse")],
+		["Counter", UIKit.keys_label(&"counter", false), "Dash / sprint", k.call(&"dash")],
+		["Jump", k.call(&"jump"), "Grab", k.call(&"grab")],
+		["Restart", k.call(&"restart"), "Help", k.call(&"help")],
+	]
+
+## The title's short lesson on the Round 7 kit and the god path.
+static func title_tips() -> String:
+	var k := func(action: StringName) -> String: return UIKit.key_label(action, false)
+	var back := "S"
+	for spec: Array in Controls.ACTIONS.get(&"move_back", []):
+		if spec[0] == &"key":
+			back = OS.get_keycode_string(int(spec[1]))
+	return ("Tap %s: jab, cross, hook. Hold it, or a kick: the heavy version.\n" % k.call(&"punch")
+		+ "Uppercut lifts, gut punch folds, leg kick drops them to a knee:\nhit those states for bigger results.\n"
+		+ "Orange icon over an enemy: %s to counter. Blue icon: %s to dodge.\n" % [k.call(&"counter"), k.call(&"dash")]
+		+ "%s just before a hit lands: teleport behind them.\n" % k.call(&"dash")
+		+ "Right after a launch, %s again to pursue the body: attack to send it\nfurther, or %s + attack to spike it into the ground.\n" % [k.call(&"dash"), back]
+		+ "Hold %s to sprint: speed is power. Sprint + %s at a wall: wall run.\n" % [k.call(&"dash"), k.call(&"jump")]
+		+ "Grab (%s), then hold %s to drive them through walls, or %s to throw.\n" % [
+			k.call(&"grab"), k.call(&"dash"), k.call(&"punch")]
+		+ "Launch bodies into walls and into each other.")
 
 func _build_pause() -> void:
 	_pause = _modal("PAUSED", Color.WHITE)
 	var box: VBoxContainer = _pause.get_meta(&"box")
 	_pause_resume = _menu_button(box, "RESUME", resume_pressed.emit)
-	_menu_button(box, "RESTART  (R)", restart_pressed.emit)
-	_menu_button(box, "DEBUG SETTINGS", show_debug)
+	restart_button = _menu_button(box, restart_text(), restart_pressed.emit)
+	debug_settings_button = _menu_button(box, "DEBUG SETTINGS", show_debug)
 	_menu_button(box, "MAIN MENU", menu_pressed.emit)
 	# Camera settings (saved to CameraRig.SETTINGS_PATH).
 	var sens_row := HBoxContainer.new()
@@ -344,18 +374,46 @@ func _build_round_over() -> void:
 	var gap := Control.new()
 	gap.custom_minimum_size.y = 6
 	box.add_child(gap)
-	_over_restart = _menu_button(box, "RESTART  (R)", restart_pressed.emit)
+	_over_restart = _menu_button(box, restart_text(), restart_pressed.emit)
 	_menu_button(box, "MAIN MENU", menu_pressed.emit)
 
-# --- Debug settings ---------------------------------------------------------------
+# --- Labels and debug settings ---------------------------------------------------
+## "RESTART  (Backspace / Back)": the Restart keys of both devices.
+static func restart_text() -> String:
+	return "RESTART  (%s / %s)" % [UIKit.key_label(&"restart", false), UIKit.key_label(&"restart", true)]
+
+## "21  ROUNDHOUSE  LAUNCH": the player's hardest single hit (damage, move,
+## and the reaction when it sent the body down or flying); "-" when none.
+static func biggest_hit_text(stats: Dictionary) -> String:
+	var dmg := float(stats.get("biggest_hit", 0.0))
+	if dmg <= 0.0:
+		return "-"
+	var text := "%d" % roundi(dmg)
+	var move := String(stats.get("biggest_hit_move", &"")).replace("_", " ").to_upper()
+	if move != "":
+		text += "  " + move
+	var react := StringName(stats.get("biggest_hit_react", &""))
+	if react in [&"launch", &"knockdown"]:
+		text += "  " + String(react).to_upper()
+	return text
+
+## Pause > Debug settings: the player's upgrades and the F3 overlay.
+func show_debug() -> void:
+	hide_all()
+	screen = Screen.DEBUG
+	_debug.visible = true
+	_refresh_debug_labels()
+	_debug_first.call_deferred(&"grab_focus")
+
 func _build_debug() -> void:
 	_debug = _modal("DEBUG", Color.WHITE)
 	var box: VBoxContainer = _debug.get_meta(&"box")
 	(_debug.get_meta(&"title") as Label).add_theme_font_size_override(&"font_size", 64)
-	box.add_child(UIKit.label("Stand-ins for the roguelike upgrades. Saved between sessions.", 18, UIKit.TEXT_DIM, false, 3))
+	box.add_child(UIKit.label("Your upgrades until progression arrives. Saved between sessions.", 18, UIKit.TEXT_DIM, false, 3))
 	_debug_first = _debug_button(box, &"speed_cap")
 	_debug_button(box, &"ram_level")
-	_debug_button(box, &"start_focus")
+	_debug_button(box, &"teleport")
+	_debug_button(box, &"pursuit_max")
 	_debug_button(box, &"overlay")
 	_menu_button(box, "BACK", show_pause)
 	box.add_child(UIKit.label("Enter / A: next value   ←/→: change", 18, UIKit.TEXT_DIM, false, 3))
@@ -379,13 +437,18 @@ func step_debug_setting(key: StringName, dir: int) -> void:
 			Tuning.debug_speed_cap = caps[wrapi((i if i >= 0 else 0) + dir, 0, caps.size())]
 		&"ram_level":
 			Tuning.debug_ram_level = wrapi(Tuning.debug_ram_level + dir, 0, RAM_LEVELS)
-		&"start_focus":
-			var i := START_FOCUS_CHOICES.find(Tuning.debug_start_focus)
-			Tuning.debug_start_focus = START_FOCUS_CHOICES[wrapi((i if i >= 0 else 1) + dir, 0, START_FOCUS_CHOICES.size())]
+		&"teleport":
+			Tuning.debug_teleport = not Tuning.debug_teleport
+		&"pursuit_max":
+			Tuning.debug_pursuit_max = wrapi(Tuning.debug_pursuit_max + dir, 0, PURSUIT_LEVELS)
 		&"overlay":
 			Tuning.debug_overlay = not Tuning.debug_overlay
 	save_debug_settings()
 	_refresh_debug_labels()
+
+## The F3 overlay on or off (Debug settings item), applied at once and saved.
+func toggle_overlay() -> void:
+	step_debug_setting(&"overlay", 1)
 
 func _refresh_debug_labels() -> void:
 	if debug_buttons.is_empty():
@@ -393,12 +456,15 @@ func _refresh_debug_labels() -> void:
 	(debug_buttons[&"speed_cap"] as Button).text = "SPEED CAP:  %d m/s%s" % [roundi(Tuning.debug_speed_cap),
 		"  (base)" if is_equal_approx(Tuning.debug_speed_cap, Tuning.SPRINT_CAPS[0]) else "  (upgraded)"]
 	(debug_buttons[&"ram_level"] as Button).text = "BATTERING RAM:  %s" % (
-		"0  (not earned)" if Tuning.debug_ram_level <= 0 else "LEVEL %d" % Tuning.debug_ram_level)
-	(debug_buttons[&"start_focus"] as Button).text = "STARTING FOCUS:  %d %s" % [roundi(Tuning.debug_start_focus),
-		"bar" if roundi(Tuning.debug_start_focus) == 1 else "bars"]
+		"0  (not earned)" if Tuning.debug_ram_level <= 0
+		else "LEVEL %d%s" % [Tuning.debug_ram_level, "  (launches)" if Tuning.debug_ram_level >= RAM_LEVELS - 1 else ""])
+	(debug_buttons[&"teleport"] as Button).text = "TELEPORT:  %s" % ("ON" if Tuning.debug_teleport else "OFF")
+	(debug_buttons[&"pursuit_max"] as Button).text = "PURSUIT CHAIN:  %s" % (
+		"0  (off)" if Tuning.debug_pursuit_max <= 0 else "%d per launch" % Tuning.debug_pursuit_max)
 	(debug_buttons[&"overlay"] as Button).text = "DEBUG OVERLAY (F3):  %s" % ("ON" if Tuning.debug_overlay else "OFF")
 
 ## Load the debug settings once per session (GameMode._ready). force: reload.
+## The speed cap must be one of Tuning.SPRINT_CAPS; levels are clamped.
 static func load_debug_settings(force := false) -> void:
 	if _debug_loaded and not force:
 		return
@@ -410,8 +476,8 @@ static func load_debug_settings(force := false) -> void:
 	if Tuning.SPRINT_CAPS.has(cap):
 		Tuning.debug_speed_cap = cap
 	Tuning.debug_ram_level = clampi(int(cfg.get_value("debug", "ram_level", Tuning.debug_ram_level)), 0, RAM_LEVELS - 1)
-	Tuning.debug_start_focus = clampf(float(cfg.get_value("debug", "start_focus", Tuning.debug_start_focus)),
-		0.0, Tuning.FOCUS_MAX)
+	Tuning.debug_teleport = bool(cfg.get_value("debug", "teleport", Tuning.debug_teleport))
+	Tuning.debug_pursuit_max = clampi(int(cfg.get_value("debug", "pursuit_max", Tuning.debug_pursuit_max)), 0, PURSUIT_LEVELS - 1)
 	Tuning.debug_overlay = bool(cfg.get_value("debug", "overlay", Tuning.debug_overlay))
 
 static func save_debug_settings() -> void:
@@ -419,7 +485,8 @@ static func save_debug_settings() -> void:
 	cfg.load(SETTINGS_PATH)  # keep the camera section
 	cfg.set_value("debug", "speed_cap", Tuning.debug_speed_cap)
 	cfg.set_value("debug", "ram_level", Tuning.debug_ram_level)
-	cfg.set_value("debug", "start_focus", Tuning.debug_start_focus)
+	cfg.set_value("debug", "teleport", Tuning.debug_teleport)
+	cfg.set_value("debug", "pursuit_max", Tuning.debug_pursuit_max)
 	cfg.set_value("debug", "overlay", Tuning.debug_overlay)
 	cfg.save(SETTINGS_PATH)
 

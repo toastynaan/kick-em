@@ -12,7 +12,12 @@ extends Node
 ##   splash or spark instead of dust.
 ## - parkour: dust where the hands or feet push off; a wall kick-off throws chips.
 ## - wall_run_step: dust and small chips off the wall (Prototype 2, 39.9-49.9 s).
+## - rammed (Battering Ram): dust where the bodies meet and a contact flash
+##   that grows with the result (the god path's level-3 launch flashes biggest,
+##   with a shock ring).
 ## - prop_broken: a burst by prop kind (brick dust, glass shards, wood chips).
+## - foot_puff(), dust_ring() and debris() also serve FreeflowFX (Round 7: push
+##   skids, drive steps, drive slams).
 ## - water_impact() (BloodFX body_impact on water): ripple rings and a splash.
 ## OWNER: agent F (FX & audio).
 
@@ -42,6 +47,11 @@ const WALL_DUST_ENERGY := 1500.0
 const RING_DEDUPE := Vector2(1.0, 0.15)   ## m, s: one dust ring per spot and moment
 const SLAM_FLASH := 0.75         ## body slam contact flash size (0..1)
 const SPRINT_KICK_ENERGY := 1400.0
+## Ram contact flash size (0..1 of BloodFX.IMPACT_FLASH_SIZE) by the victim's
+## result; a launch also gets RAM_LAUNCH_BRIGHT and a shock ring (budgeted).
+const RAM_FLASH := {&"flinch": 0.25, &"stumble": 0.3, &"knockdown": 0.55, &"launch": 0.9}
+const RAM_LAUNCH_BRIGHT := 3.0
+const RAM_DUST := {&"knockdown": 2400.0, &"launch": 3600.0}  ## dust energy (1800 otherwise)
 const GLASS_COLOR := Color(0.82, 0.93, 1.0)
 const METAL_DUST := Color(0.45, 0.46, 0.48)
 const EXTRA_DUST := {&"dirt": Color(0.5, 0.42, 0.32), &"metal": Color(0.45, 0.46, 0.48)}
@@ -273,6 +283,9 @@ func _on_sprint_started(fighter: Node3D) -> void:
 ## Sprint footsteps puff (sized by sprint_charge); water and metal react
 ## (Prototype 4 at 20.5 s); a foot in water always ripples.
 func _on_footstep(fighter: Node3D, position: Vector3, surface: StringName, sprint_charge: float) -> void:
+	var drive: Node = _fx.call(&"get_freeflow_fx")
+	if drive != null and drive.call(&"is_driving", fighter):
+		return  # Round 7: a driving holder's steps are FreeflowFX's drive dust
 	var c := clampf(sprint_charge, 0.0, 1.0)
 	var sprinting := c > 0.0 or _is_sprinting(fighter)
 	var back := -_forward(fighter) if is_instance_valid(fighter) else Vector3.BACK
@@ -367,20 +380,28 @@ func _on_landing(_fighter: Node3D, level: StringName, position: Vector3, vertica
 		_fx.call(&"spark", position + Vector3.UP * 0.05, Vector3.UP, 1.0)
 	last[&"landing"] = level
 
-## Body slam (Feel Reference: Actions while holding): the holder lands on the
-## body. A contact flash (a shock ring if the budget allows), dust like a heavy
-## landing; the heavy thud is AudioFX's.
 ## Battering Ram (agent M): a dust puff where the bodies meet, kicked out
-## along the runner's line.
-func _on_rammed(runner: Node3D, victim: Node3D, _result: StringName, _self_result: StringName) -> void:
+## along the runner's line, and a contact flash by the victim's result (the
+## god path's level-3 launch: the biggest, brighter, with a shock ring).
+func _on_rammed(runner: Node3D, victim: Node3D, result: StringName, _self_result: StringName) -> void:
 	if not is_instance_valid(runner) or not is_instance_valid(victim):
 		return
 	var at := (runner.global_position + victim.global_position) * 0.5
 	var dir := victim.global_position - runner.global_position
 	dir.y = 0.0
 	var c := surface_color(_floor(at))
-	_fx.call(&"dust", at + Vector3.UP * 0.15, c, 1800.0, (dir.normalized() if dir.length() > 0.01 else Vector3.UP) + Vector3.UP * 0.5, false)
+	_fx.call(&"dust", at + Vector3.UP * 0.15, c, float(RAM_DUST.get(result, 1800.0)),
+			(dir.normalized() if dir.length() > 0.01 else Vector3.UP) + Vector3.UP * 0.5, false)
+	var launch := result == &"launch"
+	var size: float = RAM_FLASH.get(result, RAM_FLASH[&"stumble"])
+	var ring: bool = launch and _fx.call(&"_ring_allowed")
+	_fx.call(&"impact_flash", at + Vector3.UP * 1.1, size, false, ring, RAM_LAUNCH_BRIGHT if launch else -1.0)
+	_count(&"ram")
+	last[&"ram"] = [result, size, ring]
 
+## Body slam (Feel Reference: Actions while holding): the holder lands on the
+## body. A contact flash (a shock ring if the budget allows), dust like a heavy
+## landing; the heavy thud is AudioFX's.
 func _on_body_slammed(_holder: Node3D, _victim: Node3D, position: Vector3) -> void:
 	var surface := _floor(position)
 	var c := surface_color(surface)

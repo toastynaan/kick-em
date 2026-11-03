@@ -86,6 +86,24 @@ static func hit(victim: Node3D, move: StringName, pos: Vector3, dir: Vector3, da
 	h.result = HitInfo.Result.HIT
 	return h
 
+## Slow the world to `scale` for `seconds` s of TimeDirector time, the player
+## keeping real time (Round 7 removed Focus mode, which the slow-motion checks
+## used): a TimeDirector slow-motion row through its legacy entry point
+## (PRIO_DODGE), called dynamically so a TimeDirector mid-rewrite never stops a
+## test compiling. TimeDirector time counts physics frames, which run far ahead
+## of the wall clock headless under --fixed-fps, so the default hold is an
+## hour: normal_time() ends it. Returns false when refused or missing.
+static func slow_world(scale := 0.3, seconds := 3600.0) -> bool:
+	normal_time()
+	if not TimeDirector.has_method(&"request_slowmo"):
+		return false
+	return bool(TimeDirector.call(&"request_slowmo", scale, seconds, 1))
+
+## Back to normal speed at once (TimeDirector.reset()).
+static func normal_time() -> void:
+	if TimeDirector.has_method(&"reset"):
+		TimeDirector.call(&"reset")
+
 ## Print the result and quit. Stops audio first and lets the AudioServer drop
 ## the stopped playbacks, so quitting does not report leaked instances.
 static func finish(tree: SceneTree, name: String, fails: Array[String], errlog: ErrorLogger) -> void:

@@ -1,34 +1,36 @@
 class_name MoveLibrary
-## Every move in the game. OWNER: agent B (fighter & combat).
+## Every move in the game. OWNER: agent B (combat).
 ##
-## Round 5 (Feel Reference: Strikes and body reactions; Health, damage and
-## enemies): every player strike has a strike class that sets its base power,
-## frame data (Tuning.STRIKE_FRAMES: jab 5/3/10, cross 9/4/16, kick 12/4/22,
-## sweep 10/5/20, knee and elbow 7/3/14, frames of the fighter's own time) and
-## damage (Tuning.STRIKE_DAMAGE). The reaction comes from the power score at
-## contact, never from the move. Enemy moves carry a preset tier, damage from
-## Tuning.DMG_ENEMY, and startup from AttackDirector.enemy_startup_frames().
+## Round 7 (docs/Round 7 — Freeflow Combat.md: Moves): the player's kit is the
+## moves of Tuning.R7_MOVES, one per button (the punch button counts jab, cross,
+## hook; the punch and the three kicks held give their heavies: ComboGraph),
+## plus the dropping strike (any strike in the air or late in a vault). Their
+## frame data, damage and reactions come from that table (LOCAL_R7 until the
+## lead moves an entry there); this file says where each lands (reach, height,
+## hit level, target bone), which way it pushes and which limbs strike. Enemy moves carry a preset tier, damage from Tuning.DMG_ENEMY,
+## startup from AttackDirector.enemy_startup_frames() and whether the player
+## can counter them.
 
-const PLAYER_MOVES: Array[StringName] = [&"jab1", &"jab2", &"cross", &"hook", &"uppercut",
-	&"elbow", &"knee_strike", &"sparta_kick", &"roundhouse", &"leg_sweep", &"backfist",
-	&"crouch_punch", &"rising_uppercut", &"drop_strike", &"ground_stomp", &"knee_drop", &"back_kick",
-	&"jab3", &"power_punch", &"hammer_fist", &"flying_kick", &"mount_punch", &"stomp", &"punt"]
+const PLAYER_MOVES: Array[StringName] = [&"jab", &"cross", &"hook", &"heavy_jab", &"heavy_cross",
+	&"heavy_hook", &"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse", &"counter",
+	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse", &"drop_strike"]
+## Round 7 entries (R7_MOVES format) for player moves Tuning does not list yet
+## (candidates for Tuning.R7_MOVES). The dropping strike drives a body down:
+## startup 6, active until it lands (at most 40), recovery 12 frames.
+const LOCAL_R7 := {
+	&"drop_strike": {"f": Vector3(6, 40, 12), "dmg": 12.0, "react": &"knockdown", "push": 1.0, "stun": 0.0,
+		"hitstop": 0.12, "weight": 0.75, "tier": &"knockdown", "guard_break": true},
+}
 const ENEMY_MOVES: Array[StringName] = [&"e_jab", &"e_hook", &"e_kick", &"e_grab", &"e_stick_swing",
 	&"e_stick_thrust", &"e_heavy", &"e_charge", &"e_grab_slam", &"e_throw_debris", &"e_sweep"]
 
-## Dropping strike (jump or vault attack): not in the doc's frame table.
-## Startup is short so it comes out on the way down; the active frames last
-## until the fighter lands (at most DROP_ACTIVE_MAX); a short landing recovery.
-const DROP_STARTUP := 6.0
-const DROP_ACTIVE_MAX := 40.0
-const DROP_RECOVERY := 12.0
-## Frames of blockstun a guarded flinch-tier enemy hit leaves (stagger tier and up: 12).
-const ENEMY_BLOCKSTUN_LIGHT := 8.0
 ## Damage of the legacy Duelist sweep before its Round 5 scale (x0.3).
 const DMG := {&"e_sweep": 50.0}
-## Enemy hits on the player (Feel Reference: What enemies can do to you):
-## punches and kicks flinch or stagger; the heavy's charge and any grab-throw
-## knock the player down; enemies never launch the player.
+## Frames of blockstun a guarded flinch-tier enemy hit leaves (stagger tier and up: 12).
+const ENEMY_BLOCKSTUN_LIGHT := 8.0
+## Enemy hits on the player (Feel Reference: What enemies can do to you; kept
+## in Round 7): punches and kicks flinch or stagger; the heavy's charge and any
+## grab-throw knock the player down; enemies never launch the player.
 const ENEMY_TIER := {
 	&"e_jab": HitInfo.Tier.FLINCH,
 	&"e_hook": HitInfo.Tier.FLINCH,          # the grunt's cross: jab-cross reads as two flinches
@@ -36,49 +38,44 @@ const ENEMY_TIER := {
 	&"e_stick_swing": HitInfo.Tier.STAGGER,
 	&"e_stick_thrust": HitInfo.Tier.FLINCH,
 	&"e_heavy": HitInfo.Tier.STAGGER,        # overhead smash
-	&"e_charge": HitInfo.Tier.KNOCKDOWN,     # shoulder charge: knocks you down unless parried or teleported
+	&"e_charge": HitInfo.Tier.KNOCKDOWN,     # shoulder charge: knocks you down unless dodged
 	&"e_grab": HitInfo.Tier.KNOCKDOWN,       # grab-throw
 	&"e_grab_slam": HitInfo.Tier.KNOCKDOWN,
 	&"e_throw_debris": HitInfo.Tier.STAGGER, # legacy Thrower: a prop hit is a stagger
 	&"e_sweep": HitInfo.Tier.STUMBLE,        # legacy Duelist sweep
 }
-## Round 5 poses (agent P) that a string move plays when they exist.
-const ROUND5_ANIM := {&"jab1": &"jab", &"sparta_kick": &"kick", &"leg_sweep": &"sweep",
-	&"knee_strike": &"knee"}
-## Until agent P poses a move, play the closest existing one.
+## Round 7: attacks the player cannot counter (blue tell: dodge only).
+const UNCOUNTERABLE: Array[StringName] = [&"e_grab", &"e_grab_slam", &"e_charge"]
+
+## Until agent P poses a move (PoseLibrary.has_move), play the closest existing one.
 const ANIM_FALLBACK := {
-	&"cross": &"jab2", &"hook": &"jab3", &"uppercut": &"power_punch", &"roundhouse": &"sparta_kick",
-	&"backfist": &"jab3", &"flying_kick": &"sparta_kick", &"hammer_fist": &"power_punch",
-	&"crouch_punch": &"jab1", &"rising_uppercut": &"power_punch", &"knee": &"sparta_kick",
-	&"headbutt": &"jab1", &"neck_throw": &"throw", &"mount_punch": &"power_punch",
-	&"stomp": &"punt", &"upward_throw": &"throw", &"wall_slam": &"throw", &"e_sweep": &"leg_sweep",
-	&"punt": &"sparta_kick", &"elbow": &"jab3", &"knee_strike": &"knee", &"drop_strike": &"hammer_fist",
-	&"ground_stomp": &"stomp", &"knee_drop": &"mount_punch",
+	&"jab": &"jab1", &"cross": &"jab2", &"hook": &"jab3", &"heavy_jab": &"jab",
+	&"heavy_cross": &"power_punch", &"heavy_hook": &"hook", &"uppercut": &"power_punch",
+	&"gut_punch": &"crouch_punch", &"leg_kick": &"sweep", &"front_kick": &"kick",
+	&"roundhouse": &"sparta_kick", &"counter": &"cross", &"heavy_leg_kick": &"leg_kick",
+	&"heavy_front_kick": &"front_kick", &"heavy_roundhouse": &"roundhouse", &"drop_strike": &"hammer_fist",
+	&"back_kick": &"e_kick",
 	&"e_jab": &"e_hook", &"e_stick_swing": &"e_heavy", &"e_stick_thrust": &"e_hook",
-	&"e_grab_slam": &"e_grab",
+	&"e_grab_slam": &"e_grab", &"e_sweep": &"leg_sweep",
 }
 ## Second choice when the first fallback is missing too.
-const ANIM_FALLBACK_2 := {&"knee_strike": &"sparta_kick", &"ground_stomp": &"punt",
-	&"knee_drop": &"power_punch", &"drop_strike": &"power_punch", &"elbow": &"jab2"}
-## Striking bones when PoseLibrary.STRIKE_BONES (authoritative) does not list
-## the move or its pose; kept equal to STRIKE_BONES where both exist.
+const ANIM_FALLBACK_2 := {&"heavy_jab": &"jab1", &"heavy_cross": &"cross", &"heavy_hook": &"jab3",
+	&"gut_punch": &"jab2", &"leg_kick": &"leg_sweep", &"front_kick": &"sparta_kick", &"counter": &"jab2",
+	&"uppercut": &"jab2"}
+## Striking bones when PoseLibrary.STRIKE_BONES (authoritative) lists neither
+## the move nor its pose; kept equal to STRIKE_BONES where both exist.
 const LIMB_FALLBACK := {
-	&"cross": [&"RightHand"], &"hook": [&"LeftHand"], &"uppercut": [&"RightHand"],
-	&"roundhouse": [&"RightFoot", &"RightLowerLeg"], &"backfist": [&"RightHand"],
-	&"flying_kick": [&"RightFoot", &"RightLowerLeg"], &"hammer_fist": [&"RightHand", &"LeftHand"],
-	&"crouch_punch": [&"RightHand"], &"rising_uppercut": [&"RightHand"], &"knee": [&"RightLowerLeg", &"RightUpperLeg"],
-	&"headbutt": [&"Head"], &"mount_punch": [&"RightHand"], &"stomp": [&"RightFoot"],
-	&"e_sweep": [&"RightFoot", &"RightLowerLeg"], &"jab2": [&"RightHand"],
-	&"elbow": [&"RightLowerArm"], &"knee_strike": [&"RightLowerLeg", &"RightUpperLeg"],
-	&"drop_strike": [&"RightHand"],
-	&"ground_stomp": [&"RightFoot"], &"knee_drop": [&"RightLowerLeg"],
-	&"e_jab": [&"LeftHand"], &"e_stick_swing": [&"RightHand"],
+	&"jab": [&"LeftHand"], &"cross": [&"RightHand"], &"hook": [&"LeftHand"],
+	&"heavy_jab": [&"LeftHand"], &"heavy_cross": [&"RightHand"], &"heavy_hook": [&"LeftHand"],
+	&"uppercut": [&"RightHand"], &"gut_punch": [&"RightHand"],
+	&"leg_kick": [&"RightFoot", &"RightLowerLeg"], &"front_kick": [&"RightFoot", &"RightLowerLeg"],
+	&"roundhouse": [&"RightFoot", &"RightLowerLeg"], &"counter": [&"RightHand"],
+	&"heavy_leg_kick": [&"RightFoot", &"RightLowerLeg"], &"heavy_front_kick": [&"RightFoot", &"RightLowerLeg"],
+	&"heavy_roundhouse": [&"RightFoot", &"RightLowerLeg"], &"drop_strike": [&"RightHand"],
+	&"back_kick": [&"RightFoot", &"RightLowerLeg"],
+	&"e_sweep": [&"RightFoot", &"RightLowerLeg"], &"e_jab": [&"LeftHand"], &"e_stick_swing": [&"RightHand"],
 	&"e_stick_thrust": [&"RightHand"], &"e_grab_slam": [&"LeftHand", &"RightHand"],
 }
-## Round 5 classes of the legacy Upgrade 2 moves (no button reaches them; kept
-## for the lab and old callers).
-const LEGACY_CLASS := {&"jab3": &"jab", &"power_punch": &"cross", &"hammer_fist": &"cross",
-	&"flying_kick": &"kick", &"mount_punch": &"ground", &"stomp": &"ground", &"punt": &"ground"}
 
 static var _moves: Dictionary = {}
 
@@ -104,164 +101,118 @@ static func _add(m: MoveData) -> void:
 			bones.append(StringName(b))
 		m.limbs = bones
 		m.limb = bones[0]
-	if m.chargeable and m.charge_hold == &"":
-		m.charge_hold = charge_hold_for(m)
 	_moves[m.id] = m
 
-## Pose for a move id: its Round 5 pose, its own, else a fallback.
-static func anim_for(id: StringName) -> StringName:
-	var r5: StringName = ROUND5_ANIM.get(id, &"")
-	if r5 != &"" and pose_has_move(r5):
-		return r5
-	if pose_has_move(id):
+## Pose for a move id: its own once agent P has it, else the closest fallback
+## (a heavy kick falls back to its light kick's pose, and so on).
+static func anim_for(id: StringName, depth := 0) -> StringName:
+	if PoseLibrary.has_move(id):
 		return id
 	for table: Dictionary in [ANIM_FALLBACK, ANIM_FALLBACK_2]:
 		var alt: StringName = table.get(id, &"")
-		if alt != &"" and pose_has_move(alt):
+		if alt != &"" and PoseLibrary.has_move(alt):
 			return alt
-	return ANIM_FALLBACK.get(id, id)
+	var first: StringName = ANIM_FALLBACK.get(id, &"")
+	if first != &"" and depth < 3:
+		return anim_for(first, depth + 1)
+	return id
 
-## The Round 5 `<class>_charge` hold (agent P), else `<id>_charge`, else the
-## closest existing hold.
-static func charge_hold_for(m: MoveData) -> StringName:
-	if m.strike_class != &"":
-		var cls := StringName(String(m.strike_class) + "_charge")
-		if PoseLibrary.HOLDS.has(cls):
-			return cls
-	var own := StringName(String(m.id) + "_charge")
-	if PoseLibrary.HOLDS.has(own) or PoseLibrary.POSES.has(own):
-		return own
-	if m.is_kick and PoseLibrary.POSES.has(&"kick_chamber"):
-		return &"kick_chamber"
-	return &"power_charge"
-
-## A Round 5 player strike of class `cls` (frame data from Tuning.STRIKE_FRAMES).
-static func _strike(id: StringName, cls: StringName, level: int, reach: float, height: float,
+## A Round 7 player move: frame data and damage from Tuning.R7_MOVES[id].
+## `target`: the bone it lands on without a limb contact (head for high
+## punches, the waist for the gut punch, the leg for the leg kick).
+static func _r7(id: StringName, level: int, reach: float, height: float, target: StringName,
 		push := Vector3(0.0, 0.0, 1.0)) -> MoveData:
+	var e: Dictionary = Tuning.R7_MOVES.get(id, LOCAL_R7.get(id, {}))
+	var f: Vector3 = e["f"]
 	var m := MoveData.new()
 	m.id = id
-	m.set_class_frames(cls)
-	m.damage = Tuning.STRIKE_DAMAGE.get(cls, 4.0)
+	m.r7 = true
+	m.startup = f.x
+	m.active = f.y
+	m.recovery = f.z
+	m.damage = float(e["dmg"])
+	m.guard_break = bool(e.get("guard_break", false))
 	m.hit_level = level
 	m.reach = reach
 	m.height = height
+	m.target_bone = target
 	m.push_dir = push.normalized()
-	m.chargeable = true
-	m.is_kick = cls in [&"kick", &"sweep"]
-	m.cancel_window = 10.0
 	return m
-
-## PoseLibrary.has_move(id) when agent P provides it, else its MOVES table.
-static func pose_has_move(id: StringName) -> bool:
-	var lib: Script = PoseLibrary
-	for md in lib.get_script_method_list():
-		if md.get("name", "") == "has_move":
-			return bool(lib.call(&"has_move", id))
-	return PoseLibrary.MOVES.has(id)
 
 static func _build() -> void:
 	var hi := HitInfo.Level.HIGH
 	var mid := HitInfo.Level.MID
 	var low := HitInfo.Level.LOW
-	# --- Player strings (ComboGraph) ---------------------------------------------
+	# --- Player moves (Round 7) -----------------------------------------------------
 	# push_dir (x right, y up, z forward of the attacker): which way the hit
-	# drives the struck chain and, from the launch tier, the whole body.
-	var j1 := _strike(&"jab1", &"jab", hi, 1.05, 1.4)
-	_add(j1)
-	var j2 := _strike(&"jab2", &"jab", hi, 1.05, 1.4)
-	_add(j2)
-	var j3 := _strike(&"jab3", &"jab", hi, 1.05, 1.4)  # legacy
-	_add(j3)
-	var cr := _strike(&"cross", &"cross", hi, 1.1, 1.4)
-	_add(cr)
+	# drives the victim. Heights are m above the feet at height scale 1 (head
+	# ~1.65, chest 1.35, waist 1.0, knee 0.5).
+	_add(_r7(&"jab", hi, 1.05, 1.45, Bones.HEAD))
+	_add(_r7(&"cross", hi, 1.1, 1.45, Bones.HEAD))
 	# Left hook: the fist sweeps left to right, so the head turns to the attacker's right.
-	var hk := _strike(&"hook", &"cross", hi, 1.05, 1.45, Vector3(0.75, 0.0, 0.65))
-	_add(hk)
-	var up := _strike(&"uppercut", &"cross", mid, 1.0, 1.3, Vector3(0.0, 0.75, 0.65))
-	up.ender = true
-	_add(up)
-	# Right horizontal elbow: sweeps right to left.
-	var el := _strike(&"elbow", &"elbow", hi, 0.85, 1.4, Vector3(-0.5, 0.0, 0.85))
-	el.ender = true
-	el.limb_radius = 0.22
-	el.reach_radius = 0.42
-	_add(el)
-	var kn := _strike(&"knee_strike", &"knee", mid, 0.85, 1.0, Vector3(0.0, 0.55, 0.85))
-	kn.limb_radius = 0.22
-	kn.reach_radius = 0.42
-	_add(kn)
-	var sk := _strike(&"sparta_kick", &"kick", mid, 1.4, 1.0)
-	sk.limb_radius = 0.24
-	sk.reach_radius = 0.42
-	_add(sk)
-	# Right roundhouse: the shin sweeps right to left.
-	var rh := _strike(&"roundhouse", &"kick", hi, 1.45, 1.35, Vector3(-0.75, 0.1, 0.65))
-	rh.ender = true
+	_add(_r7(&"hook", hi, 1.05, 1.45, Bones.HEAD, Vector3(0.75, 0.0, 0.65)))
+	_add(_r7(&"heavy_jab", hi, 1.1, 1.45, Bones.HEAD))
+	_add(_r7(&"heavy_cross", hi, 1.15, 1.45, Bones.HEAD))
+	_add(_r7(&"heavy_hook", hi, 1.1, 1.45, Bones.HEAD, Vector3(0.75, 0.0, 0.65)))
+	# Uppercut: up under the chin, lifting.
+	_add(_r7(&"uppercut", hi, 1.0, 1.45, Bones.HEAD, Vector3(0.0, 0.75, 0.65)))
+	# Gut punch: into the waist.
+	var gp := _r7(&"gut_punch", mid, 1.0, 1.0, Bones.SPINE)
+	gp.reach_radius = 0.42
+	_add(gp)
+	# Leg kick: the right shin into the victim's lead (left) leg, low, sweeping across.
+	var lk := _r7(&"leg_kick", low, 1.25, 0.5, Bones.L_LOWER_LEG, Vector3(-0.4, 0.0, 0.9))
+	lk.is_kick = true
+	lk.limb_radius = 0.26
+	lk.reach_radius = 0.4
+	_add(lk)
+	# Front kick: a straight push kick to the body.
+	var fk := _r7(&"front_kick", mid, 1.4, 1.05, Bones.SPINE)
+	fk.is_kick = true
+	fk.limb_radius = 0.24
+	fk.reach_radius = 0.42
+	_add(fk)
+	# Right roundhouse to the head: the shin sweeps right to left.
+	var rh := _r7(&"roundhouse", hi, 1.45, 1.45, Bones.HEAD, Vector3(-0.75, 0.1, 0.65))
+	rh.is_kick = true
 	rh.limb_radius = 0.26
 	rh.reach_radius = 0.45
 	_add(rh)
-	var sw := _strike(&"leg_sweep", &"sweep", low, 1.25, 0.3, Vector3(-0.4, 0.0, 0.9))
-	sw.sweep = true
-	sw.limb_radius = 0.26
-	sw.reach_radius = 0.4
-	sw.target_bone = &"RightLowerLeg"
-	_add(sw)
-	var bf := _strike(&"backfist", &"cross", hi, 1.15, 1.4, Vector3(0.45, 0.0, 0.9))
-	bf.hits_behind = true
-	_add(bf)
-	var cp := _strike(&"crouch_punch", &"jab", low, 1.05, 0.75)
-	_add(cp)
-	var ru := _strike(&"rising_uppercut", &"cross", mid, 1.0, 1.25, Vector3(0.0, 0.75, 0.65))
-	_add(ru)
-	# Dropping strike (any attack in the air, or late in a vault). Its class is
-	# the button's (CombatController sets it per press); this is the kick default.
-	var ds := _strike(&"drop_strike", &"kick", mid, 1.3, 0.7, Vector3(0.0, -0.35, 0.95))
-	ds.startup = DROP_STARTUP
-	ds.active = DROP_ACTIVE_MAX
-	ds.recovery = DROP_RECOVERY
+	# Counter: a straight punch to the body that always connects (play_counter).
+	_add(_r7(&"counter", mid, 1.1, 1.35, Bones.CHEST))
+	# Heavy kicks (the kick buttons held): the light kick's line, a little longer.
+	var hlk := _r7(&"heavy_leg_kick", low, 1.3, 0.5, Bones.L_LOWER_LEG, Vector3(-0.4, 0.0, 0.9))
+	var hfk := _r7(&"heavy_front_kick", mid, 1.45, 1.05, Bones.SPINE)
+	var hrh := _r7(&"heavy_roundhouse", hi, 1.5, 1.45, Bones.HEAD, Vector3(-0.75, 0.1, 0.65))
+	for hk: MoveData in [hlk, hfk, hrh]:
+		hk.is_kick = true
+		hk.limb_radius = 0.26
+		hk.reach_radius = 0.45
+		_add(hk)
+	# Dropping strike: any strike in the air (a jump) or late in a vault, down
+	# and forward onto the target; active until the fighter lands.
+	var ds := _r7(&"drop_strike", mid, 1.3, 0.7, Bones.CHEST, Vector3(0.0, -0.35, 0.95))
 	ds.drop = true
-	ds.drop_max = DROP_ACTIVE_MAX
-	ds.chargeable = false
+	ds.drop_max = float(LOCAL_R7[&"drop_strike"]["f"].y)
 	ds.limb_radius = 0.3
 	ds.reach_radius = 0.5
 	_add(ds)
-	# Ground strikes (Hitting bodies that are down): stomp on Kick, knee drop on
-	# Light / Heavy. A small push into the body, never a launch.
-	var gs := _strike(&"ground_stomp", &"ground", low, 1.1, 0.25, Vector3(0.0, -0.9, 0.3))
-	gs.ground_strike = true
-	gs.ground_hit = true
-	gs.limb_radius = 0.3
-	gs.reach_radius = 0.5
-	gs.target_bone = &"Chest"
-	_add(gs)
-	var kd := _strike(&"knee_drop", &"ground", low, 1.0, 0.3, Vector3(0.0, -0.9, 0.3))
-	kd.ground_strike = true
-	kd.ground_hit = true
-	kd.limb_radius = 0.3
-	kd.reach_radius = 0.5
-	kd.target_bone = &"Chest"
-	_add(kd)
-	# Legacy Upgrade 2 strikes (no button reaches them now).
-	for id: StringName in LEGACY_CLASS:
-		var cls: StringName = LEGACY_CLASS[id]
-		var lm := _strike(id, cls, low if cls == &"ground" else mid, 1.2, 0.35 if cls == &"ground" else 1.2)
-		lm.ground_strike = cls == &"ground"
-		lm.ground_hit = cls == &"ground"
-		_add(lm)
 
 	# The Duelist's teleport counter (CombatController.start_counter): a back
-	# kick from behind. On the player it is an enemy hit: a knockdown.
+	# kick from behind, a blue tell. On the player it is an enemy hit: a knockdown.
 	var bk := MoveData.new()
 	bk.id = &"back_kick"
 	bk.kind = &"counter"
+	bk.enemy = true
+	bk.counterable = false
+	bk.tell_kind = &"counter"
 	bk.startup = 4.0
 	bk.active = 4.0
 	bk.recovery = 20.0
 	bk.damage = Tuning.DMG_ENEMY[&"e_kick"]
 	bk.preset_tier = HitInfo.Tier.KNOCKDOWN
-	bk.strike_class = &"kick"
 	bk.unblockable = true
-	bk.limb = &"RightFoot"
+	bk.is_kick = true
 	bk.limb_radius = 0.26
 	bk.reach = 1.5
 	bk.reach_radius = 0.45
@@ -339,6 +290,7 @@ static func _build() -> void:
 	charge.lunge_start = 0.45
 	charge.force_bone = true
 	charge.hit_level = mid
+	charge.tell_kind = &"charge"  # uncounterable: a blue tell (HUD colours anything but &"strike" blue)
 	_add(charge)
 
 	for gid: StringName in [&"e_grab", &"e_grab_slam"]:
@@ -359,8 +311,8 @@ static func _build() -> void:
 
 	var es := _enemy(&"e_sweep", 5.0, 24.0)
 	es.damage = DMG[&"e_sweep"] * 0.3
-	es.sweep = true
 	es.is_kick = true
+	es.force_bone = true
 	es.limb_radius = 0.28
 	es.reach = 1.35
 	es.reach_radius = 0.42
@@ -378,7 +330,7 @@ static func _enemy(id: StringName, active: float, recovery: float) -> MoveData:
 	m.recovery = recovery
 	m.damage = Tuning.DMG_ENEMY.get(id, 10.0)
 	m.preset_tier = ENEMY_TIER.get(id, HitInfo.Tier.FLINCH)
-	# Guarding a light enemy hit leaves a punish window (a kick lands before a
-	# guarded hook recovers); heavier hits hold the guard longer.
+	m.counterable = not UNCOUNTERABLE.has(id)
+	# Guarding a light enemy hit leaves a punish window; heavier hits hold the guard longer.
 	m.blockstun = ENEMY_BLOCKSTUN_LIGHT if m.preset_tier <= HitInfo.Tier.FLINCH else 12.0
 	return m

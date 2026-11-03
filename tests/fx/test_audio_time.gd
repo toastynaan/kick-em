@@ -2,7 +2,7 @@ extends Node3D
 ## F0 (Feel Reference: Time, in code > Audio): is AudioServer.playback_speed_scale
 ## global in Godot 4.8, and do the player's own sounds keep real time in slow
 ## motion? Three raw players play a 4 s stream while the world runs at 0.3x
-## (TimeDirector Focus): one on the World bus, one on the Player bus with no
+## (a TimeDirector slow-motion row; Round 7 removed Focus): one on the World bus, one on the Player bus with no
 ## compensation, one on the Player bus with AudioFX.player_pitch_factor().
 ## Wall-clock playback progress shows the scale is global (the bus does not
 ## matter) and that the compensation restores real time. Also checks AudioFX
@@ -51,8 +51,8 @@ func _ready() -> void:
 	var driver_rate: float = drive[0] if drive[0] > 0.01 else 1.0
 	raw[0].stop()
 	print("driver mix rate at 1.0x: %.3f stream s per wall-clock s" % driver_rate)
-	if not TimeDirector.begin_focus():
-		fails.append("TimeDirector.begin_focus refused")
+	if not U.slow_world(0.3):
+		fails.append("TimeDirector refused a 0.3x slow motion")
 	await U.physics_frames(get_tree(), 4)
 	var scale := AudioServer.playback_speed_scale
 	var factor := AudioFX.player_pitch_factor()
@@ -99,7 +99,7 @@ func _ready() -> void:
 	var want_lp := maxf(AudioFX.SLOW_LP_OPEN * pow(scale, AudioFX.SLOW_LP_EXP), AudioFX.SLOW_LP_MIN)
 	if absf(AudioFX.get_world_lowpass() - want_lp) > 50.0:
 		fails.append("world low-pass %.0f Hz, want %.0f" % [AudioFX.get_world_lowpass(), want_lp])
-	TimeDirector.end_focus()
+	U.normal_time()
 
 	# A KO: the player slows with the world, so nothing is compensated.
 	if TimeDirector.has_method(&"request") and TimeDirector.request(&"last_kill"):

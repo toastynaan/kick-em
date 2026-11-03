@@ -7,6 +7,8 @@ extends Node3D
 ##   its maximum at full speed; every point fades over Tuning.TRAIL_FADE s.
 ## - strike: the striking limb of a charged attack (level 1+), from late in the
 ##   startup to the end of the active frames.
+## - streak (Round 7): a limb during a glide, from now for the glide's time, at
+##   a given strength (ScreenFX: both hands and feet, scaled by the distance).
 ## One colour for the brand: Tuning.TRAIL_COLOR. Each channel is an
 ## ImmediateMesh triangle strip in world space, rebuilt each rendered frame and
 ## turned to face the camera. Times are real seconds (the player keeps real
@@ -19,11 +21,13 @@ const STRIKE_LENGTH := 1.2        ## m at most along a strike's arc
 const SAMPLE_MIN := 0.008         ## m between samples (a still limb adds none)
 const ALPHA := 0.85               ## head alpha at full strength
 const STRIKE_FROM := 0.4          ## the strike trail starts this far through the startup
+const STREAK_LENGTH := 1.6        ## m at most behind a gliding limb
 
 class Channel:
 	var fighter: Node3D
 	var bone: StringName
 	var strike := false
+	var streak := false           ## a glide streak (timed like a strike)
 	var start_at := 0.0           ## real s (strike: when emission begins)
 	var until := -1.0             ## real s (strike: when emission ends)
 	var strength := 0.0           ## current emission strength 0..1
@@ -71,7 +75,7 @@ func strike(fighter: Node3D, bone: StringName, start_in: float, until_in: float,
 	if not is_instance_valid(fighter):
 		return
 	for ch in _channels:  # restrike on the same limb: extend it
-		if ch.strike and ch.fighter == fighter and ch.bone == bone:
+		if ch.strike and not ch.streak and ch.fighter == fighter and ch.bone == bone:
 			ch.start_at = _now + start_in
 			ch.until = _now + until_in
 			ch.strength = clampf(0.65 + 0.12 * level, 0.0, 1.0)
@@ -83,20 +87,43 @@ func strike(fighter: Node3D, bone: StringName, start_in: float, until_in: float,
 	ch.max_len = STRIKE_LENGTH
 	ch.width = WIDTH_STRIKE
 
-## Live channels and their total points (tests, debug): {channels, points, sprint, strike, length}.
+## A glide streak on `bone` of `fighter` from now for `duration` s (real time),
+## at `strength` 0..1. Another streak on the same limb extends it.
+func streak(fighter: Node3D, bone: StringName, duration: float, strength: float) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var ch: Channel = null
+	for c in _channels:
+		if c.streak and c.fighter == fighter and c.bone == bone:
+			ch = c
+	if ch == null:
+		ch = _new_channel(fighter, bone, true)
+		ch.streak = true
+		ch.start_at = _now
+	ch.until = _now + maxf(duration, 0.0)
+	ch.strength = clampf(strength, 0.0, 1.0)
+	ch.max_len = STREAK_LENGTH
+	ch.width = WIDTH_SPRINT
+
+## Live channels and their total points (tests, debug): {channels, points,
+## sprint, strike (strike and streak channels), streak, length}.
 func stats() -> Dictionary:
 	var pts := 0
 	var sprint := 0
 	var strikes := 0
+	var streaks := 0
 	var longest := 0.0
 	for ch in _channels:
 		pts += ch.pts.size()
 		if ch.strike:
 			strikes += 1
+			if ch.streak:
+				streaks += 1
 		else:
 			sprint += 1
 		longest = maxf(longest, _length(ch))
-	return {"channels": _channels.size(), "points": pts, "sprint": sprint, "strike": strikes, "length": longest}
+	return {"channels": _channels.size(), "points": pts, "sprint": sprint, "strike": strikes, "streak": streaks,
+		"length": longest}
 
 ## Strength of the sprint trails now (tests): 0 below TRAIL_FROM.
 func sprint_strength(level: float) -> float:

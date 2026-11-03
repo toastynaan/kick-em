@@ -1,8 +1,8 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Round 2 cross-module APIs, Round 5 rules: CombatController.start_counter
-## (the Duelist's teleport counter: on the player a knockdown, never a launch;
-## the player can parry it through Defence), pick_up_debris,
-## ThrownChunk.launch_body and the player's debris kick.
+## Round 2 cross-module APIs, Round 7 rules: CombatController.start_counter
+## (the Duelist's teleport counter, free since the Focus meter went: on the
+## player a knockdown, never a launch), pick_up_debris, ThrownChunk.launch_body
+## and the player's debris kick (the front kick sends a chunk at an enemy).
 
 var _x := 0.0
 const PEAK_LIMIT := 20.0
@@ -54,54 +54,28 @@ func _chunk(pos: Vector3) -> RigidBody3D:
 
 func run() -> void:
 	get_tree().physics_frame.connect(_sample_peaks)
-	print("AI teleport counter")
+	print("AI teleport counter (the Duelist; free: no Focus meter)")
 	var x := _lane()
 	var p := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var du := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
 	await ticks(15)
-	check(is_equal_approx(du.focus, float(du.config["focus"])), "duelist starts with config focus %.1f" % du.focus)
 	clear_events()
 	var hp0 := p.hp
 	check(du.combat.start_counter(p, 0.4), "start_counter accepted")
-	var behind := p.get_ground_position() - p.get_forward() * Tuning.COUNTER_BEHIND_DIST
-	check(du.global_position.distance_to(behind) < 0.3, "duelist reappears behind the player (%.2f m)" % du.global_position.distance_to(behind))
+	var behind := (du.get_ground_position() - p.get_ground_position()).dot(p.get_forward())
+	check(behind < -0.5, "the duelist reappears behind the player (%.2f m)" % -behind)
 	var tell := last_event(&"attack_tell")
-	check(not tell.is_empty() and tell[2] == &"counter" and absf(tell[3] - 0.4) < 0.01, "blue counter tell 0.4 s")
-	check(is_equal_approx(du.focus, float(du.config["focus"]) - Tuning.FOCUS_COST), "costs 1 focus (%.1f)" % du.focus)
+	var want_tell := maxf(0.4, Tuning.frames(Tuning.ENEMY_STARTUP_MIN))  # never under the enemy startup minimum
+	check(not tell.is_empty() and tell[2] == &"counter" and absf(tell[3] - want_tell) < 0.01,
+		"blue counter tell %.2f s (%.2f)" % [want_tell, tell[3] if not tell.is_empty() else -1.0])
 	var ok := await wait_until(func() -> bool: return _landed(&"back_kick", p) != null, 1.5)
 	check(ok, "AI back_kick landed on the player")
 	if ok:
 		var info := _landed(&"back_kick", p)
-		check(info.tier == HitInfo.Tier.KNOCKDOWN and info.launch_velocity == Vector3.ZERO,
-			"the counter knocks the player down, no launch (%s)" % HitInfo.tier_name(info.tier))
+		check(info.tier == HitInfo.Tier.KNOCKDOWN and info.launch_velocity == Vector3.ZERO and info.react == &"",
+			"the counter knocks the player down (a Round 5 tier), no launch (%s)" % HitInfo.tier_name(info.tier))
 		var want := Tuning.DMG_ENEMY[&"e_kick"] * float(du.config["damage_mult"])
 		check(is_equal_approx(hp0 - p.hp, want), "damage %.1f = DMG_ENEMY e_kick x damage_mult" % (hp0 - p.hp))
-
-	print("AI counter: no focus, no counter")
-	x = _lane()
-	var p2 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var du2 := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
-	await ticks(15)
-	du2.spend_focus(du2.focus)
-	check(not du2.combat.start_counter(p2, 0.4), "start_counter refused without focus")
-
-	print("the player parries the AI counter (Defence)")
-	x = _lane()
-	var p3 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var du3 := spawn(&"duelist", Vector3(x, 0, -3.0), Vector3.BACK)
-	await ticks(15)
-	var parried := [false]
-	GameEvents.parried.connect(func(d: Node3D, a: Node3D) -> void:
-		if d == p3 and a == du3:
-			parried[0] = true)
-	clear_events()
-	check(du3.combat.start_counter(p3, 0.5), "AI counter started")
-	await wait_until(func() -> bool: return du3.combat.time_to_active() <= 0.08, 2.0)
-	p3.combat.press(CombatController.Action.BLOCK)
-	p3.combat.release(CombatController.Action.BLOCK)
-	await wait_real(0.4)
-	check(parried[0], "a Block press in the window parries the counter kick")
-	check(_landed(&"back_kick", p3) == null, "the counter kick missed")
 
 	print("start_counter is refused mid-attack")
 	x = _lane()
@@ -187,18 +161,18 @@ func run() -> void:
 	print("debris kick")
 	x = _lane()
 	var p7 := spawn(&"player", Vector3(x, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var g7 := spawn(&"grunt", Vector3(x, 0, -6.0), Vector3.BACK)
+	var g7 := spawn(&"grunt", Vector3(x, 0, -7.0), Vector3.BACK)  # beyond the strike's pick: no glide
 	await ticks(15)
 	var b7 := _chunk(Vector3(x, 0.15, -0.8))
 	await wait_real(0.5)
 	_track(b7)
 	clear_events()
-	p7.combat.press(CombatController.Action.KICK)
-	p7.combat.release(CombatController.Action.KICK)
+	p7.combat.press(CombatController.Action.FRONT_KICK)
+	p7.combat.release(CombatController.Action.FRONT_KICK)
 	ok = await wait_until(func() -> bool: return b7.linear_velocity.length() > 8.0, 1.0)
 	check(ok, "kick launched the chunk (%.1f m/s)" % b7.linear_velocity.length())
 	ok = await wait_until(func() -> bool: return _landed(&"debris_kick", g7) != null, 2.0)
-	check(ok, "kicked chunk hit the grunt 6 m away")
+	check(ok, "kicked chunk hit the grunt 7 m away")
 	await wait_real(1.0)
 	pk = _peaks[b7]
 	check(pk[0] <= PEAK_LIMIT and pk[1] <= PEAK_LIMIT,

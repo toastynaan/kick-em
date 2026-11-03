@@ -1,15 +1,14 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Round 3 wall strikes: the player's punches and kicks call receive_strike on
-## the wall under the striking limb, once per move. Round 5: power =
-## CombatController.WALL_POWER_PER_P x P (charge and run speed count as on a
-## body; a tapped kick keeps Round 3's 60); the floor is never struck; a
-## fighter in reach wins; the feel (no whiff, no combo credit, recoil off a
-## wall that holds).
+## Round 3 wall strikes, kept in Round 7: the player's punches and kicks call
+## receive_strike on the wall under the striking limb, once per move, with no
+## target in reach (the strike goes along the facing). Round 7: power =
+## CombatController.WALL_POWER_PER_WEIGHT x the move's R7 weight (a front kick
+## 62, about Round 3's 60); the floor is never struck; a fighter in reach wins;
+## the feel (no whiff, no chain credit, recoil off a wall that holds).
 
 const FakeWall := preload("res://tests/combat/fake_wall.gd")
-const TraversalDouble := preload("res://tests/combat/traversal_double.gd")
 const L := CombatController.Action.LIGHT
-const K := CombatController.Action.KICK
+const K := CombatController.Action.FRONT_KICK
 var _x := 0.0
 
 func _init() -> void:
@@ -36,12 +35,11 @@ func _strike(p: Fighter, action: int, hold := 0.0) -> void:
 	await ticks(4)
 
 func run() -> void:
-	var per := CombatController.WALL_POWER_PER_P
-	var jab := per * Power.base_of(&"jab")
-	var kick := per * Power.base_of(&"kick")
-	print("power per move (%.0f x P)" % per)
-	var cases := [["jab", L, 0.0, jab], ["kick", K, 0.0, kick],
-		["level 3 kick", K, 1.05, kick * Tuning.CHARGE_MULT[3]]]
+	var per := CombatController.WALL_POWER_PER_WEIGHT
+	var w := func(id: StringName) -> float: return per * float(Tuning.R7_MOVES[id]["weight"])
+	print("power per move (%.0f x weight)" % per)
+	var cases := [["jab", L, 0.0, w.call(&"jab")], ["front kick", K, 0.0, w.call(&"front_kick")],
+		["heavy roundhouse (held)", CombatController.Action.ROUNDHOUSE, 0.3, w.call(&"heavy_roundhouse")]]
 	for c: Array in cases:
 		var lw: Array = await _wall_lane(0.75)
 		var p: Fighter = lw[0]
@@ -58,21 +56,7 @@ func run() -> void:
 		check(absf(hp.z - (-0.75)) < 0.12 and absf(hp.x - _x) < 0.6, "%s: hit point on the wall face %s" % [c[0], hp])
 		check((rc[2] as Vector3).dot(Vector3.FORWARD) > 0.9, "%s: direction into the wall" % c[0])
 		check(count_events(&"attack_whiff") == 0, "%s: no whiff" % c[0])
-		check(p.combat.get_combo_count() == 0, "%s: no combo credit" % c[0])
-
-	print("run speed adds its bonus (a full-sprint kick: P 5.5)")
-	var dl: Array = await _wall_lane(0.75)
-	var pd: Fighter = dl[0]
-	var tv: Traversal = TraversalDouble.new()
-	pd.add_child(tv)
-	tv.setup(pd)
-	pd.traversal = tv
-	tv.set(&"speed", 8.0)
-	tv.set(&"sprinting", true)
-	await _strike(pd, K)
-	var want_sp := per * (Power.base_of(&"kick") + Power.speed_bonus(8.0, 8.0))
-	check(dl[1].calls.size() == 1 and is_equal_approx(dl[1].calls[0][3], want_sp),
-		"sprint kick power %.1f (want %.1f)" % [dl[1].calls[0][3] if not dl[1].calls.is_empty() else -1.0, want_sp])
+		check(p.combat.get_chain_count() == 0 and count_events(&"chain_hit") == 0, "%s: no chain credit" % c[0])
 
 	print("feel: recoil off a wall that holds")
 	var hl: Array = await _wall_lane(0.75, &"hold")
@@ -91,9 +75,9 @@ func run() -> void:
 	floor_wall.global_position = Vector3(_x, 0.1, -1.0)  # a strikeable slab under the feet
 	var pf := spawn_fake(&"player", Vector3(_x, 0.25, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER, true)
 	await ticks(20)
-	await _strike(pf, CombatController.Action.SWEEP)
+	await _strike(pf, CombatController.Action.LEG_KICK)
 	await _strike(pf, K)
-	check(floor_wall.calls.is_empty(), "sweep and kick over a strikeable floor: no strike (%d)" % floor_wall.calls.size())
+	check(floor_wall.calls.is_empty(), "leg kick and front kick over a strikeable floor: no strike (%d)" % floor_wall.calls.size())
 
 	print("nothing without receive_strike, out of reach, or for enemies")
 	_x += 8.0
@@ -136,7 +120,7 @@ func run() -> void:
 	await _drywall_end_to_end()
 	done()
 
-## A real drywall Destructible (agent D): two jabs or one kick open a hole.
+## A real drywall Destructible (agent D): two jabs or one front kick open a hole.
 ## Skipped while Destructible.receive_strike is still the stub (always &"hold").
 func _panel_lane() -> Array:
 	_x += 8.0
@@ -161,4 +145,4 @@ func _drywall_end_to_end() -> void:
 	lane = await _panel_lane()
 	await _strike(lane[0], K)
 	var k: StringName = (lane[0] as Fighter).combat.last_wall_strike.get("result", &"")
-	check(k in [&"hole", &"break"], "one kick opens drywall (%s)" % k)
+	check(k in [&"hole", &"break"], "one front kick opens drywall (%s)" % k)

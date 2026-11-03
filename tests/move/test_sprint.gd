@@ -1,31 +1,38 @@
 extends "res://tests/move/move_test_base.gd"
-## F2 sprint that builds (Feel Reference: Movement spec > Sprint that builds;
-## Charging is the risk; Sprint strikes). Checks, with measured numbers:
-## - holding Dash in a straight line reaches the cap in 1.2 +- 0.1 s
-##   (sprint_charge and the settled speed), never under 6 m/s after 150 ms;
-## - a Dash tap is a 3 m short dash; releasing bleeds to walk over 0.25 s;
+## The sprint (Round 7: Defence > Sprint: still held after Tuning.DASH_HOLD_SPRINT,
+## the dodge flows into the existing sprint ramp; sprinting adds no power).
+## Checks, with measured numbers:
+## - holding Dash in a straight line reaches the cap 1.2 +- 0.1 s after the
+##   press (sprint_charge and the settled speed), never under 6 m/s after 150 ms;
+## - releasing bleeds to walk over 0.25 s;
 ## - a 90-degree turn inside 0.2 s at full speed drops speed 30%; a gentle
 ##   curve costs nothing;
-## - charging during a sprint keeps speed within 5% and turns <= 30 deg/s;
-## - any sprint strike, hit or miss, leaves the player at walking speed;
-## - footsteps carry the floor surface and sprint_charge.
+## - a strike thrown from a sprint ends it (walking speed at its end) and a
+##   held Dash builds again from 6 m/s;
+## - the upgraded caps (10, 12) build over the same 1.2 s;
+## - in slow motion the player sprints the same distance per real second;
+## - footsteps carry the floor surface and sprint_charge;
+## - holding a body never sprints (Dash is the drive then); a prop in hand
+##   keeps the dodge and the sprint, never slowed;
+## - ground cracks at speed (Round 7 amendment): every footstep at 10 m/s cracks
+##   the floor (level 1, never a crater), none at 8 m/s; the floor-decal budget
+##   (Tuning.FLOOR_DECAL_MAX) holds over a long run.
 
 func run() -> void:
 	var p := spawn_player(Vector3(0.0, 0.0, 60.0))
 	await ticks(30)
 	check(p.traversal != null, "the player has a Traversal")
 	await _cap_time(p)
-	await _short_dash(p)
 	await _release_bleed(p)
 	await _turn_penalty(p)
 	await _gentle_curve(p)
-	await _charge_at_sprint(p)
-	await _sprint_strike_miss(p)
-	await _sprint_strike_hit(p)
-	await _charge_hit_stumble(p)
+	await _sprint_strike(p)
 	await _upgraded_caps(p)
-	await _focus_sprint(p)
+	await _slow_motion_sprint(p)
 	await _footsteps(p)
+	await _no_sprint_holding(p)
+	await _sprint_with_prop(p)
+	await _speed_cracks(p)
 	done()
 
 func _cap_time(p: Fighter) -> void:
@@ -50,19 +57,20 @@ func _cap_time(p: Fighter) -> void:
 			min_after = minf(min_after, v)
 		if t_charge < 0.0 and p.traversal.sprint_charge >= 0.999:
 			t_charge = t
-		# Last upward crossing (the short dash's opening burst runs above the cap).
+		# Last upward crossing (the dodge opens above the cap).
 		if v < cap * 0.99:
 			below = true
 		elif below:
 			below = false
 			t_settle = t
-		if v < cap * Tuning.SPEED_CAP_SNAP:
+		if v < cap * 0.98:
 			below98 = true
 		elif below98:
 			below98 = false
 			t_98 = t
-	print("  cap %.1f: 98%% (power counts the cap) at %.3f s, 99%% at %.3f s, sprint_charge 1 at %.3f s; burst peak %.2f, min after 150 ms %.2f, speed at 2 s %.2f" % [
+	print("  cap %.1f: 98%% at %.3f s, 99%% at %.3f s, sprint_charge 1 at %.3f s; dodge peak %.2f, min after 150 ms %.2f, speed at 2 s %.2f" % [
 		cap, t_98, t_settle, t_charge, peak, min_after, hspeed(p)])
+	check(count_events(&"dodged") == 1, "the press dodged first (one dodged event)")
 	check(near(t_98, Tuning.SPRINT_RAMP_TIME, 0.2), "98%% of the cap at %.3f s" % t_98)
 	check(near(t_charge, Tuning.SPRINT_RAMP_TIME, 0.1), "sprint_charge reaches 1 in %.3f s (1.2 +- 0.1)" % t_charge)
 	check(near(t_settle, Tuning.SPRINT_RAMP_TIME, 0.1), "speed reaches the cap (99%%) in %.3f s (1.2 +- 0.1)" % t_settle)
@@ -70,19 +78,6 @@ func _cap_time(p: Fighter) -> void:
 	check(near(hspeed(p), cap, 0.05), "holds the cap %.2f m/s" % hspeed(p))
 	check(p.traversal.is_sprinting() and count_events(&"sprint_started") == 1, "is_sprinting and one sprint_started")
 	await settle(p, 40)
-
-func _short_dash(p: Fighter) -> void:
-	await settle(p, 30)
-	var x0 := p.global_position
-	dash_down(p)
-	await ticks(2)
-	dash_up(p)
-	await wait_until(func() -> bool: return hspeed(p) < 0.05, 120)
-	var d := Vector2(p.global_position.x - x0.x, p.global_position.z - x0.z).length()
-	print("  short dash (tap, stick neutral): %.2f m" % d)
-	check(d >= Tuning.SHORT_DASH_DIST - 0.05 and d <= Tuning.SHORT_DASH_DIST + 0.45,
-		"a Dash tap covers %.2f m (short dash %.1f m, then the feet plant)" % [d, Tuning.SHORT_DASH_DIST])
-	check(not p.traversal.is_sprinting(), "a tap does not sprint")
 
 func _release_bleed(p: Fighter) -> void:
 	await settle(p, 20)
@@ -105,12 +100,12 @@ func _release_bleed(p: Fighter) -> void:
 
 func _turn_penalty(p: Fighter) -> void:
 	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 60.0)
+	await place(p, Vector3(0.0, 0.0, 60.0))
 	await sprint_to_cap(p, Vector3.FORWARD)
 	await ticks(12)
 	var before := hspeed(p)
 	var n0 := p.traversal.turn_penalties
-	var yaw0 := _yaw(p.velocity)
+	var yaw0 := yaw_of(p.velocity)
 	p.move_input = Vector3.RIGHT  # a hard 90-degree cut
 	var after := INF
 	var t_turn := -1.0
@@ -118,7 +113,7 @@ func _turn_penalty(p: Fighter) -> void:
 	for i in 30:
 		await get_tree().physics_frame
 		after = minf(after, hspeed(p))
-		if t_turn < 0.0 and absf(rad_to_deg(angle_difference(yaw0, _yaw(p.velocity)))) >= 89.0:
+		if t_turn < 0.0 and absf(rad_to_deg(angle_difference(yaw0, yaw_of(p.velocity)))) >= 89.0:
 			t_turn = TimeDirector.now() - t0
 	var drop := 1.0 - after / before
 	print("  90-degree cut at %.2f m/s: turned in %.3f s, lowest speed %.2f (drop %.1f%%), penalties %d" % [
@@ -130,7 +125,7 @@ func _turn_penalty(p: Fighter) -> void:
 
 func _gentle_curve(p: Fighter) -> void:
 	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 60.0)
+	await place(p, Vector3(0.0, 0.0, 60.0))
 	await sprint_to_cap(p, Vector3.FORWARD)
 	await ticks(10)
 	var n0 := p.traversal.turn_penalties
@@ -146,184 +141,40 @@ func _gentle_curve(p: Fighter) -> void:
 	check(p.traversal.turn_penalties == n0 and lo >= before * 0.99, "a gentle curve costs nothing (lowest %.2f of %.2f)" % [lo, before])
 	await settle(p, 30)
 
-func _charge_at_sprint(p: Fighter) -> void:
+## A strike thrown from a sprint ends the sprint: walking speed by its end,
+## and the held Dash builds the sprint again from the start.
+func _sprint_strike(p: Fighter) -> void:
 	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 60.0)
-	await sprint_to_cap(p, Vector3.FORWARD)
-	await ticks(10)
-	var v0 := hspeed(p)
-	p.combat.force_hold_charge = true
-	p.combat.press(CombatController.Action.KICK)
-	var charging := await wait_until(func() -> bool: return p.combat.is_charging(), 60)
-	check(charging, "holding Kick at a sprint charges")
-	var lo := INF
-	var hi := 0.0
-	for i in 30:
-		await get_tree().physics_frame
-		lo = minf(lo, hspeed(p))
-		hi = maxf(hi, hspeed(p))
-	# Steer hard right for 0.5 s: the heading may turn at most 30 deg/s.
-	var yaw0 := _yaw(p.velocity)
-	p.move_input = Vector3.RIGHT
-	var t0 := TimeDirector.now()
-	for i in 60:
-		await get_tree().physics_frame
-		lo = minf(lo, hspeed(p))
-		hi = maxf(hi, hspeed(p))
-	var turned := absf(rad_to_deg(angle_difference(yaw0, _yaw(p.velocity))))
-	var rate := turned / (TimeDirector.now() - t0)
-	# Releasing Dash cannot stop a sprinting charge.
-	dash_up(p)
-	await ticks(20)
-	var still := hspeed(p)
-	print("  charge at %.2f m/s: speed %.2f..%.2f (%.1f%% band), steer %.1f deg/s, after Dash release %.2f, charge_steering %s" % [
-		v0, lo, hi, (hi - lo) / v0 * 100.0, rate, still, p.traversal.is_charge_steering()])
-	check(lo >= v0 * 0.95 and hi <= v0 * 1.05, "charging at a sprint keeps speed within 5%% (%.2f..%.2f of %.2f)" % [lo, hi, v0])
-	check(rate <= Tuning.CHARGE_SPRINT_STEER + 1.0 and rate >= Tuning.CHARGE_SPRINT_STEER * 0.8,
-		"steering while charging %.1f deg/s (<= 30)" % rate)
-	check(still >= v0 * 0.95, "releasing Dash does not stop a sprinting charge (%.2f)" % still)
-	p.combat.release(CombatController.Action.KICK)
-	var r := await _strike_speeds(p)
-	var after: float = r["end"]
-	print("  charged kick released: speed at the end of the strike %.2f" % after)
-	check(after <= Tuning.WALK_SPEED + 0.05, "the charged sprint strike drops to walking speed (%.2f)" % after)
-	p.combat.force_hold_charge = false
-	await settle(p, 30)
-
-func _sprint_strike_miss(p: Fighter) -> void:
-	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 60.0)
+	await place(p, Vector3(0.0, 0.0, 60.0))
 	await sprint_to_cap(p, Vector3.FORWARD)
 	await ticks(10)
 	var v0 := hspeed(p)
 	p.combat.press(CombatController.Action.LIGHT)
+	await ticks(1)
 	p.combat.release(CombatController.Action.LIGHT)
-	var r := await _strike_speeds(p)
-	print("  sprint jab (miss) at %.2f m/s: speed after the commit %.2f..%.2f, at the end of the strike %.2f, first free tick %.2f" % [
-		v0, r["lo"], r["hi"], r["end"], r["free"]])
-	check(r["seen"] and r["end"] <= Tuning.WALK_SPEED + 0.05,
-		"a missed sprint strike leaves the player at walking speed (%.2f at its end)" % r["end"])
-	check(r["free"] <= Tuning.SPRINT_START_SPEED + 0.05, "the next sprint builds from the start again (%.2f)" % r["free"])
-	await settle(p, 30)
-
-## Speeds through a strike: from its commit (the speed sample) to its end, and
-## the first tick after it.
-func _strike_speeds(p: Fighter) -> Dictionary:
 	var seen := await wait_until(func() -> bool: return p.combat.is_attacking(), 10)
-	var lo := INF
-	var hi := 0.0
+	var sprint_in := false
 	var end := 0.0
-	var lunge_ticks := 0
 	while p.combat.is_attacking():
+		sprint_in = sprint_in or p.traversal.is_sprinting()
+		end = hspeed(p)
 		await get_tree().physics_frame
-		if p.combat.is_attacking():
-			end = hspeed(p)
-			if p.combat.has_forced_velocity():
-				lunge_ticks += 1
-			else:
-				lo = minf(lo, end)
-				hi = maxf(hi, end)
-	return {"seen": seen, "lo": lo, "hi": hi, "end": end, "free": hspeed(p), "lunge": lunge_ticks}
-
-func _sprint_strike_hit(p: Fighter) -> void:
-	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 60.0)
-	var g := spawn_enemy(&"grunt", Vector3(0.0, 0.0, 44.0))
-	await ticks(5)
-	p.move_input = Vector3.FORWARD
-	dash_down(p)
-	await wait_until(func() -> bool:
-		return p.global_position.distance_to(g.global_position) <= 2.2, 360)
-	var v0 := hspeed(p)
-	clear_events()
-	p.combat.press(CombatController.Action.LIGHT)
-	p.combat.release(CombatController.Action.LIGHT)
-	var r := await _strike_speeds(p)
-	var at_end: float = r["end"]
-	var hits := 0
-	for e in events_of(&"hit_landed"):
-		var info := e[0] as HitInfo
-		if info != null and info.attacker == p:
-			hits += 1
-	print("  sprint jab (hit) at %.2f m/s: hits %d, speed at the end of the strike %.2f, rams %d" % [
-		v0, hits, at_end, count_events(&"rammed")])
-	check(hits >= 1, "the sprint jab hits the grunt")
-	check(at_end <= Tuning.WALK_SPEED + 0.05, "a sprint strike that hits leaves the player at walking speed (%.2f)" % at_end)
-	check(count_events(&"rammed") == 0, "a sprint attack never rams its target")
-	await settle(p, 30)
-	g.queue_free()
-	await ticks(2)
-
-func _footsteps(p: Fighter) -> void:
-	await settle(p, 20)
-	var plate := make_box(Vector3(0.0, -0.49, 30.0), Vector3(6.0, 1.0, 20.0), "MetalPlate")
-	plate.set_meta(&"surface", &"metal")
-	p.global_position = Vector3(0.0, 0.05, 38.0)
-	await ticks(5)
-	clear_events()
-	p.move_input = Vector3.FORWARD
-	dash_down(p)
-	await ticks(120)
-	var steps := events_of(&"footstep")
-	var metal := 0
-	var max_charge := 0.0
-	for s in steps:
-		if s[2] == &"metal":
-			metal += 1
-		max_charge = maxf(max_charge, float(s[3]))
-	print("  footsteps over 1 s of sprint: %d (%d on metal), max sprint_charge %.2f" % [steps.size(), metal, max_charge])
-	check(steps.size() >= 5, "footsteps while sprinting (%d in 1 s)" % steps.size())
-	check(metal >= 3, "footsteps carry the surface (metal %d)" % metal)
-	check(max_charge > 0.5, "footsteps carry sprint_charge (%.2f)" % max_charge)
-	await settle(p, 20)
-
-## A hit during a sprinting charge knocks the player out of it, and they stumble.
-func _charge_hit_stumble(p: Fighter) -> void:
-	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 60.0)
-	await sprint_to_cap(p, Vector3.FORWARD)
-	await ticks(5)
-	p.combat.force_hold_charge = true
-	p.combat.press(CombatController.Action.KICK)
-	await wait_until(func() -> bool: return p.combat.is_charging(), 60)
-	var steering := p.traversal.is_charge_steering()
-	var g := spawn_enemy(&"grunt", p.global_position + Vector3(1.2, 0.0, 0.0), Vector3.LEFT)
-	await ticks(2)
-	clear_events()
-	var info := HitInfo.new()
-	info.attacker = g
-	info.move_id = &"e_jab"
-	info.kind = &"strike"
-	info.damage = 1.0
-	info.tier = HitInfo.Tier.FLINCH
-	info.reaction = HitInfo.Reaction.FLINCH
-	info.hit_direction = Vector3.LEFT
-	info.hit_position = p.get_aim_point()
-	info.hit_bone = Bones.CHEST
-	info.unblockable = true
-	var res := p.take_hit(info)
+	var free := hspeed(p)
 	await ticks(3)
-	var stumbled := false
-	for e in events_of(&"stumbled"):
-		if e[0] == p:
-			stumbled = true
-	print("  hit while charging at a sprint (steering %s): result %d, stumbled %s, still charging %s, charge steering %s" % [
-		steering, res, stumbled, p.combat.is_charging(), p.traversal.is_charge_steering()])
-	check(steering and res == HitInfo.Result.HIT and stumbled, "a hit during a sprinting charge makes the player stumble")
-	check(not p.combat.is_charging() and not p.traversal.is_charge_steering(), "...and knocks them out of the charge")
-	p.combat.release(CombatController.Action.KICK)
-	p.combat.force_hold_charge = false
-	await settle(p, 90)
-	g.queue_free()
-	await ticks(2)
+	var rebuilt := p.traversal.is_sprinting()
+	print("  sprint jab (no target) at %.2f m/s: sprinting during it %s, speed at its end %.2f, first free tick %.2f, sprinting again %s" % [
+		v0, sprint_in, end, free, rebuilt])
+	check(seen and not sprint_in and end <= Tuning.WALK_SPEED + 0.05,
+		"a strike from a sprint ends it (%.2f m/s at the strike's end)" % end)
+	check(free <= Tuning.SPRINT_START_SPEED + 0.05 and rebuilt, "the held Dash builds the sprint again from the start (%.2f)" % free)
+	await settle(p, 30)
 
 ## The upgraded caps (10, 12) build over the same 1.2 s.
 func _upgraded_caps(p: Fighter) -> void:
 	for cap: float in [10.0, 12.0]:
 		await settle(p, 20)
 		Tuning.debug_speed_cap = cap
-		p.global_position = Vector3(0.0, 0.0, 60.0)
-		await ticks(5)
+		await place(p, Vector3(0.0, 0.0, 60.0))
 		var t0 := TimeDirector.now()
 		p.move_input = Vector3.FORWARD
 		dash_down(p)
@@ -347,27 +198,123 @@ func _upgraded_caps(p: Fighter) -> void:
 	Tuning.debug_speed_cap = 8.0
 	await settle(p, 30)
 
-## Focus mode: the player sprints the same distance per real second.
-func _focus_sprint(p: Fighter) -> void:
+## Slow motion: the player sprints the same distance per real second.
+func _slow_motion_sprint(p: Fighter) -> void:
 	await settle(p, 20)
-	p.global_position = Vector3(0.0, 0.0, 70.0)
+	await place(p, Vector3(0.0, 0.0, 70.0))
 	await sprint_to_cap(p, Vector3.FORWARD)
 	await ticks(5)
 	var z0 := p.global_position.z
 	await ticks(120)
 	var d_normal := z0 - p.global_position.z
-	var ok := TimeDirector.begin_focus()
-	await ticks(2)
+	var ok := false
+	if TimeDirector.has_method(&"request_slowmo"):
+		ok = bool(TimeDirector.call(&"request_slowmo", 0.3, 3.0, TimeDirector.PRIO_DODGE))
+	else:
+		ok = TimeDirector.request(&"finisher")
+	await ticks(20)
 	var scale := Engine.time_scale
 	z0 = p.global_position.z
 	await ticks(120)
-	var d_focus := z0 - p.global_position.z
-	TimeDirector.end_focus()
+	var d_slow := z0 - p.global_position.z
+	TimeDirector.reset()
 	await ticks(30)
-	print("  sprint per real second: %.3f m normal, %.3f m in Focus (time scale %.2f, focus %s)" % [d_normal, d_focus, scale, ok])
-	check(ok and scale < 0.5 and absf(d_focus - d_normal) <= d_normal * 0.05,
-		"in Focus mode the sprint covers the same distance per real second (%.2f vs %.2f m)" % [d_focus, d_normal])
+	print("  sprint per real second: %.3f m normal, %.3f m in slow motion (time scale %.2f, granted %s)" % [d_normal, d_slow, scale, ok])
+	check(ok and scale < 0.7 and absf(d_slow - d_normal) <= d_normal * 0.05,
+		"in slow motion the sprint covers the same distance per real second (%.2f vs %.2f m)" % [d_slow, d_normal])
+	dash_up(p)
 	await settle(p, 30)
 
-static func _yaw(v: Vector3) -> float:
-	return atan2(-v.x, -v.z)
+func _footsteps(p: Fighter) -> void:
+	await settle(p, 20)
+	var plate := make_box(Vector3(0.0, -0.49, 30.0), Vector3(6.0, 1.0, 20.0), "MetalPlate")
+	plate.set_meta(&"surface", &"metal")
+	await place(p, Vector3(0.0, 0.05, 38.0))
+	p.move_input = Vector3.FORWARD
+	dash_down(p)
+	await wait_until(func() -> bool: return p.traversal.is_sprinting(), 60)
+	clear_events()  # the dodge is a hop: footsteps from the first stride of the sprint
+	await ticks(120)
+	var steps := events_of(&"footstep")
+	var metal := 0
+	var max_charge := 0.0
+	for s in steps:
+		if s[2] == &"metal":
+			metal += 1
+		max_charge = maxf(max_charge, float(s[3]))
+	print("  footsteps over 1 s of sprint: %d (%d on metal), max sprint_charge %.2f" % [steps.size(), metal, max_charge])
+	check(steps.size() >= 5, "footsteps while sprinting (%d in 1 s)" % steps.size())
+	check(metal >= 3, "footsteps carry the surface (metal %d)" % metal)
+	check(max_charge > 0.5, "footsteps carry sprint_charge (%.2f)" % max_charge)
+	await settle(p, 20)
+
+## Holding a body, Dash never sprints (it is Carry's: the drive).
+func _no_sprint_holding(p: Fighter) -> void:
+	await settle(p, 20)
+	await place(p, Vector3(0.0, 0.0, 80.0))
+	var d := install_carry_double(p, 0.7)
+	p.move_input = Vector3.FORWARD
+	p.traversal.on_dash_pressed()  # even if Dash reached Traversal
+	var top := 0.0
+	for i in 120:
+		await get_tree().physics_frame
+		top = maxf(top, hspeed(p))
+	var sprinting := p.traversal.is_sprinting() or p.traversal.is_dodging()
+	p.traversal.on_dash_released()
+	print("  holding a body, Dash held 1 s: sprinting or dodging %s, top speed %.2f (walk x 0.7 = %.2f)" % [
+		sprinting, top, Tuning.WALK_SPEED * 0.7])
+	check(not sprinting and top <= Tuning.WALK_SPEED * 0.7 + 0.05, "holding a body never sprints or dodges")
+	remove_carry_double(p, d)
+	await settle(p, 20)
+
+## A prop in hand: Dash is still the dodge and the sprint, at full speed.
+func _sprint_with_prop(p: Fighter) -> void:
+	await settle(p, 20)
+	await place(p, Vector3(10.0, 0.0, 80.0))
+	var d := install_carry_double(p, 0.7, true)
+	clear_events()
+	var ok := await sprint_to_cap(p, Vector3.FORWARD)
+	var v := hspeed(p)
+	dash_up(p)
+	print("  a prop in hand, Dash held: dodged %d, sprint reached the cap %s (%.2f m/s)" % [count_events(&"dodged"), ok, v])
+	check(count_events(&"dodged") == 1 and ok and near(v, p.traversal.get_speed_cap(), 0.05),
+		"a prop in hand keeps the dodge and the sprint (%.2f m/s)" % v)
+	remove_carry_double(p, d)
+	await settle(p, 20)
+
+## Ground cracks at speed: footsteps at R7_SPEED_CRACK_FROM (10 m/s) crack the
+## floor, none at the 8 m/s base cap; level 1 only; the decal budget holds.
+func _speed_cracks(p: Fighter) -> void:
+	var rows := []
+	for cap: float in [8.0, 10.0]:
+		await settle(p, 20)
+		WorldDamage.reset()
+		Tuning.debug_speed_cap = cap
+		await place(p, Vector3(-60.0, 0.0, 150.0))
+		var n0 := p.traversal.speed_cracks
+		p.move_input = Vector3.FORWARD
+		dash_down(p)
+		await wait_until(func() -> bool: return p.traversal.sprint_charge >= 0.999, 240)
+		clear_events()
+		await ticks(int(6.0 * 120.0))  # 6 s at the cap: 48 / 60 m
+		var steps := count_events(&"footstep")
+		var cracks := p.traversal.speed_cracks - n0
+		var counts := WorldDamage.get_floor_counts()
+		var marks: Array = BloodFX.call(&"floor_mark_levels") if BloodFX.has_method(&"floor_mark_levels") else [-1, -1, -1]
+		dash_up(p)
+		rows.append([cap, steps, cracks, counts, marks])
+		print("  sprint 6 s at %.0f m/s: %d footsteps, %d cracked the floor; WorldDamage cells %s; live floor marks by level %s (budget %d)" % [
+			cap, steps, cracks, counts, marks, Tuning.FLOOR_DECAL_MAX])
+	Tuning.debug_speed_cap = 8.0
+	var slow: Array = rows[0]
+	var fast: Array = rows[1]
+	var fast_counts: Dictionary = fast[3]
+	var marks_fast: Array = fast[4]
+	check(int(slow[2]) == 0 and int((slow[3] as Dictionary)["cracks"]) == 0, "no ground cracks at 8 m/s")
+	check(int(fast[2]) >= int(fast[1]) - 1 and int(fast[2]) >= 20, "at 10 m/s every footstep cracks the floor (%d of %d)" % [fast[2], fast[1]])
+	check(int(fast_counts["craters"]) == 0 and int(fast_counts["rubble"]) == 0 and int(fast_counts["cracks"]) >= 20,
+		"footstep cracks are level 1, never a crater (%s)" % fast_counts)
+	check(int(marks_fast[0]) >= 0 and int(marks_fast[0]) + int(marks_fast[1]) + int(marks_fast[2]) <= Tuning.FLOOR_DECAL_MAX,
+		"the floor-decal budget holds (%s live marks, budget %d)" % [marks_fast, Tuning.FLOOR_DECAL_MAX])
+	WorldDamage.reset()
+	await settle(p, 20)

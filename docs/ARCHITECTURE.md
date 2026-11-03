@@ -427,3 +427,118 @@ Same rules as Round 5: own files only, private copies under `<scratchpad>/agent_
 - **Soaks:** Waves 180 s and Duel 120 s, 0 errors; bodies break and crack clutter in normal play.
 - **AI:** no enemy stalls more than 3 s in 300 s Waves soaks over 8 seeds (worst 2.5 s); navigation keeps a wide-body layer and refreshes on every break and collapse.
 - **Movement through clutter:** steps keep 100% of a sprint, vaults keep 90%, sprinting smashes glass and cardboard at 100%, tall clutter blocks walking; every courtyard object has a clear approach.
+
+## Round 7: Freeflow combat (docs/Round 7 — Freeflow Combat.md)
+
+The user playtested Round 6 and found the kit too complex, the hits spammy and weightless, and the lock-on camera wrong. Round 7 rebuilds the player's kit. **Where the Round 7 doc disagrees with any earlier spec or round, Round 7 wins.** Ragdoll, destruction, blood and audio stay; everything is built on top of them. Animation quality and performance testing are out of scope (the user's call): poses are functional placeholders, and no perf runs are needed.
+
+### Ownership (Round 7)
+
+Same rules as before: edit only your own files; test on a private copy (`<scratchpad>/agent_<id>/proj`); `--fixed-fps 120`; treat `SCRIPT ERROR`, `Parse Error` and `ERROR:` lines as failures.
+
+| Owner | Files |
+| --- | --- |
+| core (lead) | `project.godot`, `scripts/core/*` except `time_director.gd`, `scripts/game/fighter_factory.gd`, `tests/core/*`, `tests/integration/*`, `tests/run_all.sh`, docs |
+| B — combat | `combat_controller.gd`, `move_data.gd`, `move_library.gd`, `combo_graph.gd`, `hurtbox.gd`, `combat_fx.gd`, `thrown_chunk.gd`, `projectile_probe.gd`, `tests/combat/*` |
+| H — fighter, player & defence | `fighter.gd`, `player_controller.gd`, `input_interpreter.gd`, `zone_aim.gd`, `defence.gd`, `tests/input/*`, `tests/defence/*` |
+| M — movement | `traversal.gd`, `tests/move/*` |
+| G — grabs, drive & throw | `carry.gd`, `limb_grab.gd`, `grab_lab.gd`, `scenes/grab_lab.tscn`, `tests/grab/*` |
+| E — camera & time | `scripts/core/time_director.gd`, `scripts/game/camera_rig.gd`, `tests/game/test_camera_rig*`, `test_time_director*`, `test_cam_*`, `test_time_*` |
+| P — poses | `pose_library.gd`, `pose_animator.gd`, `tests/anim/*` |
+| C — AI | `scripts/ai/*`, `tests/ai/*` |
+| J — HUD, flow & menus | `hud.gd`, `game_menus.gd`, `game_mode.gd`, `ui_kit.gd`, `scenes/main.tscn`, `tests/game/*` except E's |
+| F — FX & audio | `scripts/fx/*`, `shaders/*`, `tests/fx/*` |
+| A (rig & ragdoll), D (world), K (clutter) | not active; send requests to the lead |
+
+### Contract already in the tree (lead)
+
+- **`Controls`**: the Round 7 key map (punch, leg_kick, gut_punch, uppercut, front_kick, roundhouse, grab, counter, dash, kick_layer, pause, restart on Backspace / Back). `Controls.KICK_LAYER` maps the pad's LT layer. `Controls.LEGACY_ACTIONS` (heavy, kick, jump, crouch, block, focus, lock_on, lock_next, lock_prev) stay registered **without bindings** so old readers never error; remove your reads of them. `tests/core/test_controls` checks the map.
+- **`Tuning` Round 7 block** (end of the file): `R7_MOVES` (frames, damage, reaction, push, stun, hitstop, weight, listener tier, guard break per move), `R7_PUNCH_STRING`, `R7_HEAVY_OF`, `R7_HOLD_THRESHOLD`, `R7_PAYOFFS`, reactions, chains and anti-infinite, targeting and glide, hit feel, counter and dodge, grab/drive/throw, camera. `SLOW_TIME[&"finisher"]` is new. A number you need that is not there is a local `const` with a comment, listed in your report.
+- **`HitInfo`** new fields: `react`, `weight`, `push`, `stun`, `lift_height`, `payoff`, `victim_state`, `chain_index`, `counter`, `drive`. `tier` is still filled from the move's listener tier.
+- **`Targeting.pick_freeflow_target(from, stick, current, camera_fwd, max_range)`**, `is_freeflow_target()`, `freeflow_score()` (implemented).
+- **`GameEvents` Round 7 block**: `chain_hit`, `chain_ended`, `glide_started`, `counter_window` (B); `countered`, `counter_whiffed`, `react_started` (H); `dodged` (M); `drive_started`, `drive_ended`, `drive_impact`, `throw_windup` (G).
+- **`CombatController.Action`** gains `LEG_KICK, GUT_PUNCH, UPPERCUT, FRONT_KICK, ROUNDHOUSE, COUNTER` (appended; older ints unchanged).
+- **Stubs with fixed signatures** (at the end of each file; owners implement, callers code against them now):
+
+| API | Owner | Callers |
+| --- | --- | --- |
+| `CombatController.play_counter(target) -> bool`, `get_chain_count()`, `get_string_index()`, `get_combat_target()`, `is_gliding()`, `is_counter_window_open(on)`, `is_attack_counterable()` | B | H, E, J, C, lead (bots) |
+| `Fighter.react(kind, direction, push, stun, info)`, `get_react_state()`, `get_react_time_left()`, `is_reacting()`, `is_lifted()` | H | B, C, P, F, E, J |
+| `Defence.on_counter_pressed(now) -> bool`, `is_countering()`, `get_counterable_attackers()` | H | B, J, lead (bots) |
+| `Traversal.start_dodge(dir)`, `is_dodging()`, `is_dodge_invulnerable()`, `begin_drive()`, `end_drive()`, `is_driving()`, `get_drive_speed()`, `set_drive_speed(v)`, `get_drive_dir()` | M | G, H, E, F |
+| `Carry.on_drive_pressed(now) -> bool`, `on_drive_released(now)`, `is_driving()`, `get_throw_windup()` | G | B, E, F, J |
+
+### How the pieces meet (Round 7)
+
+- **Input (H → B).** PlayerController maps buttons to `CombatController.Action` (punch → LIGHT, leg_kick → LEG_KICK, gut_punch → GUT_PUNCH, uppercut → UPPERCUT, front_kick → FRONT_KICK, roundhouse → ROUNDHOUSE, grab → GRAB, counter → COUNTER, dash → DASH), resolving the pad kick layer first. It stops reading jump, crouch, focus, block and lock-on. Before an attack press it sets facing only through B's target pick (no separate auto-face pick). `get_aim_dir()` returns the camera-relative stick (zero when neutral). B picks targets with `Targeting.pick_freeflow_target(fighter, stick, get_combat_target(), camera forward)`.
+- **Routing (B, in `press`/`release`).** While `carry.is_holding()`: LIGHT → `carry.on_attack_pressed/released` (throw wind-up and throw), LEG_KICK → carry (knee), DASH → `carry.on_drive_pressed/released` (it returns false with a prop in hand: fall through), GRAB → carry (release). Otherwise: COUNTER → `defence.on_counter_pressed(now)` (Defence finds the earliest open counterable window, starts its invulnerability, cancels the attacker's attack, emits `countered`, then calls `combat.play_counter(attacker)`); **DASH → `defence.on_dash_pressed(now)` first (pursuit, then teleport: amendment), then `traversal.on_dash_pressed()` (tap = dodge at once, hold = sprint)**, release → `traversal.on_dash_released()`; GRAB → carry; the rest are strikes (in the air or late in a vault: the dropping strike). Legacy actions: HEAVY = heavy string punch, KICK = FRONT_KICK, SWEEP = LEG_KICK, BLOCK = the AI's guard. Parry and sidestep are gone. **Jump** (H): PlayerController → `traversal.on_jump_pressed()` (jump, wall run, kick-off), else `Fighter.jump()` with the jump buffer, as in Round 5.
+- **Hits (B → H).** B resolves a player strike from `R7_MOVES` and `R7_PAYOFFS` using the victim's `get_react_state()`, applies guard and tell armor, heavy-enemy multipliers (push, stun, lift) and the anti-infinite stun decay, fills the HitInfo Round 7 fields, then calls `victim.react(kind, ...)` for snap / spin / fold / lift / buckle / push / repop, `victim.knockdown()` for knockdown and `victim.launch()` for launch. Hitstop per move (player cap `R7_PLAYER_HITSTOP_MAX`), then `hit_landed`. Enemy hits on the player keep their Round 5 preset tiers.
+- **Reactions (H, with P's poses).** `Fighter.react` runs the state: push slide, stun, the lift arc (capsule ballistic, partial physics arms via RagdollController's existing APIs), the re-pop cap (`R7_JUGGLE_MAX`, then knockdown), landing from a lift into a knockdown. `can_act()` is false while reacting. Emits `react_started`. Poses: `react_<kind>` from P.
+- **Invulnerability (H).** `Fighter.is_invulnerable()` adds `traversal.is_dodge_invulnerable()` and `defence.is_countering()`.
+- **Dodge (M).** A dodge cancels the player's own startup or recovery (`combat.cancel()`), never active frames, never while reacting, down or held. Emits `dodged`. Hold flows into the existing sprint.
+- **Drive (G with M).** G owns the hold, the probes ahead of the held body, slams, breaks, bowling, damage and events; M owns the run itself (`begin_drive`, speed ramp, steering, `set_drive_speed`, `end_drive`). Breakables through `WorldTags.breakable_of()` and `receive_impact(energy, hit_pos, velocity, footprint)`.
+- **Camera (E)** reads `combat.get_combat_target()`, `combat.is_gliding()`, `carry.is_driving()`, `carry.get_throw_windup()`; punches on `hit_landed` by `info.weight`; requests `&"finisher"` slow time for a player hit with `info.react == &"launch"`. The lock-on goes; `get_lock_target()` returns null until no caller is left, then it may go too.
+- **HUD (J)** combo counter from `chain_hit` / `chain_ended`; counter prompts from `counter_window` (or `defence.get_counterable_attackers()`).
+- **AI (C)** keeps every enemy strike's tell ≥ `R7_COUNTER_WINDOW + R7_TELL_MARGIN`; grabs and the heavy's charge are uncounterable with a blue tell (B marks them in MoveData). Enemies in a reaction state do nothing.
+
+### Decisions (Round 7; the user's amendment of 2026-11-03 is folded in)
+
+1. Defence is **counter (V / mouse thumb, pad Y) + dodge (Shift tap)**, plus the free **teleport** upgrade (Shift just before a hit). Parry, guard, sidestep, Focus mode and the **Focus meter** are removed from the player.
+2. Removed from the player: Heavy and Kick buttons, charge levels, zone aiming, crouch and its moves, sweep, backfist, rising uppercut, elbow and knee strings, the counter and finisher power bonuses, ground strikes, carrying through parkour, the sprint grab drag, stick-chosen grab parts, the air body slam, lock-on. **Kept (amendment): jump and dropping strikes, wall run and kick-off, vault, mantle, air mantle, air dash, landings and the landing shockwave, the Battering Ram, teleport, pursuit, sprint speed feeding strikes.**
+3. Hold-for-heavy applies to the punch button and the three kicks. Uppercut and gut punch have one version each.
+4. Crawling and fleeing enemies are ordinary freeflow targets; any hit on them kills them.
+5. Sprint strikes, ram launches, pursuit relaunches and spikes follow the doc's **God path** section (`Tuning` "Round 7 amendment" block). Upgrades are the debug settings `debug_speed_cap`, `debug_ram_level`, `debug_teleport`, `debug_pursuit_max` (pause menu > Debug, J).
+6. Enemy hits on the player keep their Round 5 tiers and reactions.
+7. Severing happens only on killing blows from launches and drive slams (`R7_SEVER_ON_KILL`).
+8. The Duelist guards and answers a broken guard with a hook; no teleport counter, no parry.
+9. Gamepad kicks are the LT kick layer on X / A / B (A is Jump without the layer); uppercut is LB.
+10. Animation polish waits for a later mocap round; P's poses only need to read clearly.
+11. No performance runs this round.
+
+### Process (Round 7)
+
+- All owners work in parallel against the stubs. Keep your module's tests green after each step. Callers land against your stubs before you implement them; keep the stub signatures.
+- **Removing features:** remove the player-facing paths of everything in decision 2 that lives in your files. Delete code that only served removed features when it is yours and clearly dead. Keep enemy-side behaviour working.
+- **Tests:** delete tests that only check removed features (list them in your report). Rewrite tests that encode superseded behaviour to Round 7, never weakening them to pass. Add a test for each acceptance check you own (below), through the real input path where input matters (`Input.action_press` / `parse_input_event` → PlayerController → InputInterpreter).
+- Other agents' files change under you. If a file you do not own fails to parse, wait a minute and recopy. Need an API that is not in the contract? Use a local fallback and list it under "Requests".
+- Final report: what you built (file by file), the acceptance checks you own with their measured numbers, every test result line, tests deleted or rewritten, anything stubbed or known broken, requests for other modules.
+
+### Acceptance checks (Round 7)
+
+| Check (doc: Acceptance) | Owner |
+| --- | --- |
+| 1 buttons → moves, tap/hold string, wrap and reset | B (real input with H) |
+| 2 buffer, chain cut on hits only, mashing never faster | B |
+| 3 each reaction's state, push ±20%, stun ±0.05 s; re-pop cap | H |
+| 3 every payoff in the table produces its result | B |
+| 4 uppercut → roundhouse launches a grunt at 15 ±1 m/s | B |
+| 5 glide reaches a 4 m target and hits; auto-connect | B |
+| 6 counter 100/100 vs orange tells, whiff lock, blue uncounterable, second attack misses during invulnerability | H (with B, C) |
+| 6 every enemy strike's tell ≥ window + margin; blue for grab and charge | C |
+| 7 dodge invulnerability, distance, hold into sprint | M |
+| 8 drive speed ramp, break-through, slam, bowl | G (with M) |
+| 9 throw speeds and aim assist | G |
+| 10 no lock-on anywhere; player on screen through glides, drives, launches | E (H, J remove their parts) |
+| poses exist for every Round 7 move, hold and reaction id | P |
+| combo counter and counter prompts | J |
+| effects on every Round 7 event, scaled by weight | F |
+| 11 soaks with the new soak bot, 0 errors; run_all green | lead |
+
+### Round 7 status
+
+- **Built:** the doc's full kit plus the user's amendment (God path).
+  - The player's kit: 12 moves, heavy versions on the punch string and the three kicks, the state payoffs, the chains and buffer, freeflow targeting with glides, auto-connect and follow steps, the counter on V / mouse thumb / Y, and the dodge.
+  - Grabs, the drive through breakables, and the wound-up throw.
+  - No lock-on, and the new camera framing.
+  - The HUD: combo counter, counter, dodge and pursuit prompts, and the upgrade settings in pause > Debug.
+  - Effects scaled by hit weight, and enemy tells of at least 0.5 s with varied wind-ups.
+  - God path: jump, wall run and parkour, free teleport and pursuit (relaunch, or a spike into the floor with the stick pulled back), sprint-strike launches, ram level 3 launches, and floor cracks at 10 m/s and up.
+- **Integration fixes:**
+  - The input buffer now keeps a press from the first active frame on (it used to drop presses made on impact, which ate uppercut → roundhouse and every pursuit).
+  - Grabs can be escaped by teleport again.
+  - Enemy wind-ups vary above the 30-frame floor.
+  - A token holder whose approach stalls next to its range swings anyway.
+  - `world/test_real_kick` was rewritten for Round 7 launches; the carry body-slam case left `world/test_floor_damage`.
+- **Soaks** (`FAST=1`): Duel 120 s and Waves 180 s, 0 errors. The Duel run had 4 pursuits, 2 spikes, 4 teleports and 2 rams; the Waves run had 52 launches, 27 wall breaks and a best chain of 21.
+- **Module runs** by their owners on fresh copies: combat 17, input + defence 13, move 12, grab 12, game 19, fx 26, ai 24 (3 runs), anim 5, rig 18, world fixes by the lead. Performance checks were skipped this round (the user's call).
+- **Still the user's:** the feel check in play. Animation is placeholder quality until the mocap round. Many feel numbers are local constants that agents listed as Tuning candidates; they are not moved yet.

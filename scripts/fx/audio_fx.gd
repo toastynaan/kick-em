@@ -13,16 +13,25 @@ extends Node
 ##   miss (dodge_feedback tick)
 ## Upgrade 2: charge_hum (loop), charge_level, charge_release, jump, land,
 ##   crouch, hit_cross, hit_hook, hit_uppercut, hit_roundhouse,
-##   hit_flying_kick, hit_stomp, arm_break, wall_slam, focus_in, focus_out
+##   hit_flying_kick, hit_stomp, arm_break, wall_slam
 ## Round 3: strike_drywall, strike_brick, strike_wood, strike_concrete,
 ##   strike_hold (wall_struck; 5 variants each so rapid jabs do not repeat)
 ## Round 6: snap_wood, glass_tinkle, break_cardboard, break_fabric, creak,
 ##   tile_pop, thump_low, step_/strike_ glass, cardboard, fabric.
 ## Round 5: impact_flinch .. impact_sever (one stream per hit tier, played on
 ##   hit_landed instead of the Upgrade 2 per-move hit_* sounds), boom (under wall
-##   breaks), whoosh_charged, parry, sidestep, step / step_water / step_metal,
+##   breaks), whoosh_charged, sidestep, step / step_water / step_metal,
 ##   land_hard, land_heavy, vault, wind (loop, follows the speed level), splash,
 ##   break_glass
+## Round 7 (Freeflow combat): hit_crack, hit_smack, hit_thump (a player hit's
+##   layers by HitInfo.weight), counter_hit (countered), rush (glide_started),
+##   oof, whoosh_up, knee_floor, whip (react_started: fold, lift, buckle, spin),
+##   drive_step (drive footsteps); dodged plays sidestep, counter_whiffed a soft
+##   whoosh, a drive raises the wind loop. Parry, sidestep and Focus are gone,
+##   and their sounds (parry, focus_in, focus_out) with them. The god path
+##   (amendment) keeps the teleport, pursuit, jump, landings, parkour, wall run
+##   and the ram, and adds step_crunch (a footstep crack at speed), the
+##   pursuit spike's floor boom and the ram's level-3 launch.
 ## Slow motion (Round 5, F0): AudioServer.playback_speed_scale is GLOBAL in
 ##   4.8: AudioStreamPlaybackResampled multiplies every playback's resample
 ##   step by it, whatever bus the player sends to, so a bus alone cannot keep
@@ -69,17 +78,22 @@ const IDS: Array[StringName] = [
 	&"miss", &"clank", &"debris", &"break_drywall", &"break_brick", &"break_wood",
 	&"charge_hum", &"charge_level", &"charge_release", &"jump", &"land", &"crouch",
 	&"hit_cross", &"hit_hook", &"hit_uppercut", &"hit_roundhouse", &"hit_flying_kick",
-	&"hit_stomp", &"arm_break", &"wall_slam", &"focus_in", &"focus_out",
+	&"hit_stomp", &"arm_break", &"wall_slam",
 	&"strike_drywall", &"strike_brick", &"strike_wood", &"strike_concrete", &"strike_hold",
 	# Round 5 (Feel Reference: Sound, Contact frame, Movement signals)
 	&"impact_flinch", &"impact_stumble", &"impact_stagger", &"impact_knockdown", &"impact_launch",
-	&"impact_hard_launch", &"impact_sever", &"boom", &"whoosh_charged", &"parry", &"sidestep",
+	&"impact_hard_launch", &"impact_sever", &"boom", &"whoosh_charged", &"sidestep",
 	&"step", &"step_water", &"step_metal", &"land_hard", &"land_heavy", &"vault", &"wind",
 	&"splash", &"break_glass",
 	# Round 6 (more destruction): materials and sizes
 	&"snap_wood", &"glass_tinkle", &"break_cardboard", &"break_fabric", &"creak", &"tile_pop",
 	&"thump_low", &"step_glass", &"step_cardboard", &"step_fabric", &"strike_glass",
 	&"strike_cardboard", &"strike_fabric",
+	# Round 7 (Freeflow combat): weight layers, counter, movement, reactions, drive
+	&"hit_crack", &"hit_smack", &"hit_thump", &"counter_hit", &"rush", &"oof", &"whoosh_up",
+	&"knee_floor", &"whip", &"drive_step",
+	# Round 7 amendment (god path)
+	&"step_crunch",
 ]
 ## Round 6: a body hitting a clutter surface layers that surface's knock.
 const SURFACE_IMPACT := {&"glass": &"strike_glass", &"cardboard": &"strike_cardboard", &"fabric": &"strike_fabric",
@@ -165,18 +179,22 @@ const BASE_DB := {
 	&"charge_hum": -8.0, &"charge_level": -8.0, &"charge_release": -3.0, &"jump": -9.0,
 	&"land": -7.0, &"crouch": -13.0, &"hit_cross": -2.0, &"hit_hook": -1.0,
 	&"hit_uppercut": 0.0, &"hit_roundhouse": 0.0, &"hit_flying_kick": 0.0, &"hit_stomp": 0.0,
-	&"arm_break": 0.0, &"wall_slam": 0.0, &"focus_in": -4.0, &"focus_out": -6.0,
+	&"arm_break": 0.0, &"wall_slam": 0.0,
 	&"strike_drywall": -2.0, &"strike_brick": -2.0, &"strike_wood": -2.0, &"strike_concrete": -2.0,
 	&"strike_hold": -3.0,
 	# Round 5: impacts climb in level with the tier (effect size follows the tier).
 	&"impact_flinch": -5.0, &"impact_stumble": -4.0, &"impact_stagger": -2.5, &"impact_knockdown": -1.0,
 	&"impact_launch": 0.0, &"impact_hard_launch": 1.0, &"impact_sever": 1.5, &"boom": -1.0,
-	&"whoosh_charged": -6.0, &"parry": -1.0, &"sidestep": -6.0, &"step": -12.0, &"step_water": -9.0,
+	&"whoosh_charged": -6.0, &"sidestep": -6.0, &"step": -12.0, &"step_water": -9.0,
 	&"step_metal": -10.0, &"land_hard": -3.0, &"land_heavy": 0.0, &"vault": -8.0, &"wind": -4.0,
 	&"splash": -3.0, &"break_glass": -3.0,
 	&"snap_wood": -4.0, &"glass_tinkle": -8.0, &"break_cardboard": -4.0, &"break_fabric": -3.0,
 	&"creak": -3.0, &"tile_pop": -6.0, &"thump_low": -2.0, &"step_glass": -10.0, &"step_cardboard": -12.0,
 	&"step_fabric": -13.0, &"strike_glass": -3.0, &"strike_cardboard": -4.0, &"strike_fabric": -4.0,
+	# Round 7: the hit layers sit at the impacts' level; the thump carries the weight.
+	&"hit_crack": -3.0, &"hit_smack": -3.0, &"hit_thump": -1.0, &"counter_hit": -1.0, &"rush": -6.0,
+	&"oof": -4.0, &"whoosh_up": -6.0, &"knee_floor": -4.0, &"whip": -6.0, &"drive_step": -5.0,
+	&"step_crunch": -7.0,
 }
 
 ## Energy (J) at which a sound plays at its base level; louder above, quieter below.
@@ -390,6 +408,8 @@ func stop_all() -> void:
 		_wind.stop()
 		_wind.stream = null
 		_wind_level = 0.0
+	_drives.clear()
+	_drive_level = 0.0
 	_owned_base.fill(0.0)
 	_owned_base_ui.fill(0.0)
 
@@ -397,7 +417,7 @@ func stop_all() -> void:
 # --- Public API --------------------------------------------------------------
 
 ## `source`: the fighter making the sound, if any. The player's own sounds keep
-## normal pitch during Focus (see header).
+## normal pitch in slow motion (see header).
 func play(id: StringName, position: Vector3, volume_db := 0.0, pitch := 1.0, source: Node3D = null) -> void:
 	if _quitting:
 		return
@@ -419,7 +439,7 @@ func play(id: StringName, position: Vector3, volume_db := 0.0, pitch := 1.0, sou
 	sound_played.emit(id, position)
 
 ## Non-positional (UI, slow-motion stings, player feedback). `player_owned`
-## keeps it at normal pitch during Focus.
+## keeps it at normal pitch in slow motion.
 func play_ui(id: StringName, volume_db := 0.0, pitch := 1.0, player_owned := false) -> void:
 	if _quitting:
 		return
@@ -545,8 +565,6 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"hit_stomp": _make_hit_stomp(s)
 		&"arm_break": _make_arm_break(s)
 		&"wall_slam": _make_wall_slam(s)
-		&"focus_in": _make_focus_in(s)
-		&"focus_out": _make_focus_out(s)
 		&"strike_drywall": _make_strike_drywall(s)
 		&"strike_brick": _make_strike_brick(s)
 		&"strike_wood": _make_strike_wood(s)
@@ -561,7 +579,6 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"impact_sever": _make_impact(s, HitInfo.Tier.SEVER)
 		&"boom": _make_boom(s)
 		&"whoosh_charged": _make_whoosh_charged(s)
-		&"parry": _make_parry(s)
 		&"sidestep": _make_sidestep(s)
 		&"step": _make_step(s)
 		&"step_water": _make_step_water(s)
@@ -585,6 +602,17 @@ func synthesize(id: StringName, variant := 0) -> PackedFloat32Array:
 		&"strike_glass": _make_strike_glass(s)
 		&"strike_cardboard": _make_strike_cardboard(s)
 		&"strike_fabric": _make_strike_fabric(s)
+		&"hit_crack": _make_hit_crack(s)
+		&"hit_smack": _make_hit_smack(s)
+		&"hit_thump": _make_hit_thump(s)
+		&"counter_hit": _make_counter_hit(s)
+		&"rush": _make_rush(s)
+		&"oof": _make_oof(s)
+		&"whoosh_up": _make_whoosh_up(s)
+		&"knee_floor": _make_knee_floor(s)
+		&"whip": _make_whip(s)
+		&"drive_step": _make_drive_step(s)
+		&"step_crunch": _make_step_crunch(s)
 		_:
 			return PackedFloat32Array()
 	s.normalize(PEAK)
@@ -667,8 +695,6 @@ func _connect_events() -> void:
 	GameEvents.crouch_changed.connect(_on_crouch_changed)
 	GameEvents.arm_broken.connect(_on_arm_broken)
 	GameEvents.wall_slam.connect(_on_wall_slam)
-	GameEvents.focus_started.connect(_on_focus_started)
-	GameEvents.focus_ended.connect(_on_focus_ended)
 	GameEvents.wall_struck.connect(_on_wall_struck)
 	GameEvents.stumbled.connect(_on_stumbled)
 	GameEvents.tripped.connect(_on_tripped)
@@ -699,7 +725,10 @@ func _on_hit_landed(info: HitInfo) -> void:
 	if info == null:
 		return
 	_stop_hum_of(info.victim)  # a hit knocks the victim out of any charge
-	if info.kind == &"grab":
+	if info.kind == &"grab" or FXRules.is_throw_release(info):
+		return  # a throw's release whooshes on `thrown`
+	if FXRules.is_round7(info):
+		_r7_hit(info)  # Round 7: layers by weight instead of the tier's stream
 		return
 	var id := tier_sound_for(info)
 	if id == &"":
@@ -749,6 +778,10 @@ static func _hit_point(info: HitInfo) -> Vector3:
 func _on_perfect_dodge(defender: Node3D, _attacker: Node3D) -> void:
 	play(&"dodge", _pos_of(defender), 0.0, 1.0, defender)
 
+## Tell sound by kind: an orange &"strike" tell (counter it) pings bright;
+## every other kind (&"grab", Round 7's &"charge" for the heavy's shoulder
+## charge, any later blue tell: dodge it) buzzes low, the same split as the
+## HUD's and the glint's orange / blue.
 func _on_teleport_counter(defender: Node3D, _target: Node3D) -> void:
 	play(&"teleport", _pos_of(defender), 0.0, 1.0, defender)
 
@@ -756,7 +789,11 @@ func _on_pursuit(attacker: Node3D, _victim: Node3D) -> void:
 	play(&"teleport", _pos_of(attacker), -3.0, 1.1, attacker)
 
 func _on_attack_tell(attacker: Node3D, kind: StringName, _duration: float) -> void:
-	play(&"tell_grab" if kind == &"grab" else &"tell_strike", _pos_of(attacker))
+	play(tell_sound_for(kind), _pos_of(attacker))
+
+## The tell sound id for an attack_tell kind.
+static func tell_sound_for(kind: StringName) -> StringName:
+	return &"tell_strike" if kind == &"strike" else &"tell_grab"
 
 func _on_attack_active(attacker: Node3D, move_id: StringName) -> void:
 	var m := String(move_id)
@@ -812,7 +849,7 @@ func _break_sound_deferred(wall_id: int, id: StringName, position: Vector3, ener
 
 ## A punch or kick on a wall: per-surface strike sound, volume and pitch by
 ## power, rapid repeats varied and softened; cracks, holes and breaks layer
-## the crack / break sounds. The attacker (the player) keeps Focus pitch.
+## the crack / break sounds. The attacker (the player) keeps its pitch in slow motion.
 func _on_wall_struck(attacker: Node3D, wall: Node3D, position: Vector3, _normal: Vector3, power: float,
 		result: StringName, surface: StringName) -> void:
 	if is_instance_valid(wall):
@@ -903,10 +940,11 @@ func _on_grab_started(grabber: Node3D, victim: Node3D) -> void:
 func _on_grab_broken(grabber: Node3D, _victim: Node3D, reversal: bool) -> void:
 	play(&"break_grab", _pos_of(grabber), 2.0 if reversal else 0.0, 0.9 if reversal else 1.0)
 
-## A thrown body: a whoosh, louder and lower the faster it leaves (6 .. 16 m/s).
+## A thrown body: a whoosh, louder and lower the faster it leaves (Round 7:
+## Tuning.R7_THROW_SPEED_MIN .. MAX, a tap .. a full wind-up); a fast throw
+## layers the long charged whoosh under it.
 func _on_thrown(grabber: Node3D, victim: Node3D, velocity: Vector3) -> void:
-	var k := clampf((velocity.length() - Tuning.THROW_SPEED_TAP) / (Tuning.THROW_SPEED_CAP - Tuning.THROW_SPEED_TAP), 0.0, 1.0)
-	play(&"throw", _pos_of(victim), lerpf(-2.0, 3.0, k), lerpf(1.1, 0.8, k), grabber)
+	_throw_whoosh(&"thrown", _pos_of(victim), velocity.length(), grabber, 0.0)
 
 ## KO sting for the player's death; a body thud for anyone else. The last
 ## enemy of a wave is announced by wave_cleared (or round_over for the final
@@ -930,7 +968,7 @@ func _on_wave_started(_index: int, _total: int) -> void:
 	play_ui(&"wave_start")
 
 
-# --- Upgrade 2: charge, movement, arm break, wall slam, Focus --------------------
+# --- Upgrade 2: charge, movement, arm break, wall slam ---------------------------
 
 func _on_charge_started(fighter: Node3D, _move_id: StringName) -> void:
 	if not is_instance_valid(fighter) or _quitting:
@@ -1096,12 +1134,6 @@ func _on_arm_broken(fighter: Node3D, zone: int) -> void:
 func _on_wall_slam(grabber: Node3D, victim: Node3D, _wall: Node3D) -> void:
 	var at := _pos_of(victim) if is_instance_valid(victim) else _pos_of(grabber)
 	play(&"wall_slam", at, 0.0, 1.0, grabber)
-
-func _on_focus_started(fighter: Node3D) -> void:
-	play_ui(&"focus_in", 0.0, 1.0, is_player_source(fighter))
-
-func _on_focus_ended(fighter: Node3D) -> void:
-	play_ui(&"focus_out", 0.0, 1.0, is_player_source(fighter))
 
 static func _feet_of(f: Node3D) -> Vector3:
 	if f.has_method(&"get_ground_position"):
@@ -1331,6 +1363,64 @@ class _Synth:
 	func modal(start: float, dur: float, f: float, ratios: Array, amps: Array, taus: Array, amp: float) -> void:
 		for i in ratios.size():
 			tone(start, dur, f * ratios[i], f * ratios[i], 1.0, amp * amps[i], 0.0008, taus[i])
+
+	## Voiced grunt (Round 7): a sawtooth glottal source whose pitch falls f_a ->
+	## f_b, with jitter and breath noise, through parallel two-pole resonators
+	## (formants) gliding from `from` to `to` Hz with bandwidths `bws` Hz and
+	## gains `gains`. Attack, then an exponential decay.
+	func voice(start: float, dur: float, f_a: float, f_b: float, from: Array, to: Array, bws: Array,
+			gains: Array, amp: float, breath: float, attack: float, decay_tau: float) -> void:
+		ensure(start + dur)
+		var i0 := int(start * SR)
+		var n := int(dur * SR)
+		var nf := from.size()
+		var y1 := PackedFloat32Array()
+		var y2 := PackedFloat32Array()
+		var c1 := PackedFloat32Array()
+		var c2 := PackedFloat32Array()
+		var g := PackedFloat32Array()
+		y1.resize(nf)  # packed arrays are values: resize each one itself
+		y2.resize(nf)
+		c1.resize(nf)
+		c2.resize(nf)
+		g.resize(nf)
+		var phase := 0.0
+		var att_n := maxi(int(attack * SR), 1)
+		var fade_n := mini(int(0.01 * SR), n)
+		var decay := 1.0
+		var decay_k := exp(-1.0 / (SR * decay_tau))
+		var src_lp := 0.0
+		for k in n:
+			var u := float(k) / n
+			# Formant coefficients move slowly: refresh them every 32 samples.
+			if k % 32 == 0:
+				for j in nf:
+					var fc := lerpf(float(from[j]), float(to[j]), u)
+					var r := exp(-PI * float(bws[j]) / SR)
+					c1[j] = 2.0 * r * cos(TAU * fc / SR)
+					c2[j] = -r * r
+					g[j] = float(gains[j]) * (1.0 - r)
+			var f0 := lerpf(f_a, f_b, u) * (1.0 + 0.015 * noise())
+			phase += f0 / SR
+			phase -= floorf(phase)
+			# Saw softened by a one-pole (a glottal pulse is not a hard edge), plus breath.
+			src_lp += 0.35 * ((1.0 - 2.0 * phase) - src_lp)
+			var x := src_lp + breath * noise()
+			var y := 0.0
+			for j in nf:
+				var v := g[j] * x + c1[j] * y1[j] + c2[j] * y2[j]
+				y2[j] = y1[j]
+				y1[j] = v
+				y += v
+			var env: float
+			if k < att_n:
+				env = float(k) / att_n
+			else:
+				env = decay
+				decay *= decay_k
+			if k > n - fade_n:
+				env *= float(n - k) / fade_n
+			buf[i0 + k] += y * env * amp
 
 	## Scattered low knocks with falling level (tumbling chunks, debris).
 	func knocks(start: float, dur: float, count: int, f_lo: float, f_hi: float, amp: float,
@@ -1694,17 +1784,6 @@ func _make_wall_slam(s: _Synth) -> void:
 	s.knocks(0.08, 0.5, 3, 120.0, 220.0, 0.3, 0.04)
 	s.drive(2.0)
 
-## Focus in: the world sinks, a falling whoosh into a low swell.
-func _make_focus_in(s: _Synth) -> void:
-	s.swoosh(0.0, 0.5, 0.9, 3200.0, 1400.0, 250.0, 0.2)
-	s.tone(0.0, 0.6, 140.0, 55.0, 0.18, 0.7, 0.05, 0.3)
-	s.tone(0.0, 0.5, 880.0, 440.0, 0.15, 0.12, 0.01, 0.15)
-
-## Focus out: a quick rising whoosh back to speed.
-func _make_focus_out(s: _Synth) -> void:
-	s.swoosh(0.0, 0.3, 0.8, 300.0, 3000.0, 2000.0, 0.7)
-	s.tone(0.05, 0.25, 220.0, 440.0, 0.1, 0.2, 0.02, 0.08)
-
 
 # --- Round 3 wall strike designs ----------------------------------------------------
 
@@ -1799,10 +1878,7 @@ func _build_round5() -> void:
 	_wind.bus = PLAYER_BUS
 	add_child(_wind)
 	GameEvents.strike_started.connect(_on_strike_started)
-	GameEvents.parried.connect(_on_parried)
-	GameEvents.parry_whiffed.connect(_on_parry_whiffed)
 	GameEvents.teleported.connect(_on_teleported)
-	GameEvents.sidestepped.connect(_on_sidestepped)
 	GameEvents.sprint_started.connect(_on_sprint_started)
 	GameEvents.footstep.connect(_on_footstep)
 	GameEvents.parkour.connect(_on_parkour)
@@ -1817,6 +1893,7 @@ func _build_round5() -> void:
 	GameEvents.rammed.connect(_on_rammed)
 	GameEvents.limb_severed.connect(_on_limb_severed)
 	_connect_round6()
+	_connect_round7()
 
 ## Wind level 0..1 now (tests, debug).
 func get_wind_level() -> float:
@@ -1838,6 +1915,8 @@ func _update_round5(delta: float) -> void:
 		goal = FXRules.sprint_charge(_player)
 	if is_instance_valid(_player) and _player.has_method(&"is_dead") and _player.call(&"is_dead"):
 		goal = 0.0
+	_update_drives(real, delta)
+	goal = maxf(goal, _drive_level)  # Round 7: a drive raises the wind with its speed
 	_wind_level = move_toward(_wind_level, goal, (WIND_ATTACK if goal > _wind_level else WIND_RELEASE) * real)
 	if _quitting:
 		return
@@ -1860,9 +1939,22 @@ func _update_round5(delta: float) -> void:
 
 ## Any strike's startup: a whoosh, longer and deeper for a charged one, a touch
 ## louder at a sprint. Pitch by the strike class (a jab is quick and light).
+## Round 7 player moves (Tuning.R7_MOVES) swing by their weight instead
+## (whatever charge level B reports for a heavy): a jab whips high and light;
+## from R7_SWING_HEAVY_FROM the long, deep charged whoosh.
 func _on_strike_started(attacker: Node3D, _target: Node3D, move_id: StringName, sprint: bool,
 		charge_level: int) -> void:
 	if not is_instance_valid(attacker):
+		return
+	var r7: Dictionary = Tuning.R7_MOVES.get(move_id, {})
+	if not r7.is_empty():
+		var w := float(r7["weight"])
+		var id := &"whoosh_charged" if w >= R7_SWING_HEAVY_FROM else &"whoosh"
+		var db := lerpf(R7_SWING_DB.x, R7_SWING_DB.y, w)
+		_last_ms.erase(id)
+		play(id, _pos_of(attacker), db, lerpf(R7_SWING_PITCH.x, R7_SWING_PITCH.y, w), attacker)
+		_strike_whoosh[attacker.get_instance_id()] = clock_ms()
+		_log_r7(&"swing", [id], [db])
 		return
 	var cls := FXRules.strike_class(move_id)
 	var pitch: float = {&"jab": 1.2, &"cross": 1.0, &"kick": 0.85, &"sweep": 0.9, &"knee": 1.05,
@@ -1877,24 +1969,6 @@ func _on_strike_started(attacker: Node3D, _target: Node3D, move_id: StringName, 
 		play(&"whoosh", _pos_of(attacker), vol, pitch, attacker)
 	_strike_whoosh[attacker.get_instance_id()] = clock_ms()
 
-## Parry: a bright metallic deflect between the two fighters.
-func _on_parried(defender: Node3D, attacker: Node3D) -> void:
-	var at := _pos_of(defender)
-	if is_instance_valid(attacker):
-		at = at.lerp(_pos_of(attacker), 0.5)
-	play(&"parry", at, 0.0, 1.0, defender)
-
-## A Block tap with nothing to parry: a soft tick so mashing is felt.
-func _on_parry_whiffed(defender: Node3D) -> void:
-	play_ui(&"miss", -6.0, 0.95, is_player_source(defender))
-
-func _on_teleported(fighter: Node3D, _from: Vector3, to: Vector3, kind: StringName) -> void:
-	var pursuit := kind == &"pursuit"
-	play(&"teleport", to, -3.0 if pursuit else 0.0, 1.1 if pursuit else 1.0, fighter)
-
-func _on_sidestepped(fighter: Node3D, _direction: Vector3) -> void:
-	play(&"sidestep", _pos_of(fighter), 0.0, 1.0, fighter)
-
 ## Sprint start: a firmer scuff as the feet dig in (the dust kick is BloodFX).
 func _on_sprint_started(fighter: Node3D) -> void:
 	if is_instance_valid(fighter):
@@ -1903,15 +1977,25 @@ func _on_sprint_started(fighter: Node3D) -> void:
 
 ## Footsteps by surface, louder with sprint_charge (the player's own sound).
 func _on_footstep(fighter: Node3D, position: Vector3, surface: StringName, sprint_charge: float) -> void:
+	_step_frame = Engine.get_physics_frames()  # a footstep crack follows on this frame (God path)
+	_step_pos = position
+	_step_fighter = fighter if is_instance_valid(fighter) else null
 	var key := fighter.get_instance_id() if is_instance_valid(fighter) else 0
 	var now := clock_ms()
 	if now - int(_step_last.get(key, -100000)) < STEP_GAP_MS:
 		return
 	_step_last[key] = now
+	if _drives.has(key):  # Round 7: a driving holder's feet land as heavy thuds
+		_drive_step(_drives[key], position)
+		return
 	var id: StringName = STEP_BY_SURFACE.get(surface, &"step")
 	var c := clampf(sprint_charge, 0.0, 1.0)
 	_last_ms.erase(id)
 	play(id, position, lerpf(STEP_DB.x, STEP_DB.y, c), lerpf(1.04, 0.94, c), fighter)
+
+func _on_teleported(fighter: Node3D, _from: Vector3, to: Vector3, kind: StringName) -> void:
+	var pursuit := kind == &"pursuit"
+	play(&"teleport", to, -3.0 if pursuit else 0.0, 1.1 if pursuit else 1.0, fighter)
 
 func _on_parkour(fighter: Node3D, kind: StringName, position: Vector3, height: float) -> void:
 	match kind:
@@ -1970,8 +2054,9 @@ func _on_prop_broken(_prop: Node3D, position: Vector3, kind: StringName) -> void
 		_:
 			play(&"break_wood", position, -3.0, 1.2)
 
+## A thrown prop: the throw whoosh by speed, a little lighter than a body.
 func _on_prop_thrown(holder: Node3D, _prop: Node3D, velocity: Vector3) -> void:
-	play(&"throw", _pos_of(holder), -2.0, clampf(velocity.length() / 12.0, 0.85, 1.25), holder)
+	_throw_whoosh(&"prop_thrown", _pos_of(holder), velocity.length(), holder, R7_PROP_THROW_DB)
 
 func _on_prop_picked_up(holder: Node3D, _prop: Node3D) -> void:
 	play(&"grab", _pos_of(holder), -6.0, 1.15, holder)
@@ -1986,13 +2071,22 @@ func _on_armor_absorbed(info: HitInfo) -> void:
 	if info != null:
 		play(&"clank", info.hit_position, 0.0, 1.0, info.attacker)
 
-## Battering Ram (agent M): a body-on-body thud, heavier when someone goes down.
+## Battering Ram (agent M): a body-on-body thud, heavier when someone goes down;
+## the god path's level-3 launch (result &"launch") hits like a launch, with a
+## boom under it.
 func _on_rammed(runner: Node3D, victim: Node3D, result: StringName, self_result: StringName) -> void:
 	if not is_instance_valid(runner) or not is_instance_valid(victim):
 		return
 	var at := (_pos_of(runner) + _pos_of(victim)) * 0.5
+	if result == &"launch":
+		_play_fresh(&"impact_launch", at, 0.0, 0.9, runner)
+		_play_fresh(&"boom", at, R7_RAM_LAUNCH_BOOM_DB, 1.0, runner)
+		_log_r7(&"ram_launch", [&"impact_launch", &"boom"], [0.0, R7_RAM_LAUNCH_BOOM_DB])
+		return
 	var down := result == &"knockdown" or self_result == &"knockdown"
-	play(&"impact_knockdown" if down else &"impact_stagger", at, 0.0, 0.85, runner)
+	var id := &"impact_knockdown" if down else &"impact_stagger"
+	play(id, at, 0.0, 0.85, runner)
+	_log_r7(&"ram", [id], [0.0])
 
 ## A limb came off: a bone snap at the joint (the impact itself is impact_sever).
 func _on_limb_severed(fighter: Node3D, cut: StringName, _piece: Node3D) -> void:
@@ -2059,16 +2153,7 @@ func _make_whoosh_charged(s: _Synth) -> void:
 	s.swoosh(0.04, d * 0.8, 0.45, 900.0, 4200.0, 700.0, 0.42)
 	s.tone(0.05, d, 90.0, 55.0, 0.2, 0.3, 0.06, 0.18)
 
-## Parry deflect: a bright ring off the guard, a sharp transient, a low knock.
-func _make_parry(s: _Synth) -> void:
-	var f := s.rr(1250.0, 1400.0)
-	s.modal(0.0, 0.7, f, [1.0, 2.41, 3.89, 5.33], [1.0, 0.55, 0.32, 0.18], [0.28, 0.17, 0.1, 0.06], 0.6)
-	s.noise_burst(0.0, 0.03, 1.0, 9500.0, 6000.0, 3000.0, 0.0002, 0.005)
-	s.tone(0.0, 0.2, 170.0, 80.0, 0.03, 0.6, 0.001, 0.05)
-	s.swoosh(0.02, 0.25, 0.35, 1500.0, 5000.0, 2000.0, 0.2)
-	s.drive(1.3)
-
-## Sidestep: a quick airy swish.
+## Sidestep: a quick airy swish (Round 7: the dodge's whoosh).
 func _make_sidestep(s: _Synth) -> void:
 	s.swoosh(0.0, 0.22 * s.rr(0.9, 1.1), 1.0, 1100.0, 4600.0, 1700.0, 0.25)
 	s.noise_burst(0.0, 0.05, 0.2, 2500.0, 1200.0, 400.0, 0.001, 0.012)
@@ -2094,6 +2179,12 @@ func _make_step_metal(s: _Synth) -> void:
 	s.noise_burst(0.0, 0.03, 0.5, 7000.0, 3500.0, 1500.0, 0.0002, 0.006)
 	s.drive(1.3)
 
+## Vault: a cloth swish and a palm slap on the top.
+func _make_vault(s: _Synth) -> void:
+	s.swoosh(0.0, 0.3, 0.8, 600.0, 2400.0, 800.0, 0.35)
+	s.noise_burst(0.03, 0.06, 0.6, 4200.0, 1800.0, 700.0, 0.0004, 0.012)
+	s.tone(0.03, 0.08, 150.0, 90.0, 0.02, 0.35, 0.0006, 0.02)
+
 ## Hard landing: a body-weight thud and grit.
 func _make_land_hard(s: _Synth) -> void:
 	s.tone(0.0, 0.32, s.rr(80.0, 90.0), 45.0, 0.04, 1.0, 0.001, 0.09)
@@ -2110,12 +2201,6 @@ func _make_land_heavy(s: _Synth) -> void:
 	s.crackle(0.0, 0.6, 0.7, 700.0, 0.15, 3800.0)
 	s.knocks(0.08, 0.6, 6, 120.0, 230.0, 0.4, 0.04)
 	s.drive(2.0)
-
-## Vault: a cloth swish and a palm slap on the top.
-func _make_vault(s: _Synth) -> void:
-	s.swoosh(0.0, 0.3, 0.8, 600.0, 2400.0, 800.0, 0.35)
-	s.noise_burst(0.03, 0.06, 0.6, 4200.0, 1800.0, 700.0, 0.0004, 0.012)
-	s.tone(0.03, 0.08, 150.0, 90.0, 0.02, 0.35, 0.0006, 0.02)
 
 ## Speed wind: a seamless 2 s loop of airy band noise with slow gusts. The
 ## gusts complete whole cycles in the loop, and the tail is crossfaded (equal
@@ -2243,6 +2328,9 @@ func collapse_boom(position: Vector3, energy: float) -> void:
 func _on_floor_damaged(position: Vector3, _radius: float, level: int, _surface: StringName) -> void:
 	if level <= 0:
 		return  # no new level (a lone tile pop): the tick is DestructionFX's
+	if level == 1 and is_step_crack(position):
+		_step_crunch(position)
+		return
 	var ids: Array[StringName] = [&"crack"]
 	match clampi(level, 1, 3):
 		1:
@@ -2370,3 +2458,432 @@ func _make_strike_cardboard(s: _Synth) -> void:
 func _make_strike_fabric(s: _Synth) -> void:
 	s.tone(0.0, 0.2, s.rr(92.0, 100.0), 60.0, 0.03, 0.9, 0.002, 0.06)
 	s.noise_burst(0.0, 0.15, 0.5, 500.0, 220.0, 0.0, 0.002, 0.05)
+
+
+# =============================================================================
+# Round 7: Freeflow combat (docs/Round 7 — Freeflow Combat.md, Effects and Hit
+# feel). A player hit (HitInfo.react set) is layered by HitInfo.weight, on its
+# physics frame: a sharp crack on every hit (higher and tighter on light hits),
+# a meaty smack from R7_SMACK_FROM, a deep body thump from R7_THUMP_FROM (the
+# doc's "heavy thump at weight >= 0.6"), and the tier's launch boom under a
+# launch payoff. Every other hit keeps its Round 5 tier stream. The counter,
+# dodge, glide, reactions, drive and throw listen to the Round 7 events.
+# =============================================================================
+
+## Layer thresholds (HitInfo.weight): the smack joins at the hook and leg kick,
+## the thump at the heavies, the uppercut and up.
+const R7_SMACK_FROM := 0.4
+const R7_THUMP_FROM := 0.6
+## Level (dB) and pitch of each layer from its threshold to weight 1.
+const R7_CRACK_DB := Vector2(-2.0, 1.5)
+const R7_CRACK_PITCH := Vector2(1.14, 0.9)
+const R7_SMACK_DB := Vector2(-6.0, 0.5)
+const R7_SMACK_PITCH := Vector2(1.06, 0.92)
+const R7_THUMP_DB := Vector2(-3.0, 3.0)
+const R7_THUMP_PITCH := Vector2(1.05, 0.86)
+const R7_LAUNCH_DB := -2.0         ## the tier's launch boom under a launch payoff
+## Swing whoosh of a Round 7 move (strike_started) by its weight: level (dB)
+## and pitch at weight 0 .. 1; from R7_SWING_HEAVY_FROM the long charged whoosh.
+const R7_SWING_DB := Vector2(-4.0, 1.5)
+const R7_SWING_PITCH := Vector2(1.25, 0.82)
+const R7_SWING_HEAVY_FROM := 0.6
+## Counter whiff: a soft, light whoosh (dB, pitch).
+const R7_WHIFF_DB := -8.0
+const R7_WHIFF_PITCH := 1.25
+## Dodge: the quick swish and a shoe scuff under it (dB).
+const R7_DODGE_SCUFF_DB := -4.0
+## Glide rush (dB, pitch) from a short glide to FXRules.GLIDE_FULL.
+const R7_RUSH_DB := Vector2(-7.0, 1.0)
+const R7_RUSH_PITCH := Vector2(1.15, 0.9)
+## Reaction sounds by Fighter.react kind, with their level (dB). A heavy
+## enemy's grunt and knee are a little lower (R7_HEAVY_PITCH).
+const R7_REACT_SOUND := {&"fold": &"oof", &"lift": &"whoosh_up", &"repop": &"whoosh_up",
+	&"buckle": &"knee_floor", &"spin": &"whip"}
+const R7_REACT_DB := {&"fold": 0.0, &"lift": 0.0, &"repop": -4.0, &"buckle": 0.0, &"spin": -1.0}
+const R7_HEAVY_PITCH := 0.85
+## Drive: footstep thud level (dB) and pitch from the start speed to the top
+## speed; a drive with no drive_ended stops after R7_DRIVE_MAX_TIME + this (s).
+const R7_DRIVE_STEP_DB := Vector2(-4.0, 2.0)
+const R7_DRIVE_STEP_PITCH := Vector2(1.05, 0.92)
+const R7_DRIVE_TIME_PAD := 1.0
+## The wind loop's level at the start of a drive; it rises to 1 at the top speed.
+const R7_DRIVE_WIND_FLOOR := 0.35
+## Drive impacts: energy (J) at which the boom plays at its base level (about
+## 105 kg at 7 m/s through FXRules.drive_energy).
+const R7_DRIVE_REF_ENERGY := 2600.0
+## Throw release (dB, pitch) from a tap to a full wind-up; past
+## R7_THROW_HEAVY_FROM of the range the charged whoosh layers under it.
+const R7_THROW_DB := Vector2(-3.0, 3.0)
+const R7_THROW_PITCH := Vector2(1.15, 0.8)
+const R7_THROW_HEAVY_FROM := 0.5
+const R7_THROW_HEAVY_DB := Vector2(-8.0, -1.0)
+const R7_PROP_THROW_DB := -2.0     ## a prop is lighter than a body
+## God path (amendment). The ram's level-3 launch layers a boom (dB) under the
+## launch impact. The pursuit spike's floor impact (FXRules.is_spike_shockwave):
+## a big boom (dB, pitch), the heavy crumble and a low thump. A level-1 floor
+## crack on the frame of a footstep within STEP_CRUNCH_REACH m is a footstep
+## crack at speed: a small crunch layered on the step instead of the big crack.
+const R7_RAM_LAUNCH_BOOM_DB := -3.0
+const R7_SPIKE_BOOM_DB := 3.0
+const R7_SPIKE_BOOM_PITCH := 0.82
+const STEP_CRUNCH_REACH := 0.9
+const R7_STEP_CRUNCH_DB := Vector2(-2.0, 1.0)  ## at R7_SPEED_CRACK_FROM .. the top cap
+
+## Every Round 7 sound group played: {frame (physics), event, ids, db} (tests, newest last).
+var round7_sounds: Array[Dictionary] = []
+## Drive footsteps played since start (tests).
+var drive_steps := 0
+var _drives: Dictionary = {}       ## holder id -> {"holder", "t", "next"}
+var _drive_level := 0.0
+var _r7_connected := false
+var _step_frame := -1               ## physics frame of the last footstep (footstep cracks)
+var _step_pos := Vector3.ZERO
+var _step_fighter: Node3D
+
+func _connect_round7() -> void:
+	if _r7_connected:
+		return
+	_r7_connected = true
+	GameEvents.countered.connect(_on_countered)
+	GameEvents.counter_whiffed.connect(_on_counter_whiffed)
+	GameEvents.dodged.connect(_on_dodged)
+	GameEvents.glide_started.connect(_on_glide_started)
+	GameEvents.react_started.connect(_on_react_started)
+	GameEvents.drive_started.connect(_on_drive_started)
+	GameEvents.drive_ended.connect(_on_drive_ended)
+	GameEvents.drive_impact.connect(_on_drive_impact)
+	GameEvents.shockwave.connect(_on_shockwave)
+	GameEvents.round_started.connect(func(_m: StringName) -> void: _drives.clear())
+
+func _log_r7(event: StringName, ids: Array, dbs: Array) -> void:
+	round7_sounds.append({"frame": Engine.get_physics_frames(), "event": event, "ids": ids, "db": dbs})
+	if round7_sounds.size() > 64:
+		round7_sounds.pop_front()
+
+## The layers a Round 7 hit plays: [[id, dB, pitch], ...], lightest first.
+static func hit_layers(info: HitInfo) -> Array:
+	var w := FXRules.weight_of(info)
+	var out: Array = [[&"hit_crack", lerpf(R7_CRACK_DB.x, R7_CRACK_DB.y, w),
+		lerpf(R7_CRACK_PITCH.x, R7_CRACK_PITCH.y, w)]]
+	if w >= R7_SMACK_FROM:
+		var u := clampf((w - R7_SMACK_FROM) / (1.0 - R7_SMACK_FROM), 0.0, 1.0)
+		out.append([&"hit_smack", lerpf(R7_SMACK_DB.x, R7_SMACK_DB.y, u), lerpf(R7_SMACK_PITCH.x, R7_SMACK_PITCH.y, u)])
+	if w >= R7_THUMP_FROM:
+		var u := clampf((w - R7_THUMP_FROM) / (1.0 - R7_THUMP_FROM), 0.0, 1.0)
+		out.append([&"hit_thump", lerpf(R7_THUMP_DB.x, R7_THUMP_DB.y, u), lerpf(R7_THUMP_PITCH.x, R7_THUMP_PITCH.y, u)])
+	if info != null and info.react == &"launch":
+		out.append([TIER_SOUND[HitInfo.Tier.LAUNCH], R7_LAUNCH_DB, 1.0])
+	return out
+
+## A Round 7 player hit: every layer on the hit's physics frame. The attacker
+## owns the sound (the player's hits keep real-time pitch in slow motion).
+func _r7_hit(info: HitInfo) -> void:
+	var at := _hit_point(info)
+	var ids: Array[StringName] = []
+	var dbs: Array[float] = []
+	var streams: Array = []
+	for layer: Array in hit_layers(info):
+		var id: StringName = layer[0]
+		_last_ms.erase(id)  # two hits in one tick both land
+		play(id, at, layer[1], layer[2], info.attacker)
+		ids.append(id)
+		dbs.append(layer[1])
+		streams.append(last_stream.get(id))
+	hit_sounds.append({"frame": Engine.get_physics_frames(), "tier": FXRules.tier_of(info), "id": ids[0],
+		"stream": streams[0], "weight": FXRules.weight_of(info), "layers": ids, "db": dbs, "streams": streams})
+	if hit_sounds.size() > 64:
+		hit_sounds.pop_front()
+
+## Counter: a crack into a bright steel ring between the two fighters, unlike
+## any strike (the defender, usually the player, owns it).
+func _on_countered(defender: Node3D, attacker: Node3D) -> void:
+	if not is_instance_valid(defender) and not is_instance_valid(attacker):
+		return
+	var at := _pos_of(defender) if is_instance_valid(defender) else _pos_of(attacker)
+	if is_instance_valid(defender) and is_instance_valid(attacker):
+		at = at.lerp(_pos_of(attacker), 0.5)
+	_play_fresh(&"counter_hit", at, 0.0, 1.0, defender)
+	_log_r7(&"countered", [&"counter_hit"], [0.0])
+
+## A Counter press with nothing to counter: a soft whoosh.
+func _on_counter_whiffed(defender: Node3D) -> void:
+	if not is_instance_valid(defender):
+		return
+	_play_fresh(&"whoosh", _pos_of(defender), R7_WHIFF_DB, R7_WHIFF_PITCH, defender)
+	_log_r7(&"counter_whiffed", [&"whoosh"], [R7_WHIFF_DB])
+
+## Dodge: a quick swish and a shoe scuff as the feet push off.
+func _on_dodged(fighter: Node3D, _direction: Vector3) -> void:
+	if not is_instance_valid(fighter):
+		return
+	_play_fresh(&"sidestep", _pos_of(fighter), 0.0, 1.05, fighter)
+	_play_fresh(&"step", _feet_of(fighter), R7_DODGE_SCUFF_DB, 1.1, fighter)
+	_log_r7(&"dodged", [&"sidestep", &"step"], [0.0, R7_DODGE_SCUFF_DB])
+
+## Glide: a rush of air, louder and lower the longer the glide.
+func _on_glide_started(fighter: Node3D, _target: Node3D, distance: float) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var t := FXRules.glide_share(distance)
+	var db := lerpf(R7_RUSH_DB.x, R7_RUSH_DB.y, t)
+	_play_fresh(&"rush", _pos_of(fighter), db, lerpf(R7_RUSH_PITCH.x, R7_RUSH_PITCH.y, t), fighter)
+	_log_r7(&"glide_started", [&"rush"], [db])
+
+## Reaction touches: fold = a winded grunt, lift (and a re-pop) = an upward
+## whoosh, buckle = a knee on the floor, spin = a head-turn whip. Snap and push
+## need nothing on top of the hit.
+func _on_react_started(victim: Node3D, kind: StringName, _attacker: Node3D) -> void:
+	var id: StringName = R7_REACT_SOUND.get(kind, &"")
+	if id == &"" or not is_instance_valid(victim):
+		return
+	var at := _pos_of(victim)
+	if kind == &"buckle" or kind == &"lift":
+		at = _feet_of(victim) + Vector3.UP * (0.3 if kind == &"buckle" else 0.6)
+	var heavy: bool = victim.has_method(&"is_heavy") and victim.call(&"is_heavy")
+	var db: float = R7_REACT_DB.get(kind, 0.0)
+	_play_fresh(id, at, db, R7_HEAVY_PITCH if heavy else 1.0, victim)
+	_log_r7(StringName("react_" + String(kind)), [id], [db])
+
+## Drive: the push-off thuds at once; then a heavy thud every stride
+## (FXRules.drive_step_gap, quicker as the speed builds) and the wind loop
+## rising with the speed, until drive_ended.
+func _on_drive_started(holder: Node3D, _held: Node3D) -> void:
+	if not is_instance_valid(holder):
+		return
+	var d := {"holder": holder, "t": 0.0, "next": 0.0}
+	_drives[holder.get_instance_id()] = d
+	_drive_step(d, _feet_of(holder))
+	_log_r7(&"drive_started", [&"drive_step", &"wind"], [d.get("db", 0.0)])
+
+func _on_drive_ended(holder: Node3D, _reason: StringName) -> void:
+	if is_instance_valid(holder):
+		_drives.erase(holder.get_instance_id())
+
+## 0..1 wind level the drives ask for now (tests, debug).
+func get_drive_wind() -> float:
+	return _drive_level
+
+## Drives being heard (tests, debug).
+func active_drives() -> int:
+	return _drives.size()
+
+## Step the drive clocks: a thud whenever a stride is due (a Traversal footstep
+## during the drive also lands as one and restarts the clock). Player drives
+## count real time (the player keeps real time in slow motion).
+func _update_drives(real: float, delta: float) -> void:
+	var level := 0.0
+	for id: int in _drives.keys():
+		var d: Dictionary = _drives[id]
+		var h = d["holder"]
+		if not is_instance_valid(h) or not (h as Node3D).is_inside_tree():
+			_drives.erase(id)
+			continue
+		var dt := real if (h as Node3D).is_in_group(&"player") else delta
+		d["t"] = float(d["t"]) + dt
+		if float(d["t"]) > Tuning.R7_DRIVE_MAX_TIME + R7_DRIVE_TIME_PAD:
+			_drives.erase(id)
+			continue
+		d["next"] = float(d["next"]) - dt
+		if float(d["next"]) <= 0.0:
+			_drive_step(d, _feet_of(h))
+		var v := FXRules.drive_speed(h, float(d["t"]))
+		level = maxf(level, lerpf(R7_DRIVE_WIND_FLOOR, 1.0, FXRules.drive_share(v)))
+	_drive_level = level
+
+## One drive footstep thud at `position`, louder and lower with the speed.
+func _drive_step(d: Dictionary, position: Vector3) -> void:
+	var h: Node3D = d["holder"]
+	var v := FXRules.drive_speed(h, float(d["t"]))
+	var k := FXRules.drive_share(v)
+	var db := lerpf(R7_DRIVE_STEP_DB.x, R7_DRIVE_STEP_DB.y, k)
+	_play_fresh(&"drive_step", position, db, lerpf(R7_DRIVE_STEP_PITCH.x, R7_DRIVE_STEP_PITCH.y, k), h)
+	d["next"] = FXRules.drive_step_gap(v)
+	d["db"] = db
+	drive_steps += 1
+	if _drive_level <= 0.0:  # the wind starts on the push-off, not a frame later
+		_drive_level = R7_DRIVE_WIND_FLOOR
+
+## The driven body met something: a boom on top of a break; a big boom, the
+## wall slam and the crumble on a slam; a body crash on a bowl; a light thud
+## on a shove. Levels follow FXRules.drive_energy at the contact speed.
+func _on_drive_impact(holder: Node3D, victim: Node3D, target: Node3D, position: Vector3, speed: float,
+		result: StringName) -> void:
+	var e := FXRules.drive_energy(victim, holder, speed)
+	var db := clampf(energy_db(e, R7_DRIVE_REF_ENERGY), -6.0, 3.0)
+	var pitch := energy_pitch(e, R7_DRIVE_REF_ENERGY)
+	var src: Node3D = holder if is_instance_valid(holder) else null
+	var ids: Array[StringName] = []
+	var dbs: Array[float] = []
+	match result:
+		&"break":
+			_play_fresh(&"boom", position, db, pitch, src)
+			_play_fresh(&"body_slam", position, db - 3.0, pitch * 1.05, src)
+			ids = [&"boom", &"body_slam"]
+			dbs = [db, db - 3.0]
+		&"slam":
+			_play_fresh(&"boom", position, db + 3.0, pitch * 0.9, src)
+			_play_fresh(&"wall_slam", position, db + 1.0, pitch, src)
+			_play_fresh(&"land_heavy", position, db - 2.0, 1.0, src)
+			ids = [&"boom", &"wall_slam", &"land_heavy"]
+			dbs = [db + 3.0, db + 1.0, db - 2.0]
+		&"bowl":
+			var at := _pos_of(target) if is_instance_valid(target) else position
+			_play_fresh(&"body_slam", at, db, pitch, src)
+			_play_fresh(&"impact_knockdown", at, db - 3.0, 1.0, src)
+			ids = [&"body_slam", &"impact_knockdown"]
+			dbs = [db, db - 3.0]
+		_:  # &"shove" (or an unknown result): bodies bump
+			_play_fresh(&"thud", position, db - 2.0, 1.1, src)
+			ids = [&"thud"]
+			dbs = [db - 2.0]
+	_log_r7(StringName("drive_" + String(result)), ids, dbs)
+
+## Throw release: the throw whoosh by speed share (FXRules.throw_share); a fast
+## throw layers the charged whoosh under it.
+func _throw_whoosh(event: StringName, at: Vector3, speed: float, source: Node3D, extra_db: float) -> void:
+	var k := FXRules.throw_share(speed)
+	var db := lerpf(R7_THROW_DB.x, R7_THROW_DB.y, k) + extra_db
+	_play_fresh(&"throw", at, db, lerpf(R7_THROW_PITCH.x, R7_THROW_PITCH.y, k), source)
+	var ids: Array[StringName] = [&"throw"]
+	var dbs: Array[float] = [db]
+	if k >= R7_THROW_HEAVY_FROM:
+		var u := (k - R7_THROW_HEAVY_FROM) / (1.0 - R7_THROW_HEAVY_FROM)
+		var hdb := lerpf(R7_THROW_HEAVY_DB.x, R7_THROW_HEAVY_DB.y, u) + extra_db
+		_play_fresh(&"whoosh_charged", at, hdb, 0.95, source)
+		ids.append(&"whoosh_charged")
+		dbs.append(hdb)
+	_log_r7(event, ids, dbs)
+
+
+# --- Round 7 sound designs ----------------------------------------------------------
+
+## Crack (every Round 7 hit): a tight skin crack with a knuckle snap and a small knock.
+func _make_hit_crack(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.06, 1.0, s.rr(7000.0, 8500.0), 2600.0, 1400.0, 0.0002, s.rr(0.008, 0.011))
+	s.tone(0.0, 0.05, s.rr(1500.0, 1800.0), 700.0, 0.008, 0.35, 0.0002, 0.008)
+	s.tone(0.0, 0.14, s.rr(180.0, 220.0), 105.0, 0.015, 0.55, 0.0005, 0.03)
+	s.noise_burst(0.0, 0.09, 0.3, 1400.0, 500.0, 0.0, 0.001, 0.025)
+	s.drive(1.9)
+
+## Smack (weight >= R7_SMACK_FROM): the fist or shin sinking into the body.
+func _make_hit_smack(s: _Synth) -> void:
+	var f := s.rr(130.0, 150.0)
+	s.tone(0.0, 0.26, f, f * 0.5, 0.03, 1.0, 0.0008, 0.06)
+	s.noise_burst(0.0, 0.16, 0.7, 2200.0, 600.0, 150.0, 0.0005, 0.04)
+	s.crackle(0.003, 0.08, 0.25, 900.0, 0.03, 3000.0)
+	s.drive(1.9)
+
+## Thump (weight >= R7_THUMP_FROM): a deep body thump, a low sweep with a long
+## tail and a sub push.
+func _make_hit_thump(s: _Synth) -> void:
+	var f := s.rr(62.0, 72.0)
+	s.tone(0.0, 0.7, f * 1.4, f * 0.55, 0.06, 1.0, 0.001, s.rr(0.16, 0.2))
+	s.tone(0.0, 0.35, f * 2.1, f * 0.9, 0.04, 0.35, 0.001, 0.07)
+	s.noise_burst(0.0, 0.5, 0.55, 700.0, 140.0, 0.0, 0.002, 0.12)
+	s.noise_burst(0.0, 0.05, 0.25, 2500.0, 1200.0, 300.0, 0.0005, 0.012)
+	s.drive(2.1)
+
+## Counter: a whip-like crack into a bright steel ring with a beating shimmer,
+## over a short knock. Strikes are thuds and slaps that die in a tenth of a
+## second; this rings high for most of a second.
+func _make_counter_hit(s: _Synth) -> void:
+	s.noise_burst(0.0, 0.03, 1.0, 11000.0, 7000.0, 3500.0, 0.0002, 0.004)
+	var f := s.rr(1850.0, 2050.0)
+	s.modal(0.0, 0.9, f, [1.0, 2.32, 4.25, 6.63, 9.38], [1.0, 0.7, 0.45, 0.3, 0.18],
+			[0.42, 0.28, 0.16, 0.1, 0.06], 0.55)
+	s.tone(0.0, 0.6, f * 2.0, f * 2.03, 1.0, 0.18, 0.001, 0.3)
+	s.swoosh(0.01, 0.12, 0.45, 2500.0, 7000.0, 4000.0, 0.25)
+	s.tone(0.0, 0.18, 170.0, 95.0, 0.03, 0.45, 0.001, 0.04)
+	s.drive(1.3)
+
+## Glide rush: a fast forward rush of air, a cloth flutter and a push-off scuff.
+func _make_rush(s: _Synth) -> void:
+	var d := 0.34 * s.rr(0.92, 1.08)
+	s.swoosh(0.0, d, 1.0, 260.0, 1900.0 * s.rr(0.9, 1.1), 420.0, s.rr(0.35, 0.45))
+	s.swoosh(0.03, d * 0.7, 0.4, 1200.0, 4200.0, 1500.0, 0.3)
+	s.crackle(0.0, d * 0.8, 0.2, 700.0, 0.12, 3200.0)
+	s.noise_burst(0.0, 0.07, 0.35, 2600.0, 900.0, 250.0, 0.001, 0.018)
+
+## Fold: a winded "oof": a huff of air, then a voiced grunt falling in pitch
+## while the vowel closes from "uh" to "oo", and a breathy tail.
+func _make_oof(s: _Synth) -> void:
+	var f0 := s.rr(125.0, 150.0)
+	var k := s.rr(0.94, 1.06)  # vocal tract size
+	s.noise_burst(0.0, 0.06, 0.5, 2600.0, 1400.0, 500.0, 0.001, 0.02)
+	s.voice(0.015, 0.34, f0, f0 * 0.68, [680.0 * k, 1150.0 * k, 2450.0 * k], [360.0 * k, 820.0 * k, 2300.0 * k],
+			[90.0, 120.0, 180.0], [1.0, 0.55, 0.22], 1.0, 0.18, 0.012, 0.13)
+	s.noise_burst(0.12, 0.3, 0.25, 1800.0, 700.0, 300.0, 0.02, 0.1)
+	s.lowpass(4200.0)
+	s.drive(1.4)
+
+## Lift: an upward whoosh with a rising undertone.
+func _make_whoosh_up(s: _Synth) -> void:
+	var d := 0.38 * s.rr(0.92, 1.08)
+	s.swoosh(0.0, d, 1.0, 350.0, 2600.0 * s.rr(0.9, 1.1), 4200.0, s.rr(0.55, 0.65))
+	s.tone(0.02, d, 180.0, 520.0, 0.15, 0.18, 0.05, 0.2)
+
+## Buckle: a knee hitting the floor: a hard bony knock, a trouser scuff and grit.
+func _make_knee_floor(s: _Synth) -> void:
+	var f := s.rr(95.0, 115.0)
+	s.tone(0.0, 0.22, f * 1.6, f, 0.012, 1.0, 0.0006, 0.045)
+	s.noise_burst(0.0, 0.04, 0.7, s.rr(4000.0, 5200.0), 2000.0, 900.0, 0.0003, 0.007)
+	s.noise_burst(0.0, 0.16, 0.45, 1600.0, 600.0, 250.0, 0.002, 0.045)
+	s.tone(0.0, 0.3, 62.0, 45.0, 0.04, 0.55, 0.001, 0.07)
+	s.crackle(0.005, 0.12, 0.3, 600.0, 0.04, 3000.0)
+	s.drive(1.7)
+
+## Spin: a head-turn whip, a fast swish with a flutter of cloth and hair.
+func _make_whip(s: _Synth) -> void:
+	var d := 0.2 * s.rr(0.9, 1.1)
+	s.swoosh(0.0, d, 1.0, 1400.0, 5200.0 * s.rr(0.9, 1.1), 2200.0, s.rr(0.3, 0.4))
+	s.crackle(0.0, d, 0.25, 900.0, 0.06, 4500.0)
+
+## Drive footstep: a heavy foot plant under two bodies' weight, with a scuff.
+func _make_drive_step(s: _Synth) -> void:
+	var f := s.rr(64.0, 74.0)
+	s.tone(0.0, 0.3, f * 1.3, f * 0.7, 0.03, 1.0, 0.001, s.rr(0.06, 0.08))
+	s.noise_burst(0.0, 0.12, 0.6, 1500.0, 500.0, 120.0, 0.001, 0.035)
+	s.noise_burst(0.0, 0.05, 0.45, s.rr(2800.0, 3600.0), 1300.0, 400.0, 0.0005, 0.012)
+	s.crackle(0.004, 0.1, 0.3, 600.0, 0.03, 3200.0)
+	s.drive(1.8)
+
+
+# --- God path (Round 7 amendment) ------------------------------------------------------
+
+## A level-1 floor crack at `position` on the frame of a footstep within
+## STEP_CRUNCH_REACH m (flat): Traversal cracks the floor right after the
+## footstep event when sprinting at Tuning.R7_SPEED_CRACK_FROM or faster.
+func is_step_crack(position: Vector3) -> bool:
+	if _step_frame != Engine.get_physics_frames():
+		return false
+	return Vector2(position.x - _step_pos.x, position.z - _step_pos.z).length() <= STEP_CRUNCH_REACH \
+			and absf(position.y - _step_pos.y) < 0.6
+
+## A footstep crack: a small crunch layered on the step, louder at a higher cap.
+func _step_crunch(position: Vector3) -> void:
+	var k := clampf((Power.speed_cap() - Tuning.R7_SPEED_CRACK_FROM)
+			/ maxf(Tuning.SPRINT_CAPS[Tuning.SPRINT_CAPS.size() - 1] - Tuning.R7_SPEED_CRACK_FROM, 0.01), 0.0, 1.0)
+	var db := lerpf(R7_STEP_CRUNCH_DB.x, R7_STEP_CRUNCH_DB.y, k)
+	_play_fresh(&"step_crunch", position, db, 1.0, _step_fighter)
+	_log_r6(&"floor", [&"step_crunch"])
+	_log_r7(&"step_crack", [&"step_crunch"], [db])
+
+## The pursuit spike's floor impact (B's shockwave with no knockdown radius;
+## a heavy landing's shockwave is the landing's): a big floor boom, the heavy
+## crumble and a low thump. The spiker (the player) owns it.
+func _on_shockwave(fighter: Node3D, position: Vector3, _stumble_radius: float, knockdown_radius: float) -> void:
+	if not FXRules.is_spike_shockwave(knockdown_radius):
+		return
+	var src: Node3D = fighter if is_instance_valid(fighter) else null
+	_play_fresh(&"boom", position, R7_SPIKE_BOOM_DB, R7_SPIKE_BOOM_PITCH, src)
+	_play_fresh(&"land_heavy", position, 0.0, 0.95, src)
+	_play_fresh(&"thump_low", position, 0.0, 0.9, src)
+	_log_r7(&"spike", [&"boom", &"land_heavy", &"thump_low"], [R7_SPIKE_BOOM_DB, 0.0, 0.0])
+
+## Footstep crack at speed: a small gritty crunch of the floor giving underfoot.
+func _make_step_crunch(s: _Synth) -> void:
+	s.crackle(0.0, 0.16, 0.9, 2600.0, 0.05, 5200.0)
+	s.noise_burst(0.0, 0.06, 0.6, s.rr(3500.0, 4500.0), 1500.0, 600.0, 0.0004, 0.014)
+	s.tone(0.0, 0.1, s.rr(150.0, 190.0), 90.0, 0.015, 0.5, 0.0006, 0.02)
+	s.knocks(0.02, 0.1, 2, 900.0, 1500.0, 0.2, 0.01)
+	s.drive(1.6)

@@ -2,18 +2,20 @@ extends "res://tests/move/move_test_base.gd"
 ## The spec-accuracy review fixes, through the real game path: the real
 ## player (PlayerController reading Input actions) with B's real strikes.
 ## Measured numbers printed for each:
-## 1. a sprinting charge vaults a 0.9 m wall and mantles the 1.8 m platform
-##    without stopping, still charging; a release in the last 40% of a vault is
-##    a dropping strike;
-## 2. the sprint never opens above the cap: dash at the cap, 6 m/s at 150 ms,
-##    never slowing after the hand-off, the cap at 1.2 s; a tap covers 3 m;
+## 1. a sprint vaults a 0.9 m wall and mantles the 1.8 m platform without
+##    stopping; an attack in the last 40% of a vault is a dropping strike
+##    (Round 7 has no charge button: the old "sprinting charge" is gone);
+## 2. Round 7: the press dodges first; held, the dodge hands off to the sprint
+##    ramp at its speed (6-6.3 m/s), never slowing after the hand-off, the cap at
+##    1.2 s; a tap is the 2.5 m dodge (the dodge itself: test_dodge);
 ## 3. a grunt 0.45 / 0.7 / 1.0 m behind a 0.9 m wall never turns the vault
 ##    into a dead stop;
 ## 5. a wall run needs a sprint (Dash released 0.05 s before Jump: a jump);
 ## 6. a 180-degree reversal pays one turn penalty (30%);
 ## 7. a body in the chest / head probes (an enemy on a crate) is a target; an
 ##    overhang over a low wall stops a vault;
-## J. a standing jab at 1.6 m is P 1.0 flinch; a full-sprint jab is P 4.0 knockdown.
+## J. a jab thrown from a full sprint is flagged as a sprint strike (HitInfo.sprint),
+##    a standing one is not (Round 7: sprinting adds no power; B owns the hit).
 ## 4. at the 10 m/s cap a facade of separate panels is one wall: no second run
 ##    on its next panel before the floor (also checked in the real Yard: test_yard_moves).
 
@@ -30,8 +32,8 @@ func run() -> void:
 	check(p.brain is PlayerController, "the real PlayerController drives the player")
 	await _burst_shape()
 	await _tap_distance()
-	await _charge_parkour()
-	await _charge_release_drop()
+	await _sprint_parkour()
+	await _vault_attack_drop()
 	await _enemy_behind_wall()
 	await _wall_run_needs_sprint()
 	await _panel_facade_cooldown()
@@ -52,6 +54,7 @@ func _reset(pos: Vector3, facing := Vector3.FORWARD) -> void:
 # --- 2. the sprint's opening ---------------------------------------------------------
 func _burst_shape() -> void:
 	await _reset(Vector3(0.0, 0.02, 60.0))
+	clear_events()
 	var cap := p.traversal.get_speed_cap()
 	hold(&"move_forward")
 	hold(&"dash")
@@ -84,8 +87,8 @@ func _burst_shape() -> void:
 	let_go(&"move_forward")
 	print("  [2] held Dash: %s; top %.2f (cap %.1f); after the hand-off speed fell %d times; 99%% of the cap at %.3f s" % [
 		", ".join(samples), top, cap, dips, t_cap])
-	check(top <= cap + 0.01, "the sprint never runs above the cap (top %.2f)" % top)
-	check(near(at_hand, Tuning.SPRINT_START_SPEED, 0.15), "the dash hands off at 6 m/s (%.2f)" % at_hand)
+	check(near(at_hand, Tuning.SPRINT_START_SPEED, 0.35) and count_events(&"dodged") == 1,
+		"the press dodges, then hands off to the sprint ramp at %.2f m/s (6-6.3)" % at_hand)
 	check(dips == 0, "after the hand-off the speed never drops in a straight line")
 	check(near(t_cap, Tuning.SPRINT_RAMP_TIME, 0.1), "a held Dash reaches the cap in %.3f s (1.2 +- 0.1)" % t_cap)
 
@@ -101,11 +104,11 @@ func _tap_distance() -> void:
 		top = maxf(top, hspeed(p))
 	var d := Vector2(p.global_position.x - x0.x, p.global_position.z - x0.z).length()
 	print("  [2] Dash tap, stick neutral: %.3f m, top %.2f m/s, sprinting %s" % [d, top, p.traversal.is_sprinting()])
-	check(near(d, Tuning.SHORT_DASH_DIST, 0.05) and top <= p.traversal.get_speed_cap() + 0.01,
-		"a Dash tap covers %.2f m (3 m) and never passes the cap" % d)
+	check(near(d, Tuning.R7_DODGE_DIST, 0.2) and not p.traversal.is_sprinting(),
+		"a Dash tap is the dodge: %.2f m (2.5 +- 0.2), no sprint" % d)
 
-# --- 1. a sprinting charge does not stop for parkour --------------------------------------
-func _charge_parkour() -> void:
+# --- 1. a sprint does not stop for parkour --------------------------------------
+func _sprint_parkour() -> void:
 	make_wall_across(0.0, 0.9, 0.3, 4.0, 20.0)
 	make_box(Vector3(20.0, 0.9, -7.0), Vector3(4.0, 1.8, 6.0), "PlatformCharge")  # face at z -4
 	await _reset(Vector3(20.0, 0.02, 14.0))
@@ -113,8 +116,6 @@ func _charge_parkour() -> void:
 	hold(&"dash")
 	await wait_until(func() -> bool: return p.traversal.sprint_charge >= 0.999, 300)
 	await wait_until(func() -> bool: return p.global_position.z <= 4.0, 120)
-	hold(&"kick")
-	await wait_until(func() -> bool: return p.combat.is_charging(), 40)
 	var v_in := hspeed(p)
 	clear_events()
 	var m := {"lo": INF, "kinds": []}
@@ -125,45 +126,36 @@ func _charge_parkour() -> void:
 		if k != &"" and not (m["kinds"] as Array).has(k):
 			(m["kinds"] as Array).append(k)
 		return p.global_position.y > 1.7 and not p.traversal.is_vaulting(), 240)
-	var still := p.combat.is_charging()
 	var v_out := hspeed(p)
-	var steer := p.traversal.is_charge_steering()
-	let_go(&"kick")
 	let_go(&"dash")
 	let_go(&"move_forward")
-	print("  [1] sprinting charge at %.2f m/s: parkour %s, lowest speed off the curves %.2f, on the platform y %.2f, out %.2f, still charging %s, charge steering %s" % [
-		v_in, m["kinds"], m["lo"], p.global_position.y, v_out, still, steer])
+	print("  [1] sprint at %.2f m/s: parkour %s, lowest speed off the curves %.2f, on the platform y %.2f, out %.2f" % [
+		v_in, m["kinds"], m["lo"], p.global_position.y, v_out])
 	check((m["kinds"] as Array).has(&"vault") and (m["kinds"] as Array).has(&"mantle"),
-		"a sprinting charge vaults the 0.9 m wall and mantles the 1.8 m platform")
+		"a sprint vaults the 0.9 m wall and mantles the 1.8 m platform")
 	check(float(m["lo"]) >= v_in * Tuning.VAULT_KEEP * Tuning.MANTLE_KEEP - 0.05,
 		"it never stops: lowest %.2f m/s (vault 90%% x mantle 70%% of %.2f = %.2f)" % [m["lo"], v_in,
 		v_in * Tuning.VAULT_KEEP * Tuning.MANTLE_KEEP])
-	check(still and steer, "the charge is held through both and steering resumes")
-	await wait_until(func() -> bool: return not p.combat.is_attacking(), 240)
+	await settle(p, 20)
 
-func _charge_release_drop() -> void:
+func _vault_attack_drop() -> void:
 	make_wall_across(0.0, 0.9, 0.3, 4.0, 30.0)
 	await _reset(Vector3(30.0, 0.02, 14.0))
 	hold(&"move_forward")
 	hold(&"dash")
 	await wait_until(func() -> bool: return p.traversal.sprint_charge >= 0.999, 300)
-	await wait_until(func() -> bool: return p.global_position.z <= 3.5, 120)
-	hold(&"kick")
 	await wait_until(func() -> bool: return p.traversal.is_vaulting(), 120)
 	await wait_until(func() -> bool: return p.traversal.get_vault_progress() >= 0.7, 60)
 	var prog := p.traversal.get_vault_progress()
-	let_go(&"kick")
-	await ticks(2)
+	await tap(&"punch", 2)
 	var move := p.combat.current_move_id()
 	var dropping := p.traversal.is_drop_striking()
 	let_go(&"dash")
 	let_go(&"move_forward")
 	await wait_until(func() -> bool: return not p.traversal.is_airborne() and not p.traversal.is_vaulting(), 240)
-	print("  [1] charge released at %.0f%% of the vault: B's move %s, dropping strike (movement) %s, lands at y %.2f" % [
+	print("  [1] punch at %.0f%% of the vault: B's move %s, dropping strike (movement) %s, lands at y %.2f" % [
 		prog * 100.0, move, dropping, p.global_position.y])
-	check(dropping, "a charge released in the last 40% of a vault ends it in a dropping strike (the plunge)")
-	if move != &"drop_strike":
-		print("  PENDING (B): CombatController._release_charge() keeps %s in a vault; B's drop_strike move on release is requested" % move)
+	check(dropping, "an attack in the last 40% of a vault ends it in a dropping strike (the plunge)")
 	await wait_until(func() -> bool: return not p.combat.is_attacking(), 240)
 
 # --- 3. a grunt behind the wall -----------------------------------------------------
@@ -347,11 +339,9 @@ func _jab_power() -> void:
 			"full-sprint" if sprint else "standing (1.6 m)", charge, info.power if info else -1.0,
 			HitInfo.tier_name(info.tier) if info else &"-", info.sprint if info else false])
 		if not sprint:
-			check(info != null and near(info.power, 1.0, 0.01) and info.tier == HitInfo.Tier.FLINCH,
-				"a standing jab at 1.6 m is P 1.0, flinch")
+			check(info != null and not info.sprint, "a standing jab is not a sprint strike")
 		else:
-			check(info != null and near(info.power, 4.0, 0.01) and info.tier == HitInfo.Tier.KNOCKDOWN,
-				"a full-sprint jab is P 4.0, knockdown")
+			check(info != null and info.sprint and charge >= 0.99, "a jab from a full sprint is flagged as a sprint strike")
 		await wait_until(func() -> bool: return not p.combat.is_attacking(), 240)
 		await ticks(60)
 		g.queue_free()

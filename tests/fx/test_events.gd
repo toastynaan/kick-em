@@ -1,9 +1,13 @@
 extends Node3D
-## Fires every GameEvents signal BloodFX and AudioFX listen to, with plausible
-## and edge-case arguments (null attacker, zero vectors, freed fighters, a real
-## rig's severed limb), and fails on any error raised in FX code. Also checks
-## the arena particle-collision heightfield follows the "arena" group.
-## OWNER: agent F.
+## Fires every GameEvents signal BloodFX, AudioFX and ScreenFX listen to, with
+## plausible and edge-case arguments (null attacker, zero vectors, freed
+## fighters, a real rig's severed limb, Round 7 hits with odd weights and
+## kinds, drives that never end), and fails on any error raised in FX code.
+## Also checks the arena particle-collision heightfield follows the "arena"
+## group. Round 7 removed parry, sidestep and Focus (FX no longer hears their
+## signals); the god path (amendment) keeps teleport, pursuit, parkour, the
+## wall run, landings and the ram, and adds the pursuit spike's shockwave and
+## footstep cracks. OWNER: agent F.
 
 const U := preload("res://tests/fx/fx_test_util.gd")
 
@@ -114,19 +118,10 @@ func _ready() -> void:
 	for args in [[player, enemy, &"jab1", false, 0], [player, null, &"sparta_kick", true, 3],
 			[enemy, player, &"e_heavy", false, 0], [null, null, &"", false, 1], [player, enemy, &"no_such_move", true, 2]]:
 		GameEvents.strike_started.emit(args[0], args[1], args[2], args[3], args[4])
-	GameEvents.parried.emit(player, enemy)
-	GameEvents.parried.emit(player, null)
-	GameEvents.parried.emit(null, enemy)
-	GameEvents.parry_whiffed.emit(player)
-	GameEvents.parry_whiffed.emit(null)
 	GameEvents.teleported.emit(player, Vector3(0, 0, 2), Vector3(0, 0, -2), &"counter")
 	GameEvents.teleported.emit(player, Vector3.ZERO, Vector3.ZERO, &"pursuit")
 	GameEvents.teleported.emit(null, Vector3.ZERO, Vector3.ONE, &"other")
 	GameEvents.teleported.emit(bare, Vector3.ZERO, Vector3.ONE, &"counter")
-	GameEvents.sidestepped.emit(player, Vector3.RIGHT)
-	GameEvents.sidestepped.emit(player, Vector3.ZERO)
-	GameEvents.sidestepped.emit(null, Vector3.LEFT)
-	GameEvents.counter_bonus_changed.emit(player, 2.5)
 	GameEvents.sprint_started.emit(player)
 	GameEvents.sprint_started.emit(null)
 	GameEvents.sprint_ended.emit(player)
@@ -146,7 +141,13 @@ func _ready() -> void:
 		GameEvents.landing.emit(player, level, Vector3(1, 0, 1), 10.0)
 	GameEvents.landing.emit(null, &"heavy", Vector3(-1, 0, 1), 0.0)
 	GameEvents.shockwave.emit(player, Vector3.ZERO, 2.5, 1.0)
-	GameEvents.rammed.emit(player, enemy, &"stumble", &"none")
+	GameEvents.shockwave.emit(player, Vector3(1, 0, -1), Tuning.R7_SPIKE_BLAST_RADIUS, 0.0)  # a pursuit spike
+	GameEvents.shockwave.emit(null, Vector3.ZERO, 0.0, 0.0)
+	for res in [&"stumble", &"knockdown", &"launch", &"flinch", &""]:
+		GameEvents.rammed.emit(player, enemy, res, &"none")
+	GameEvents.rammed.emit(player, null, &"launch", &"none")
+	GameEvents.footstep.emit(player, Vector3(3, 0, 3), &"concrete", 1.0)
+	GameEvents.floor_damaged.emit(Vector3(3.1, 0, 3.1), Tuning.FLOOR_LEVEL_RADIUS[0], 1, &"concrete")  # a footstep crack
 	GameEvents.carry_changed.emit(player, enemy)
 	GameEvents.carry_changed.emit(player, null)
 	GameEvents.body_slammed.emit(player, enemy, Vector3(0, 0, -1))
@@ -166,8 +167,6 @@ func _ready() -> void:
 	GameEvents.charge_level_changed.emit(null, 1)
 	GameEvents.charge_released.emit(null, &"jab1", 1)
 	GameEvents.body_impact.emit(enemy, Vector3(0, 0, -1), Vector3.UP, 3000.0, &"water")
-	GameEvents.focus_started.emit(player)
-	GameEvents.focus_ended.emit(player)
 	GameEvents.last_kill.emit(enemy)
 	GameEvents.run_ended.emit({})
 	# Round 6 signals, with edge cases (null nodes, unknown kinds, odd levels).
@@ -189,6 +188,66 @@ func _ready() -> void:
 	GameEvents.world_blast.emit(Vector3.ZERO, 0.0, 0.0, &"slam")
 	GameEvents.world_blast.emit(Vector3(1, 0, 1), 2.5, 50000.0, &"structure")
 	GameEvents.world_blast.emit(Vector3(1, 0, 1), -1.0, -100.0, &"")
+	await U.physics_frames(get_tree(), 10)
+	# Round 7 signals, with edge cases (odd weights and kinds, null fighters,
+	# zero vectors, a drive that never ends, wind-ups that never release).
+	var e3 := U.make_fighter(self, Vector3(-2, 0, -1))
+	e3.add_to_group(&"fighters")
+	var e3_chest: Vector3 = e3.get_aim_point()
+	for spec in [[&"jab", &"snap", 0.2, 0.4, 0.45], [&"roundhouse", &"knockdown", 0.85, 1.5, 0.0],
+			[&"front_kick", &"launch", 0.65, 2.8, 0.8], [&"uppercut", &"lift", 0.6, 0.3, 0.0],
+			[&"counter", &"push", 0.6, 1.2, 0.9], [&"odd", &"repop", 0.0, -1.0, -1.0], [&"big", &"snap", 7.0, 50.0, 9.0]]:
+		var r7 := U.hit(e3, spec[0], e3_chest, fwd, 8.0, 0.0, &"strike", HitInfo.Tier.STAGGER)
+		r7.attacker = player
+		r7.react = spec[1]
+		r7.weight = spec[2]
+		r7.push = spec[3]
+		r7.stun = spec[4]
+		r7.hitstop = 0.1
+		GameEvents.hit_landed.emit(r7)
+	var r7z := U.hit(e3, &"jab", Vector3.ZERO, Vector3.ZERO, 5.0, 0.0)
+	r7z.react = &"snap"
+	r7z.push = 1.4
+	GameEvents.hit_landed.emit(r7z)
+	for kind in [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop", &"knockdown", &"", &"bogus"]:
+		GameEvents.react_started.emit(e3, kind, player)
+	GameEvents.react_started.emit(null, &"fold", null)
+	GameEvents.chain_hit.emit(player, e3, &"jab", 3)
+	GameEvents.chain_ended.emit(player, 3)
+	GameEvents.glide_started.emit(player, e3, 4.0)
+	GameEvents.glide_started.emit(player, null, 0.0)
+	GameEvents.glide_started.emit(null, null, -3.0)
+	GameEvents.counter_window.emit(e3, player, true, true)
+	GameEvents.strike_started.emit(e3, player, &"e_hook", false, 0)
+	GameEvents.countered.emit(player, e3)
+	GameEvents.countered.emit(player, bare)
+	GameEvents.countered.emit(null, e3)
+	GameEvents.countered.emit(null, null)
+	GameEvents.counter_window.emit(e3, player, false, true)
+	GameEvents.counter_whiffed.emit(player)
+	GameEvents.counter_whiffed.emit(null)
+	GameEvents.dodged.emit(player, Vector3.LEFT)
+	GameEvents.dodged.emit(player, Vector3.ZERO)
+	GameEvents.dodged.emit(bare, Vector3.UP)
+	GameEvents.dodged.emit(null, Vector3.RIGHT)
+	GameEvents.drive_started.emit(player, e3)
+	GameEvents.drive_started.emit(bare, null)
+	GameEvents.drive_started.emit(null, null)
+	await U.physics_frames(get_tree(), 30)
+	for result in [&"break", &"slam", &"shove", &"bowl", &"bogus"]:
+		GameEvents.drive_impact.emit(player, e3, panel, Vector3(4.9, 1, 0), 8.0, result)
+	GameEvents.drive_impact.emit(player, e3, null, Vector3.ZERO, 0.0, &"slam")
+	GameEvents.drive_impact.emit(null, null, null, Vector3.ZERO, -2.0, &"bowl")
+	GameEvents.drive_impact.emit(player, null, bare, Vector3.ONE, 30.0, &"break")
+	GameEvents.drive_ended.emit(player, &"slam")
+	GameEvents.drive_ended.emit(null, &"release")  # bare never ends: the safety stop
+	for a in [0.1, 0.5, 1.0, 1.0, 3.0, -1.0, 0.0, 0.6]:
+		GameEvents.throw_windup.emit(player, a)
+	GameEvents.throw_windup.emit(bare, 0.7)
+	GameEvents.throw_windup.emit(null, 0.5)
+	GameEvents.thrown.emit(player, e3, Vector3(0, 2, -18))
+	GameEvents.thrown.emit(null, null, Vector3.ZERO)
+	GameEvents.prop_thrown.emit(player, bare, Vector3(0, 1, -40))
 	await U.physics_frames(get_tree(), 10)
 	# Flow
 	GameEvents.round_started.emit(&"duel")

@@ -5,27 +5,31 @@ extends Node
 ##
 ## Round 5 roster (Feel Reference: Enemy types; Waves uses these three):
 ## - grunt (75 kg): jab-cross string (e_jab then e_hook), front kick (e_kick),
-##   grab (e_grab, blue glow). Circles and takes tokens. Sidesteps a sprint
-##   attack seen from more than Tuning.SIDESTEP_SPRINT_MIN_DIST
-##   Tuning.SIDESTEP_SPRINT_CHANCE of the time; guards Tuning.GUARD_TAP_CHANCE
-##   of tapped strikes aimed at him (GameEvents.strike_started).
+##   grab (e_grab, blue glow). Circles and takes tokens. Guards
+##   Tuning.GUARD_TAP_CHANCE of tapped punches aimed at him
+##   (GameEvents.strike_started; is_tapped_strike).
 ## - stick (75 kg): swing (e_stick_swing), thrust (e_stick_thrust), reach
 ##   2.2 m, keeps about 3 m away. Holds a stick (this brain's mesh on the right
 ##   hand); a stagger or more drops it as a ThrowableProp &"stick" and he
 ##   fights on unarmed with the grunt's moves.
 ## - heavy (110 kg): overhead smash (e_heavy), shoulder charge (e_charge, from
-##   range), grab and slam (e_grab_slam, blue glow). Never sidesteps (B makes
-##   him ignore flinches and launch at 80%).
-## Duel mode: the Duelist (perfect dodge / parry, teleport counter through B's
-## start_counter, whiff punish, feints, vanish step). Legacy archetypes
-## (brawler, shield, brute, thrower) keep working for their tests.
+##   range, blue glow: uncounterable), grab and slam (e_grab_slam, blue glow).
+##   B gives his wind-ups tell armor.
+## Duel mode: the Duelist reads the player's strikes and guards them (Block
+## held, the AI guard; more often against a repeated move), answers a broken
+## guard with a quick hook (e_hook), punishes whiffs and whiffed Counters,
+## feints, and vanish-steps when he cannot reach the player. Round 7 removed
+## his parry and teleport counter. Legacy archetypes (brawler, shield, brute,
+## thrower) keep working for their tests.
 ##
-## Readability (Feel Reference: Enemies have to be readable first): every
-## move starts with AttackDirector.enemy_startup_s(move) of startup (never
-## under 18 frames early in a run); the director spaces the two token
-## holders' first active frames; TellGlint makes the attacking limb glow from
-## wind-up to first active frame. While the player is knocked down a holder
-## takes Tuning.DOWNED_FREE_SWINGS free swing; the rest wait in the ring.
+## Readability (Feel Reference: Enemies have to be readable first; Round 7):
+## every move starts with AttackDirector.enemy_startup_s(move) of startup,
+## never under AttackDirector.tell_min_frames() (the counter window plus
+## Tuning.R7_TELL_MARGIN); the director spaces the two token holders' first
+## active frames; TellGlint makes the attacking limb glow from wind-up to first
+## active frame, orange (Counter) or blue (dodge only). While the player is
+## knocked down a holder takes Tuning.DOWNED_FREE_SWINGS free swing; the rest
+## wait in the ring.
 ##
 ## Limb loss (F10, GameEvents.limb_severed): lost an arm, it fights on
 ## one-handed at Tuning.ARM_LOST_DAMAGE_MULT damage (get_damage_mult) above
@@ -42,8 +46,11 @@ extends Node
 ## up to) asks for a token; with one it closes to the move's range, asks the
 ## director for a spaced swing (request_swing) and starts the attack, or
 ## gives the token back after GIVE_UP_TIME. It never acts while down, in
-## hitstun or held, pauses briefly after a get-up, and walks back into the
-## ring after being launched away.
+## hitstun, held or in a Round 7 reaction (Fighter.is_reacting / is_lifted:
+## no attack, no token request, a held token goes back), pauses briefly after
+## a get-up, and walks back into its ring after being pushed or launched away.
+## It never tries to break a grab once the clinch has connected, nor while
+## the holder drives it (Carry.is_driving).
 
 signal attack_launched(move_id: StringName)
 ## Duelist vanish step done (round 2.5): reappeared at `spot`.
@@ -142,11 +149,12 @@ const TAUNT_INTERVAL := Vector2(4.0, 9.0)
 const TAUNT_HOLD := 1.2
 ## m: a player this close to a waiting (FAR) enemy that is on screen engages it.
 const ENGAGE_DIST := 3.0
-# Round 5: reactions to the player's strikes (GameEvents.strike_started).
-const SPRINT_SIDESTEP_TIME := 0.3   ## s of the sidestep away from a sprint attack
-const SPRINT_SIDESTEP_DIST := 1.6   ## m: clear of the lunge (it stops 0.9 m short of where he stood)
+# Round 5: guarding the player's tapped strikes (GameEvents.strike_started).
 const TAP_GUARD_AFTER := 0.25       ## s a tap guard is held past the strike's first active frame
-const TAP_GUARD_MAX := 0.9          ## s a tap guard is held at most
+## s one tap guard spell lasts at most, however long the string goes on: then
+## the guard drops and a token holder swings (block, then punish), so a
+## player who keeps punching never turns an enemy into a turtle.
+const TAP_GUARD_MAX := 0.9
 # Round 5: strings, the downed player, heavies.
 const STRING_WAIT_MAX := 0.35       ## s a string's follow-up may wait for a spaced slot before it is dropped
 const STRING_RANGE_SLACK := 0.7     ## m beyond the follow-up's range it still swings (the jab's lunge closed in)
@@ -176,37 +184,31 @@ const STICK_GRIP := 0.2             ## m from the butt end to the fist
 const STICK_TILT := 25.0            ## degrees the stick points down from the fist's forward axis
 const STICK_COLOR := Color(0.42, 0.27, 0.13)
 const STICK_GLOW_ENERGY := 3.0      ## emission while it winds up (the tell glow)
-## F's Focus tint keeps the colour of GeometryInstance3Ds in this group: the
-## stick's wind-up glow is never dimmed (Feel Reference).
-const FOCUS_KEEP_GROUP := &"focus_keep_color"
 ## Added to the hand's velocity when he drops it (m/s along the hit, m/s up):
 ## the stick visibly flies out of his hand instead of sliding off.
 const STICK_DROP_TOSS := Vector2(1.5, 1.8)
 const STICK_MASS := 0.7             ## kg, only when ThrowableProp builds nothing itself
 const HAND_SPEED_MAX := 12.0        ## m/s cap on the tracked hand velocity
-# Duelist
-const DODGE_LEAD := 0.07            ## s before the active frame to press block (inside Tuning.PARRY_WINDOW)
-const DODGE_HOLD := 0.12            ## s the dodge press is held
-const DODGE_RANGE := 3.0            ## m: only dodge attacks aimed at us
-const DODGE_FACING := 0.5           ## dot(player forward, to us)
-const DUELIST_BLOCK_CHANCE := [0.1, 0.2]  ## [easy, normal] plain block when the dodge roll fails
-## With the Round 5 Defence on: share of the Duelist's counters after a parry
-## that are the teleport counter (start_counter, 1 Focus) instead of a hook.
-const DUELIST_TELEPORT_SHARE := 0.4
-const BLOCK_AFTER_ACTIVE := 0.3     ## s a plain block is held past the active frame
-const SIDESTEP_TIME := 0.28         ## s of the visible sidestep after a dodge (no Focus to teleport)
-const SIDESTEP_SPEED := 4.6         ## m/s: SIDESTEP_TIME x this = 1.3 m
-const COUNTER_TELL := 0.3           ## s orange tell of the Duelist's teleport counter (start_counter)
-## s after a dodge / parry in which the counter may still fire. A parried
-## player is staggered ~0.8 s (+ the freeze) and is never swung at in
-## hitstun, so the punish starts the moment he can act again: this must
-## outlast the stagger.
-const COUNTER_WINDOW := 1.6
-## While a counter waits for its turn (the parried player reels), the Duelist
-## closes to this share of its hook's range.
-const COUNTER_CLOSE_IN := 0.8
-const MASH_WINDOW := 2.0            ## s: repeats of the same player move inside this raise the dodge chance
-const MASH_BONUS := 0.15            ## dodge chance added per repeat
+# Duelist (Round 7: guards, answers a broken guard with a hook; no parry, no teleport)
+## The read: a player strike aimed at him (within READ_RANGE, the player facing
+## him) is guarded with the archetype's "dodge_chance" (its read chance,
+## [easy, normal]) plus MASH_BONUS per repeat of the same move.
+const READ_RANGE := 3.0             ## m: only strikes aimed at us are read
+const READ_FACING := 0.5            ## dot(player forward, to us)
+## s a read guard is held past the strike's first active frame: long enough
+## that the rest of a string meets it (each read strike extends it).
+const GUARD_AFTER_ACTIVE := 0.6
+## The move that answers a broken guard (Round 7: the Duelist hooks).
+const GUARD_BREAK_ANSWER := {&"duelist": &"e_hook"}
+## s after a broken guard's stun (or get-up) in which the answer may still
+## start. The player is never swung at in hitstun, so the answer goes the
+## moment he can be attacked again.
+const ANSWER_WINDOW := 1.6
+## While the answer waits for its turn, the Duelist closes to this share of
+## its hook's range, so the hook comes the moment the player can be hit.
+const ANSWER_CLOSE_IN := 0.8
+const MASH_WINDOW := 2.0            ## s: repeats of the same player move inside this raise the read chance
+const MASH_BONUS := 0.15            ## read chance added per repeat
 const MASH_CAP := 0.85
 const PUNISH_RANGE := 3.0
 const PUNISH_WINDOW := 0.6
@@ -257,6 +259,16 @@ const LOW_PROBE_DROP := 0.35
 const SPOT_RADIUS := 0.45           ## m: free radius a steering target needs
 const BODY_CLEARANCE := 0.32        ## m: wall hits closer than this to the movement line block it (~body radius)
 const RANGE_SLACK := 0.4            ## m added to a move's range once the approach stalls
+## Round 7 stalled approach: a token holder that has gained less than
+## STALL_PROGRESS on a standing player for STALL_TIME (something it cannot
+## pass: the clutter the player was knocked onto, a body, a corner) swings
+## anyway when within STALL_SWING_REACH of its move's range, with its normal
+## tell (the counter window applies as always). A player moving away more than
+## STALL_PLAYER_MOVE in that time is a chase, never a stall.
+const STALL_TIME := 0.5
+const STALL_PROGRESS := 0.15        ## m
+const STALL_PLAYER_MOVE := 0.3      ## m
+const STALL_SWING_REACH := 1.0      ## m beyond the move's range
 # Navigation (AINavGrid via AttackDirector)
 const NAV_REPLAN := 0.6             ## s between path re-plans
 const NAV_GOAL_MOVE := 1.0          ## m the goal may move before an early re-plan
@@ -290,16 +302,12 @@ var entry_path: PackedVector3Array = PackedVector3Array()
 var mode := Mode.ENTRY
 ## Attacks this brain has started (tests, debugging).
 var attacks_started := 0
-## Tests: force the Duelist's read chance (negative = use Tuning).
-var dodge_chance_override := -1.0
-## Tests: force the share of the Duelist's counters after a parry that are the
-## teleport counter (negative = DUELIST_TELEPORT_SHARE).
-var teleport_share_override := -1.0
+## Tests: force the Duelist's read (guard) chance (negative = use Tuning).
+var read_chance_override := -1.0
 ## Tests: force the grab-break chance (negative = GRAB_BREAK_CHANCE rules).
 var grab_break_override := -1.0
 var _grabbed_at: Array[float] = []  ## game times the player caught us (anti-spam)
-## Sprint-attack sidesteps and tap guards taken (tests, debugging).
-var sidesteps := 0
+## Tap guards raised (tests, debugging).
 var tap_guards := 0
 ## Free swings started at a knocked-down player (tests).
 var downed_swings := 0
@@ -320,8 +328,7 @@ var _resume_at := 0.0
 var _was_down := false
 var _want_guard := false
 var _block_down := false
-var _dodge_hold_until := -INF       ## AttackDirector.now() time
-var _block_until := 0.0             ## game time (Duelist plain block)
+var _guard_until := 0.0             ## game time a Duelist read guard is held until
 var _player_block_time := 0.0
 var _player_attacking := false
 var _ring_bias := 0.5
@@ -332,9 +339,8 @@ var _taunt_timer := 0.0
 var _taunt_until := 0.0
 var _feint_timer := 0.0
 var _feint_until := 0.0
-var _sidestep_until := 0.0
-var _sidestep_dir := Vector3.ZERO
-var _counter_pending := false
+var _answer_pending := false        ## Duelist: a broken guard waits for its hook
+var _answer_deadline := INF         ## game time; INF until he can act again after the break
 var _punish_until := 0.0
 var _watched_player: Fighter = null
 var _stuck_timer := 0.0
@@ -350,6 +356,13 @@ var _route_point := Vector3.INF
 var _side_sign := 1.0
 var _side_locked := false
 var _best_dist := INF              ## closest the current approach got to the player
+var _progress_best := INF          ## stalled approach: distance at the last real progress...
+var _progress_at := 0.0            ## ...the game time of it...
+var _progress_player := Vector3.ZERO  ## ...and where the player stood then
+## Attacks started from a stalled approach beyond the move's range, and the
+## distance of the last attack start (tests, debugging).
+var stall_swings := 0
+var last_start_dist := 0.0
 var _steer_in := Vector3.ZERO       ## debug: steering before / after avoidance
 var _steer_out := Vector3.ZERO
 var _sweep_params := PhysicsShapeQueryParameters3D.new()
@@ -360,9 +373,6 @@ var _nav_points := PackedVector3Array()
 var _nav_age := INF
 var _entry_interrupted := false
 var _outside_time := 0.0
-var _counter_at := INF              ## game time the post-dodge counter may fire
-var _counter_deadline := 0.0
-var _counter_teleport := false      ## counter with combat.start_counter (costs Focus)
 var _player_moves: Array = []       ## [game time, move family] of recent player attacks
 var _aim_timer := 0.0
 var _aim_set := false
@@ -371,11 +381,11 @@ var _fetch_target: RigidBody3D = null
 var _fetch_scan := 0.0
 var _fetch_started := 0.0
 var _fetch_cooldown_until := 0.0
-## Attacks the Duelist started with start_counter (tests, debugging).
-var counters_started := 0
-## Parries the Duelist made and counters it started after one (tests, debugging).
-var parries_seen := 0
-var parry_counters := 0
+## Duelist (tests, debugging): strikes read and guarded, guards broken
+## (a player hit landed through the raised guard), hooks started answering one.
+var guard_reads := 0
+var guard_breaks := 0
+var guard_answers := 0
 ## Duelist vanish steps taken (tests, debugging).
 var vanish_steps := 0
 var _arm_broken := false
@@ -409,11 +419,11 @@ var _flee: StringName = &""         ## &"" | &"limp" | &"crawl"
 var _lost_arm := {}                 ## &"left" / &"right" -> true
 var _lost_leg := false
 var _tap_guard_until := -INF        ## game time a tap guard is held until
+var _tap_guard_since := -INF        ## game time the current tap guard spell began
 var _stick: MeshInstance3D = null
 var _stick_mat: StandardMaterial3D = null
 var _hand_prev := Vector3.INF
 var _hand_vel := Vector3.ZERO
-var _counter_after_parry := false   ## the pending counter answers a parry
 ## Stuck metric: current and longest run of stalled time (s), where the longest happened.
 var stuck_time := 0.0
 var max_stuck_time := 0.0
@@ -468,9 +478,7 @@ func _ready() -> void:
 	_interval_left = _rng.randf_range(0.4, 1.2)
 	if fighter.combat:
 		fighter.combat.attack_ended.connect(_on_attack_ended)
-	GameEvents.parried.connect(_on_parried)
-	GameEvents.parry_whiffed.connect(_on_parry_whiffed)
-	GameEvents.perfect_dodge.connect(_on_perfect_dodge)  # Upgrade 2 path: only while H's Defence is off (debug)
+	GameEvents.counter_whiffed.connect(_on_counter_whiffed)
 	GameEvents.arm_broken.connect(_on_arm_broken)
 	GameEvents.attack_whiff.connect(_on_attack_whiff)
 	GameEvents.strike_started.connect(_on_strike_started)
@@ -528,10 +536,22 @@ func has_lost_leg() -> bool:
 
 ## G's Carry: the player caught us in a neutral grab; true = press Grab in
 ## the break window (both pushed apart). Never while stunned, dazed,
-## stumbling, down or fleeing; per archetype GRAB_BREAK_CHANCE, more with the
-## guard up, more for each recent grab on us (spamming grabs gets broken).
-func wants_grab_break(_grabber: Fighter) -> bool:
+## stumbling, reacting, down or fleeing; never once the clinch has connected
+## (the grabber holds the body) or while the grabber drives us; per archetype
+## GRAB_BREAK_CHANCE, more with the guard up, more for each recent grab on us
+## (spamming grabs gets broken).
+func wants_grab_break(grabber: Fighter) -> bool:
+	if not can_try_grab_break(grabber):
+		return false
 	return _rng.randf() < grab_break_chance(true)
+
+## Round 7: a grab can still be broken: the clinch has not connected yet (the
+## grabber is not holding the body) and the grabber is not driving.
+func can_try_grab_break(grabber: Fighter) -> bool:
+	if grabber == null or not is_instance_valid(grabber) or grabber.carry == null:
+		return true
+	var c := grabber.carry
+	return not c.is_driving() and not c.is_holding_body()
 
 ## The chance wants_grab_break() rolls now. `record` notes this grab for the
 ## anti-spam bonus.
@@ -547,6 +567,8 @@ func grab_break_chance(record := false) -> float:
 	_grabbed_at = kept
 	if fighter.is_dead() or fighter.is_down() or is_fleeing():
 		return 0.0
+	if fighter.is_reacting() or fighter.is_lifted():
+		return 0.0  # Round 7: a reacting body connects at once
 	var c := fighter.combat
 	if c != null and (c.is_hit_stunned() or (c.has_method(&"is_dazed") and c.is_dazed()) \
 			or (c.has_method(&"is_stumbling") and c.is_stumbling())):
@@ -625,7 +647,7 @@ func _physics_process(delta: float) -> void:
 		return
 	_track_player(delta, player)
 	_update_throw_aim(delta)
-	if _counter_pending and _tick_counter(player):
+	if _answer_pending and _tick_answer(player):
 		_apply_guard()
 		return
 	if _tick_vanish_step(player):
@@ -657,7 +679,8 @@ func _is_disabled() -> bool:
 		_entry_interrupted = true
 	return disabled
 
-## Down, in hitstun or held (no side effects).
+## Down, in hitstun, held, or in a Round 7 reaction (snap, spin, fold,
+## buckle, push, lifted) (no side effects).
 func _is_impaired() -> bool:
 	return fighter.is_down() or fighter.is_in_hitstun() or AttackDirector.is_enemy_impaired(fighter)
 
@@ -670,19 +693,24 @@ func _is_attacking() -> bool:
 func _carrying() -> bool:
 	return fighter.carry != null and fighter.carry.is_holding()
 
+## Down, stunned, held or reacting: no moves, no turn, no token request; a
+## token not yet used for an attack goes back. A Duelist's answer to a broken
+## guard waits (its deadline starts once he can act again).
 func _while_disabled() -> void:
 	fighter.move_input = Vector3.ZERO
-	# Keep a raised guard through blockstun; drop it when down or held.
-	if fighter.is_down() or (fighter.carry and fighter.carry.is_held()) or not _block_down:
+	# Keep a raised guard through blockstun; drop it when down, held or
+	# reacting, or when it was broken (_on_guard_broken).
+	if fighter.is_down() or (fighter.carry and fighter.carry.is_held()) \
+			or fighter.is_reacting() or fighter.is_lifted():
 		_want_guard = false
-		_dodge_hold_until = -INF
+		_guard_until = 0.0
 		_tap_guard_until = -INF
-		_apply_guard()
+	if not _want_guard:
+		_apply_guard()  # only ever lowers it here
 	_has_move = false
 	_following = false
 	_string_rest.clear()
-	_counter_pending = false
-	_counter_after_parry = false
+	_answer_deadline = INF
 	_fetch_target = null
 	if AttackDirector.has_token(fighter) and not _is_attacking():
 		AttackDirector.release_token(fighter)
@@ -690,7 +718,7 @@ func _while_disabled() -> void:
 func _on_dead() -> void:
 	fighter.move_input = Vector3.ZERO
 	_want_guard = false
-	_dodge_hold_until = -INF
+	_answer_pending = false
 	_apply_guard()
 	if has_stick():
 		_drop_stick(Vector3.ZERO)
@@ -924,8 +952,6 @@ func _do_ring(delta: float, player: Fighter) -> void:
 	goal = _route(goal, center)
 	var v := _seek(goal)
 	v += tangent * (strafe * _strafe_sign + spread * 0.8)
-	if _time < _sidestep_until:
-		v = _sidestep_dir
 	_finish_move(v, center, true)
 	_face(center)
 
@@ -1014,7 +1040,7 @@ func _tick_request(delta: float, player: Fighter) -> void:
 	_was_near = near
 	if near or engaged:
 		_interval_left -= delta
-	var urgent := _counter_pending or _time < _punish_until or _brawler_wants_grab()
+	var urgent := _answer_pending or _time < _punish_until or _brawler_wants_grab()
 	if not urgent and (_interval_left > 0.0 or not (near or engaged)):
 		return
 	if _fetch_target != null:
@@ -1024,9 +1050,9 @@ func _tick_request(delta: float, player: Fighter) -> void:
 	var max_dist := SHIELD_REQUEST_DIST if fighter.archetype == &"shield" else REQUEST_MAX_DIST
 	if not fighter.archetype in [&"thrower", &"brute", &"heavy"] and dist > max_dist:
 		return
-	# Only the Duelist's counter / whiff punish skip the crowd pacing; a
-	# Brawler punishing a blocker skips its interval and the turn order.
-	if AttackDirector.request_token(fighter, _counter_pending or _time < _punish_until, _brawler_wants_grab()):
+	# Only the Duelist's answer to a broken guard / whiff punish skip the crowd
+	# pacing; a Brawler punishing a blocker skips its interval and the turn order.
+	if AttackDirector.request_token(fighter, _answer_pending or _time < _punish_until, _brawler_wants_grab()):
 		_begin_turn(dist, player)
 	else:
 		_interval_left = maxf(_interval_left, REQUEST_RETRY)
@@ -1051,6 +1077,7 @@ func _do_token_turn(delta: float, player: Fighter) -> void:
 		_begin_turn(dist, player)
 	if _approach_time == 0.0:
 		_best_dist = INF
+		_progress_best = INF
 	_approach_time += delta
 	if _following:
 		_do_followup(dist, player, downed)
@@ -1075,6 +1102,8 @@ func _do_token_turn(delta: float, player: Fighter) -> void:
 	var dir := to_player.normalized() if to_player.length() > 0.01 else fighter.get_forward()
 	_want_guard = _guard_wanted(dist, true)
 	_face(center)
+	if dist > max_r and _approach_stalled(dist, center) and dist <= max_r + STALL_SWING_REACH:
+		max_r = dist  # blocked short of range: swing from here (the lunge closes in)
 	if dist > max_r:
 		_in_range_time = 0.0
 		var goal := _route(_approach_goal(center, dir, max_r * 0.75), center)
@@ -1093,11 +1122,22 @@ func _do_token_turn(delta: float, player: Fighter) -> void:
 		return
 	fighter.move_input = Vector3.ZERO
 	_in_range_time += delta
-	if _time < _resume_at or not fighter.can_act() or _time < _tap_guard_until:
+	if _time < _resume_at or not fighter.can_act() or _time < _tap_guard_until or _time < _guard_until:
 		return
 	if fighter.get_forward().dot(dir) < FACE_TOLERANCE and _in_range_time < FACE_WAIT_MAX:
 		return
 	_try_start(downed)
+
+## The token approach has stalled: less than STALL_PROGRESS closer for
+## STALL_TIME while the player stood (moved under STALL_PLAYER_MOVE). Real
+## progress, or a player on the move, restarts the clock.
+func _approach_stalled(dist: float, player_pos: Vector3) -> bool:
+	if dist < _progress_best - STALL_PROGRESS or _flat(player_pos - _progress_player).length() > STALL_PLAYER_MOVE:
+		_progress_best = dist
+		_progress_at = _time
+		_progress_player = player_pos
+		return false
+	return _time - _progress_at >= STALL_TIME
 
 ## A string's next hit: it swings from where it stands (the first hit's lunge
 ## closed in), waiting at most STRING_WAIT_MAX for a spaced slot.
@@ -1126,6 +1166,9 @@ func _try_start(downed: bool) -> void:
 	_tell_move = _move_id
 	var started := fighter.combat != null and fighter.combat.start_enemy_attack(_move_id, startup)
 	if started:
+		last_start_dist = _dist_to(_get_player()) if _get_player() != null else 0.0
+		if not _following and not downed and last_start_dist > float(MOVE_RANGE.get(_move_id, 1.5)) + RANGE_SLACK:
+			stall_swings += 1
 		var tta := fighter.combat.time_to_active()
 		AttackDirector.notify_attack_started(fighter, tta if is_finite(tta) else startup)
 		attacks_started += 1
@@ -1141,12 +1184,11 @@ func _try_start(downed: bool) -> void:
 			_string_rest.clear()
 		if not _string_rest.is_empty():
 			AttackDirector.hold_for_followup(fighter)
-		if _counter_pending and _counter_after_parry:
-			parry_counters += 1
-		_counter_after_parry = false
+		if _answer_pending and _move_id == GUARD_BREAK_ANSWER.get(fighter.archetype, &""):
+			guard_answers += 1
 		_has_move = false
 		_following = false
-		_counter_pending = false
+		_answer_pending = false
 		_punish_until = 0.0
 		attack_launched.emit(_move_id)
 	else:
@@ -1183,8 +1225,7 @@ func _give_up_token() -> void:
 	_has_move = false
 	_following = false
 	_string_rest.clear()
-	_counter_pending = false
-	_counter_after_parry = false
+	_answer_pending = false
 	_interval_left = REQUEST_RETRY * 2.0
 
 ## The attack interval runs start to start: the time the attack took counts.
@@ -1226,8 +1267,9 @@ func _pick_move(dist: float, _player: Fighter, downed := false) -> StringName:
 				if dist >= 3.0 and _rng.randf() < 0.75:
 					pick = &"e_charge"  # a shoulder charge: fine with a broken arm too
 			&"duelist":
-				if _counter_pending:
-					pick = &"e_hook" if not _arm_broken else &"e_kick"
+				if _answer_pending:
+					var answer: StringName = GUARD_BREAK_ANSWER[&"duelist"]
+					pick = answer if not _arm_broken else &"e_kick"
 				elif _time < _punish_until:
 					pick = &"e_kick"  # a whiff is punished with a launch
 				elif _player_block_time > 0.5 and _rng.randf() < 0.7 and not _arm_broken:
@@ -1377,13 +1419,12 @@ func _brawler_wants_grab() -> bool:
 		return false
 	return _player_block_time > float(fighter.config.get("grab_blocker_after", 1.0))
 
-# --- Reactions to the player's strikes (Round 5) -------------------------------
+# --- Guarding the player's strikes ------------------------------------------------
 
-## B: a strike's startup began. A sprint attack aimed at us from further than
-## Tuning.SIDESTEP_SPRINT_MIN_DIST: sidestep it Tuning.SIDESTEP_SPRINT_CHANCE of
-## the time (heavies never). A tapped strike (charge level 0) aimed at us:
+## B: a strike's startup began. A tapped strike aimed at us (is_tapped_strike):
 ## guard it with the archetype's "guard_chance" (grunts: Tuning.GUARD_TAP_CHANCE).
-func _on_strike_started(attacker: Node3D, target: Node3D, _move: StringName, sprint: bool, charge_level: int) -> void:
+## Round 7 removed sidestepping the player's sprint strikes.
+func _on_strike_started(attacker: Node3D, target: Node3D, move: StringName, _sprint: bool, charge_level: int) -> void:
 	if target != fighter or not attacker is Fighter or attacker == fighter:
 		return
 	var a := attacker as Fighter
@@ -1391,39 +1432,23 @@ func _on_strike_started(attacker: Node3D, target: Node3D, _move: StringName, spr
 		return
 	if _is_impaired() or _is_attacking():
 		return
-	if sprint and _can_sidestep() and _dist_to(a) > Tuning.SIDESTEP_SPRINT_MIN_DIST:
-		if _rng.randf() < Tuning.SIDESTEP_SPRINT_CHANCE:
-			_sprint_sidestep(a)
-			return
 	var guard_chance := float(fighter.config.get("guard_chance", 0.0))
-	if charge_level == 0 and guard_chance > 0.0:
+	if guard_chance > 0.0 and is_tapped_strike(move, charge_level):
 		# Already guarding (the string goes on): keep it up; else roll.
 		if _time < _tap_guard_until or _rng.randf() < guard_chance:
 			_tap_guard(a)
 
-func _can_sidestep() -> bool:
-	return bool(fighter.config.get("sidesteps_sprint", false)) and not fighter.is_heavy() \
-		and fighter.can_act()
+## A strike a tap guard is raised against: Round 7's punch string taps (jab,
+## cross, hook: Tuning.R7_MOVES "guard_break" false); for older move ids, a
+## Round 5 strike at charge level 0. Heavies, the gut punch, the uppercut and
+## the kicks break a guard (B), so a grunt does not raise one against them.
+static func is_tapped_strike(move: StringName, charge_level := 0) -> bool:
+	if Tuning.R7_MOVES.has(move):
+		return not bool(Tuning.R7_MOVES[move].get("guard_break", false))
+	return charge_level == 0
 
-## Step SPRINT_SIDESTEP_DIST to the side with room, out of the sprint
-## attack's line (P's &"sidestep" pose when it exists).
-func _sprint_sidestep(a: Fighter) -> void:
-	var away := _flat(_pos() - a.get_ground_position())
-	if away.length() < 0.05:
-		away = -fighter.get_forward()
-	away = away.normalized()
-	var side := Vector3(-away.z, 0.0, away.x) * (1.0 if _rng.randf() < 0.5 else -1.0)
-	if not _clear_line(_pos(), _pos() + side * SPRINT_SIDESTEP_DIST):
-		side = -side
-	_sidestep_dir = side
-	_sidestep_until = _time + SPRINT_SIDESTEP_TIME
-	fighter.knockback(side * (SPRINT_SIDESTEP_DIST / SPRINT_SIDESTEP_TIME), SPRINT_SIDESTEP_TIME)
-	_face(a.get_ground_position())
-	if fighter.animator and PoseLibrary.has_move(&"sidestep"):
-		fighter.animator.play_timed(&"sidestep", SPRINT_SIDESTEP_TIME)
-	sidesteps += 1
-
-## Raise the guard now and hold it until the strike's active frames are past.
+## Raise the guard now and hold it until the strike's active frames are past
+## (a string extends it, but one spell never outlasts TAP_GUARD_MAX).
 func _tap_guard(a: Fighter) -> void:
 	var tta := a.combat.time_to_active() if a.combat else 0.1
 	if not is_finite(tta):
@@ -1431,7 +1456,8 @@ func _tap_guard(a: Fighter) -> void:
 	var hold := minf(tta * Engine.time_scale + Tuning.frames(4.0) + TAP_GUARD_AFTER, TAP_GUARD_MAX)
 	if _time >= _tap_guard_until:
 		tap_guards += 1
-	_tap_guard_until = maxf(_tap_guard_until, _time + hold)
+		_tap_guard_since = _time
+	_tap_guard_until = minf(maxf(_tap_guard_until, _time + hold), _tap_guard_since + TAP_GUARD_MAX)
 	_face(a.get_ground_position())
 	_want_guard = true
 	_apply_guard()
@@ -1449,12 +1475,12 @@ func _guard_wanted(dist: float, with_token: bool) -> bool:
 		&"brawler":
 			return not with_token and dist < BRAWLER_GUARD_DIST
 		&"duelist":
-			return _time < _block_until
+			return _time < _guard_until
 	return false
 
 ## Press / release BLOCK on changes of the wanted guard state only.
 func _apply_guard() -> void:
-	var want := _want_guard or AttackDirector.now() < _dodge_hold_until
+	var want := _want_guard
 	if want == _block_down:
 		return
 	_block_down = want
@@ -1507,7 +1533,7 @@ func _update_flee() -> void:
 			_has_move = false
 			_following = false
 			_string_rest.clear()
-			_counter_pending = false
+			_answer_pending = false
 			if AttackDirector.has_token(fighter) and not _is_attacking():
 				AttackDirector.release_token(fighter)
 		GameEvents.fleeing_changed.emit(fighter, want != &"")
@@ -1558,12 +1584,17 @@ func _do_flee(player: Fighter) -> void:
 
 ## A hit on us: a string stops; a ground strike finishes a fleeing enemy (the
 ## doc's rule; B may already deal it as a kill); a stagger or more knocks the
-## stick out of a stick enemy's hand.
+## stick out of a stick enemy's hand. A strike that lands while our guard is
+## up broke it (B decides which moves do): the Duelist answers with a hook
+## once he can act again.
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null or info.victim != fighter:
 		return
 	_string_rest.clear()
 	_following = false
+	if _block_down and info.attacker is Fighter and info.attacker != fighter and not fighter.is_dead() \
+			and (info.attacker as Fighter).team != fighter.team:
+		_on_guard_broken()
 	if is_fleeing() and info.ground_strike and not fighter.is_dead():
 		fighter.apply_damage(fighter.hp, &"ground_strike", info)
 	if has_stick() and not fighter.is_dead():
@@ -1616,7 +1647,6 @@ func _build_stick() -> void:
 	_stick.mesh = mesh
 	_stick.material_override = _stick_mat
 	_stick.layers = Layers.VIS_CHARACTERS
-	_stick.add_to_group(FOCUS_KEEP_GROUP)  # while held; the dropped prop is an ordinary prop
 	var t := deg_to_rad(STICK_TILT)
 	var axis := Vector3(0.0, -sin(t), -cos(t))
 	var fist := att.global_transform.affine_inverse() * fighter.rig.get_fist_position(&"RightHand") \
@@ -1656,7 +1686,6 @@ func _drop_stick(push_dir: Vector3) -> void:
 	prop.name = "DroppedStick"
 	if _prop_is_bare(prop):
 		# The prop built nothing for &"stick": dress it with this mesh.
-		mesh_node.remove_from_group(FOCUS_KEEP_GROUP)
 		mesh_node.get_parent().remove_child(mesh_node)
 		prop.add_child(mesh_node)
 		mesh_node.transform = Transform3D()
@@ -1705,23 +1734,41 @@ func _watch_player(player: Fighter) -> void:
 	if player != null and player.combat and fighter.config.has("dodge_chance"):
 		player.combat.attack_incoming.connect(_on_player_attack_incoming)
 
-func _dodge_chance() -> float:
-	if dodge_chance_override >= 0.0:
-		return dodge_chance_override
+## The archetype's read chance (config "dodge_chance" [easy, normal]: the Duelist's).
+func _read_chance() -> float:
+	if read_chance_override >= 0.0:
+		return read_chance_override
 	var chances: Array = fighter.config.get("dodge_chance", [0.0, 0.0])
 	return float(chances[clampi(Tuning.difficulty, 0, chances.size() - 1)])
 
-## The Round 5 Defence (H) owns parry / teleport for this fighter.
-func _defence_on() -> bool:
-	return fighter.defence != null and fighter.defence.is_enabled()
+## Read chance against a player move repeated `repeats` times within
+## MASH_WINDOW: the archetype's chance, +MASH_BONUS per repeat, capped at MASH_CAP.
+func get_read_chance(repeats := 0) -> float:
+	if read_chance_override >= 0.0:
+		return read_chance_override
+	var base := _read_chance()
+	if repeats <= 0:
+		return base
+	return maxf(base, minf(base + MASH_BONUS * repeats, MASH_CAP))
+
+## The anti-mash family of a player move: every press of the punch button
+## (Round 7's jab, cross, hook and their heavies) is one move; older ids drop
+## their string number (jab1, jab2 -> jab).
+static func move_family(move: StringName) -> String:
+	if move in Tuning.R7_PUNCH_STRING or Tuning.R7_HEAVY_OF.values().has(move):
+		return "punch"
+	return String(move).rstrip("0123456789")
 
 ## The player started an attack: maybe read it (Duelist). Repeating the same
-## move within MASH_WINDOW raises the chance (anti-mash). A read is a Block
-## tap just before the hit: H's parry (Round 5 Defence; GameEvents.parried
-## starts the counter) or, with the Defence off (debug), the Upgrade 2
-## perfect dodge.
+## move within MASH_WINDOW raises the chance (anti-mash). A read raises the
+## guard at once (Block held: the AI guard; never a timed tap) and holds it
+## until GUARD_AFTER_ACTIVE past the strike's first active frame; he does not
+## start an attack meanwhile. While the guard is up (blockstun included) every
+## further strike is read and extends it, so a string meets a raised guard.
+## B's guard stops tapped punches; heavies, the gut punch, the uppercut and
+## kicks break it, and he answers with a hook (_on_guard_broken).
 func _on_player_attack_incoming(move: StringName, time_to_active: float) -> void:
-	var family := String(move).rstrip("0123456789")
+	var family := move_family(move)
 	var repeats := 0
 	var kept: Array = []
 	for m: Array in _player_moves:
@@ -1731,162 +1778,89 @@ func _on_player_attack_incoming(move: StringName, time_to_active: float) -> void
 				repeats += 1
 	kept.append([_time, family])
 	_player_moves = kept
-	if mode != Mode.FIGHT or fighter.is_dead() or _is_impaired() or _is_attacking():
+	if mode != Mode.FIGHT or fighter.is_dead() or _is_attacking() or not _can_guard_now():
 		return
 	var player := _get_player()
 	if player == null:
 		return
 	var to_me := _flat(_pos() - player.get_ground_position())
-	if to_me.length() > DODGE_RANGE:
+	if to_me.length() > READ_RANGE:
 		return
-	if to_me.length() > 0.05 and player.get_forward().dot(to_me.normalized()) < DODGE_FACING:
+	if to_me.length() > 0.05 and player.get_forward().dot(to_me.normalized()) < READ_FACING:
 		return
-	if _rng.randf() < get_dodge_chance(repeats):
-		var delay := time_to_active - DODGE_LEAD
-		if delay <= 0.0:
-			_dodge_press()
-		else:
-			TimeDirector.real_timer(delay).timeout.connect(_dodge_press)
-	elif dodge_chance_override < 0.0 and time_to_active > Tuning.PARRY_WINDOW + 0.05 \
-			and _rng.randf() < DUELIST_BLOCK_CHANCE[clampi(Tuning.difficulty, 0, 1)]:
-		# A plain block, pressed now (outside the parry window). Not against
-		# attacks faster than the window: that press would be a parry.
-		_block_until = _time + time_to_active + BLOCK_AFTER_ACTIVE
-		_want_guard = true
-		_apply_guard()
+	var guarding := _block_down and _time < _guard_until
+	if not guarding and _rng.randf() >= get_read_chance(repeats):
+		return
+	var tta := time_to_active if is_finite(time_to_active) else 0.0
+	_guard_until = maxf(_guard_until, _time + tta * Engine.time_scale + GUARD_AFTER_ACTIVE)
+	guard_reads += 1
+	_want_guard = true
+	_face(player.get_ground_position())
+	_apply_guard()
 
-## Dodge chance against a player move repeated `repeats` times within
-## MASH_WINDOW: the Tuning chance, +MASH_BONUS per repeat, capped at MASH_CAP.
-func get_dodge_chance(repeats := 0) -> float:
-	if dodge_chance_override >= 0.0:
-		return dodge_chance_override
-	var base := _dodge_chance()
-	if repeats <= 0:
-		return base
-	return maxf(base, minf(base + MASH_BONUS * repeats, MASH_CAP))
+## Free to raise (or keep) a guard: not down, held, reacting or hit-stunned
+## (a blockstun is fine: the guard is up).
+func _can_guard_now() -> bool:
+	if fighter.is_down() or fighter.is_reacting() or fighter.is_lifted():
+		return false
+	if fighter.carry != null and fighter.carry.is_held():
+		return false
+	var c := fighter.combat
+	return c == null or not c.is_hit_stunned()
 
-## Block tap just before the player's strike lands: B's perfect dodge
-## (Upgrade 2) or H's parry (Round 5 Defence).
-func _dodge_press() -> void:
-	if not is_instance_valid(fighter) or fighter.is_dead() or _is_impaired() or _is_attacking():
+## Our raised guard let a player strike through (B decides the guard breaks:
+## heavies, the gut punch, the uppercut, kicks). The guard drops; an archetype
+## with a GUARD_BREAK_ANSWER (the Duelist) answers with it through an urgent
+## token once he can act again (_tick_answer).
+func _on_guard_broken() -> void:
+	guard_breaks += 1
+	_guard_until = 0.0
+	_tap_guard_until = -INF
+	_want_guard = false
+	if not GUARD_BREAK_ANSWER.has(fighter.archetype) or is_fleeing():
 		return
-	if fighter.combat == null:
-		return
-	if _block_down:
-		fighter.combat.release(CombatController.Action.BLOCK)
-	fighter.combat.press(CombatController.Action.BLOCK)
-	_block_down = true
-	_dodge_hold_until = AttackDirector.now() + DODGE_HOLD
-
-## Upgrade 2 only (H's Defence off, debug): after a perfect dodge, with Focus
-## and B's start_counter, teleport behind the player once visible again
-## (orange tell, back kick); without, a visible sidestep (>= 1 m) and, once
-## it has reappeared, a quick hook through the normal token turn.
-func _on_perfect_dodge(defender: Node3D, attacker: Node3D) -> void:
-	if defender != fighter or _defence_on():
-		return
-	_counter_pending = true
-	_counter_deadline = _time + COUNTER_WINDOW
-	_counter_teleport = fighter.combat != null and fighter.combat.has_method(&"start_counter") \
-		and fighter.focus + 1e-4 >= Tuning.FOCUS_COST and attacker is Fighter
-	if _counter_teleport:
-		_counter_at = _time + 0.05
-		return
-	var away := _flat(_pos() - attacker.global_position) if attacker else Vector3.ZERO
-	if away.length() < 0.05:
-		away = -fighter.get_forward()
-	away = away.normalized()
-	var side := Vector3(-away.z, 0.0, away.x) * (1.0 if _rng.randf() < 0.5 else -1.0)
-	# Prefer the side with room (no wall within 1.5 m).
-	if not _clear_line(_pos(), _pos() + side * 1.5):
-		side = -side
-	_sidestep_dir = side
-	_sidestep_until = _time + SIDESTEP_TIME
-	if fighter.has_method(&"knockback"):
-		fighter.knockback(side * SIDESTEP_SPEED, SIDESTEP_TIME)
-	_counter_at = _time + SIDESTEP_TIME + 0.02
-
-## Round 5 Defence: we parried the player (he is staggered). Counter the
-## moment he can be attacked again (never in hitstun): with Focus and B's
-## start_counter, DUELIST_TELEPORT_SHARE of the time the teleport counter
-## (behind him, orange tell, back kick); otherwise a quick hook through an
-## urgent token.
-func _on_parried(defender: Node3D, attacker: Node3D) -> void:
-	if defender != fighter:
-		return
-	parries_seen += 1
-	var share := teleport_share_override if teleport_share_override >= 0.0 else DUELIST_TELEPORT_SHARE
-	_has_move = false  # a move picked before the parry gives way to the counter
+	_has_move = false  # a move picked before the break gives way to the answer
 	_string_rest.clear()
 	_following = false
-	_counter_pending = true
-	_counter_after_parry = true
-	_counter_teleport = fighter.combat != null and fighter.combat.has_method(&"start_counter") \
-		and fighter.focus + 1e-4 >= Tuning.TELEPORT_COST and attacker is Fighter and _rng.randf() < share
-	_counter_deadline = _time + COUNTER_WINDOW
-	_counter_at = _time + 0.02
+	_answer_pending = true
+	_answer_deadline = INF
 
-## The player tapped Block with nothing in its window: his parry is locked
-## for Tuning.PARRY_LOCKOUT. A Duelist in reach punishes the mash.
-func _on_parry_whiffed(defender: Node3D) -> void:
+## The answer to a broken guard, from the first tick he can act again: close
+## in to ANSWER_CLOSE_IN of the hook's range and ask for an urgent token (no
+## crowd pacing); the normal token turn then swings the hook. Given up after
+## ANSWER_WINDOW. Returns true while it owns this frame.
+func _tick_answer(player: Fighter) -> bool:
+	if not is_finite(_answer_deadline):
+		_answer_deadline = _time + ANSWER_WINDOW
+	if _time > _answer_deadline or player.is_dead():
+		_answer_pending = false
+		return false
+	if _is_attacking() or AttackDirector.has_token(fighter):
+		return false  # the normal token turn swings the hook
+	var center := player.get_ground_position()
+	var d := _dist_to(player)
+	var r: float = MOVE_RANGE[&"e_hook"] * ANSWER_CLOSE_IN
+	_want_guard = false
+	if d > r:
+		var to := _flat(center - _pos())
+		var dir := to.normalized() if to.length() > 0.01 else fighter.get_forward()
+		var goal := _route(_approach_goal(center, dir, r), center)
+		_finish_move(_flat(goal - _pos()).normalized(), center, false)
+	else:
+		fighter.move_input = Vector3.ZERO
+	_face(center)
+	if AttackDirector.request_token(fighter, true):
+		_begin_turn(d, player)
+	return true
+
+## Round 7: the player pressed Counter with no counterable attack coming (his
+## Counter is locked for Tuning.R7_COUNTER_WHIFF_LOCK). A Duelist in reach
+## punishes it like a whiff.
+func _on_counter_whiffed(defender: Node3D) -> void:
 	if fighter.archetype != &"duelist" or defender == null or defender != _get_player():
 		return
 	if mode == Mode.FIGHT and not is_fleeing() and _dist_to(defender as Fighter) < PUNISH_RANGE:
 		_punish_until = _time + PUNISH_WINDOW
-
-## Runs the post-dodge counter. Returns true while it owns this frame.
-func _tick_counter(player: Fighter) -> bool:
-	if _time > _counter_deadline or player.is_dead():
-		_counter_pending = false
-		_counter_after_parry = false
-		return false
-	var vanished := fighter.combat != null and fighter.combat.has_method(&"is_vanished") \
-		and fighter.combat.is_vanished()
-	if _time < _counter_at or vanished:
-		# Dodging: the sidestep slide (or the vanish) runs; no attack yet.
-		fighter.move_input = Vector3.ZERO
-		_face(player.get_ground_position())
-		return true
-	if not _counter_teleport:
-		if AttackDirector.has_token(fighter):
-			return false  # the normal token turn swings the quick hook
-		# No turn yet (the parried player reels: never swung at in hitstun).
-		# Close in meanwhile, so the hook comes the moment he can be hit.
-		var center := player.get_ground_position()
-		var d := _dist_to(player)
-		var r: float = MOVE_RANGE[&"e_hook"] * COUNTER_CLOSE_IN
-		_want_guard = false
-		if d > r:
-			var to := _flat(center - _pos())
-			var dir := to.normalized() if to.length() > 0.01 else fighter.get_forward()
-			var goal := _route(_approach_goal(center, dir, r), center)
-			_finish_move(_flat(goal - _pos()).normalized(), center, false)
-		else:
-			fighter.move_input = Vector3.ZERO
-		_face(center)
-		if AttackDirector.request_token(fighter, true):
-			_begin_turn(d, player)
-		return true
-	if _is_attacking() or not fighter.can_act():
-		return true
-	if not AttackDirector.request_token(fighter, true):
-		return true
-	var started: bool = fighter.combat.start_counter(player, COUNTER_TELL)
-	if not started:
-		_counter_teleport = false  # fall back to the hook
-		return false
-	var tta := fighter.combat.time_to_active()
-	AttackDirector.notify_attack_started(fighter, tta if is_finite(tta) else COUNTER_TELL)
-	attacks_started += 1
-	counters_started += 1
-	if _counter_after_parry:
-		parry_counters += 1
-	_counter_after_parry = false
-	_attack_started_at = _time
-	_counter_pending = false
-	_has_move = false
-	attack_launched.emit(&"counter")
-	return true
 
 func _on_attack_whiff(attacker: Node3D, _move: StringName) -> void:
 	if fighter.archetype != &"duelist" or attacker == null or attacker != _get_player():
@@ -2400,7 +2374,7 @@ func _avoid_walls(v: Vector3, probe: float) -> Vector3:
 ## sidestep, a hitstop freeze) never counts as stuck.
 func _track_stall(delta: float) -> void:
 	var free := not fighter.is_dead() and not _is_impaired() and not _is_attacking() and not fighter.is_frozen() \
-		and not (fighter.combat != null and fighter.combat.has_forced_velocity()) and _time >= _sidestep_until
+		and not (fighter.combat != null and fighter.combat.has_forced_velocity())
 	if _sw_start == Vector3.INF:
 		_sw_start = _pos()
 	_sw_t += delta

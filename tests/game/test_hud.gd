@@ -1,11 +1,14 @@
 extends Node
 ## HUD: world popups (WALL SLAM, THROUGH N WALLS, ARMOR), staged breaches do
-## not announce WALL BREAK, the duel opponent bar tracks HP, popups expire; and
-## the Round 5 HUD: Focus bars, parry / teleport / sidestep feedback (EARLY /
-## LATE from the wind-ups), the counter-bonus cue, off-screen arrows (orange
-## strike, blue grab, gone at the first active frame), the sprint marker, the
-## F3 debug overlay (P and its parts) mirroring Tuning.debug_overlay, help rows,
-## and the layer above ScreenFX.
+## not announce WALL BREAK, the duel opponent bar tracks HP, popups expire, the
+## layer sits above ScreenFX, HP on the 100 scale, off-screen arrows (orange
+## strike, blue grab or charge, gone at the first active frame), and the Round 7
+## F3 debug overlay (move, string, chain, glide, the target's reaction state,
+## the last hit's Round 7 fields) mirroring Tuning.debug_overlay. Round 7
+## removed the Focus bars, the reticle and lock-on marker, the charge meter,
+## the counter-bonus cue, parry feedback and the sprint marker: none is built.
+## (Combo counter: test_hud_combo. Counter prompts: test_hud_prompts. Help:
+## test_help_controls.)
 
 var _fails := 0
 
@@ -36,7 +39,7 @@ func _has(hud: HUD, text: String) -> bool:
 func _run() -> void:
 	var world := Node3D.new()
 	add_child(world)
-	# A floor, so the dummies stand where they were put (lock-on, arrows, markers).
+	# A floor, so the dummies stand where they were put (arrows, prompts).
 	var floor_body := StaticBody3D.new()
 	floor_body.collision_layer = Layers.WORLD
 	floor_body.collision_mask = 0
@@ -144,56 +147,13 @@ func _run() -> void:
 	_check(hud._opp_root.visible, "duel opponent bar shown")
 	var start_hp := enemy.hp
 	enemy.apply_damage(100.0, &"test")
-	enemy.add_focus(1.5)
 	await _frames(3)
 	_check(enemy.hp < start_hp and hud._opp_hp_label.text == "%d" % ceili(enemy.hp), "opponent HP label follows damage (%s)" % hud._opp_hp_label.text)
 	_check(absf(hud._opp_bars.hp - enemy.hp / enemy.max_hp) < 0.01 and hud._opp_bars.hp_delayed > hud._opp_bars.hp,
 		"opponent bar drops with a trailing damage bar")
-	_check(absf(hud._opp_bars.focus - enemy.focus) < 0.01, "opponent Focus pips follow focus (%.2f)" % enemy.focus)
 	enemy.queue_free()
 	await _frames(3)
 	_check(hud._opp_hp_label.text == "0", "freed opponent shows an empty bar without errors")
-
-	# --- Upgrade 2: Focus meter, reticle, combo counter, charge levels ---------
-	var stranger := Node3D.new()  # a live non-player node for "enemy" emits (enemy is freed above)
-	world.add_child(stranger)
-	_check(hud._reticle.visible, "centre reticle shown")
-	var rc := hud._reticle.get_global_rect().position
-	var vsz := get_viewport().get_visible_rect().size
-	_check(rc.distance_to(vsz * 0.5) < 2.0, "reticle at the screen centre")
-	TimeDirector.begin_focus()
-	await _frames(3)
-	_check(hud._bars.focus_active and hud._focus_label.text == "FOCUS MODE", "Focus meter shows Focus mode")
-	_check(hud._reticle.focus, "reticle highlights in Focus")
-	await _wait_real(0.5)
-	var left := hud._bars.mode_left
-	_check(left > 0.6 and left < 0.85, "Focus mode's 2 s drains under the bars (%.2f left after 0.5 s)" % left)
-	TimeDirector.end_focus()
-	await _wait_real(0.4)
-	_check(not hud._bars.focus_active and hud._focus_label.text == "FOCUS" and hud._bars.mode_left < 0.0, "Focus meter back to idle")
-
-	GameEvents.combo_progress.emit(player, 4, 0.8)
-	await _frames(2)
-	_check(hud.get_combo_text() == "4 HITS" and hud._combo_sub.text == "DMG 80%", "combo counter '4 HITS' / 'DMG 80%%'")
-	GameEvents.combo_progress.emit(stranger, 6, 0.6)
-	await _frames(1)
-	_check(hud.get_combo_text() == "4 HITS", "enemy combos are not shown")
-	GameEvents.combo_ended.emit(player, 4)
-	await _wait_real(0.9)
-	_check(hud.get_combo_text() == "", "combo counter fades after combo_ended")
-
-	GameEvents.charge_started.emit(player, &"punch")
-	await _frames(2)
-	_check(hud.get_charge_state()["visible"] and hud.get_charge_state()["charging"], "charge meter shows on charge_started")
-	GameEvents.charge_level_changed.emit(player, 2)
-	await _frames(2)
-	_check(hud.get_charge_state()["level"] == 2 and hud._charge.level == 2, "charge level 2 shown")
-	GameEvents.charge_released.emit(player, &"punch", 2)
-	await _wait_real(0.6)
-	_check(not hud.get_charge_state()["visible"], "charge meter hides after the release")
-	GameEvents.charge_started.emit(stranger, &"e_heavy")
-	await _frames(2)
-	_check(not hud.get_charge_state()["visible"], "enemy charges are not shown")
 
 	# --- Round 3: strike-made holes announce WALL BREAK once, not on every jab ----
 	var panel := _FakePanel.new()
@@ -224,36 +184,18 @@ func _run() -> void:
 	var vh := get_viewport().get_visible_rect().size.y
 	_check(pop_center_y < vh * 0.25 and pop_center_y > vh * 0.12, "WALL BREAK pop in the upper band (%.0f%% of height)" % (100.0 * pop_center_y / vh))
 
-	# --- Round 4: lock-on marker and locked reticle ---------------------------------
-	var rig := CameraRig.new()
-	rig.target = player
-	add_child(rig)
-	var far := FighterFactory.spawn_dummy(world, &"grunt", Transform3D(Basis.looking_at(Vector3.BACK), player.global_position + Vector3(0, 0, -7)))
-	await _frames(3)
-	rig.snap_behind()
-	await _wait_real(0.3)
-	rig._set_lock(far)
-	await _wait_real(0.6)
-	_check(hud.is_lock_marker_visible(), "lock marker shown on the locked target")
-	_check(hud._lock_marker.half >= HUD.LOCK_MARKER_MIN, "marker readable at 7 m (half-size %.0f px)" % hud._lock_marker.half)
-	_check(hud._lock_marker.center.distance_to(rig.get_camera().unproject_position(far.get_aim_point())) < 4.0, "marker on the target's chest")
-	_check(hud._reticle.locked, "reticle shows the lock")
-	rig.unlock()
-	await _frames(3)
-	_check(not hud.is_lock_marker_visible() and not hud._reticle.locked, "unlocked: no marker")
-	rig.queue_free()
-	far.queue_free()
-	await _frames(2)
-	cam.make_current()
-	await _round5(hud, world, player, cam)
+	await _round7(hud, world, player, cam)
 
-# --- Round 5 -----------------------------------------------------------------------------
-func _round5(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
+# --- Layer, HP, arrows, Round 7 debug overlay --------------------------------------------
+func _round7(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	var foe := FighterFactory.spawn_dummy(world, &"grunt", Transform3D(Basis(), Vector3(0, 0.05, -2)))
 	var behind := FighterFactory.spawn_dummy(world, &"grunt", Transform3D(Basis(), Vector3(3, 0.05, 14)))
+	# The wall breaks above were granted slow time; wind-up clocks run in game
+	# time, so start the arrow checks at full speed.
+	TimeDirector.reset()
 	await _frames(4)
 
-	# Layer: above every ScreenFX layer, so Focus mode's tint never dims the HUD.
+	# Layer: above every ScreenFX layer, so screen effects never dim the HUD.
 	var fx_top := -1000
 	var fx := get_tree().root.get_node_or_null(^"ScreenFX")
 	for l: CanvasLayer in (fx.find_children("*", "CanvasLayer", true, false) if fx else []):
@@ -266,58 +208,6 @@ func _round5(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	player.hp = player.max_hp
 	await _frames(2)
 	_check(player.max_hp == 100.0 and hud._hp_label.text == "100", "player HP reads 100 (%s)" % hud._hp_label.text)
-
-	# Focus: 3 bars; spending a whole bar flashes it out.
-	player.focus = 2.0
-	await _frames(2)
-	player.focus = 1.0
-	await _frames(2)
-	_check(is_equal_approx(hud._bars.focus, 1.0) and is_equal_approx(hud._bars.ghost_to, 2.0) and is_equal_approx(hud._bars.ghost_from, 1.0),
-		"a spent bar shows as a fading ghost (%.1f -> %.1f)" % [hud._bars.ghost_to, hud._bars.ghost_from])
-	player.focus = 1.0
-
-	# Parry / teleport / sidestep feedback.
-	GameEvents.parried.emit(player, foe)
-	_check(hud._pop_label.text == "PARRY", "parried -> PARRY")
-	GameEvents.teleported.emit(player, Vector3.ZERO, Vector3.ONE, &"counter")
-	_check(hud._pop_label.text == "TELEPORT", "teleported -> TELEPORT")
-	GameEvents.teleported.emit(player, Vector3.ZERO, Vector3.ONE, &"pursuit")
-	_check(hud._pop_label.text == "PURSUIT", "pursuit teleport -> PURSUIT")
-	player.focus = 0.4
-	GameEvents.sidestepped.emit(player, Vector3.RIGHT)
-	await _frames(1)
-	_check(_has(hud, "SIDESTEP  ·  NO FOCUS"), "sidestep without a full bar says so")
-	hud._pop_label.text = ""
-	GameEvents.parried.emit(foe, player)
-	_check(hud._pop_label.text == "", "an enemy's parry is not announced")
-	# Parry whiffs read the wind-ups: EARLY while one is still far from active, LATE just after.
-	GameEvents.attack_tell.emit(foe, &"strike", 0.5)
-	GameEvents.parry_whiffed.emit(player)
-	await _frames(1)
-	_check(_has(hud, "EARLY"), "a Block tap 0.5 s before the hit reads EARLY")
-	GameEvents.attack_active.emit(foe, &"e_jab")
-	GameEvents.parry_whiffed.emit(player)
-	await _frames(1)
-	_check(_has(hud, "LATE"), "a Block tap just after the hit went active reads LATE")
-	await _wait_real(1.0)
-	GameEvents.parry_whiffed.emit(player)
-	await _frames(1)
-	_check(not _has(hud, "EARLY") and not _has(hud, "LATE"), "a whiff with no attack coming shows nothing")
-
-	# Counter bonus cue: live for Tuning.COUNTER_BONUS_TIME, gone when used.
-	GameEvents.counter_bonus_changed.emit(player, 2.5)
-	await _frames(2)
-	_check(is_equal_approx(hud.get_counter_cue(), 2.5) and hud._counter_label.text == "+2.5 COUNTER" and hud._reticle.counter_left > 0.9,
-		"counter bonus cue '+2.5 COUNTER' with a full ring")
-	GameEvents.counter_bonus_changed.emit(foe, 3.0)
-	await _frames(1)
-	_check(is_equal_approx(hud.get_counter_cue(), 2.5), "an enemy's counter bonus is not shown")
-	GameEvents.counter_bonus_changed.emit(player, 0.0)
-	await _frames(2)
-	_check(hud.get_counter_cue() == 0.0 and hud._reticle.counter_left < 0.0, "cue gone when the bonus is used")
-	GameEvents.counter_bonus_changed.emit(player, 3.0)
-	await _wait_real(Tuning.COUNTER_BONUS_TIME + 0.15)
-	_check(hud.get_counter_cue() == 0.0, "cue gone after %.1f s" % Tuning.COUNTER_BONUS_TIME)
 
 	# Off-screen arrows: from the wind-up to the first active frame.
 	_check(not cam.is_position_in_frustum(behind.get_aim_point()), "test enemy is behind the camera")
@@ -340,28 +230,22 @@ func _round5(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	_check(arrows.size() == 1 and (arrows[0]["color"] as Color).is_equal_approx(UIKit.TELL_GRAB), "off-screen grab wind-up: one blue arrow")
 	await _wait_real(0.2 + HUD.ARROW_GRACE + 0.15)
 	_check(hud.get_arrows().is_empty(), "an interrupted wind-up's arrow expires")
+	GameEvents.attack_tell.emit(behind, &"charge", 0.5)
+	await _frames(2)
+	arrows = hud.get_arrows()
+	_check(arrows.size() == 1 and (arrows[0]["color"] as Color).is_equal_approx(UIKit.TELL_GRAB), "off-screen charge (uncounterable): blue arrow")
+	GameEvents.attack_active.emit(behind, &"e_charge")
 	GameEvents.attack_tell.emit(foe, &"strike", 1.0)
 	await _frames(2)
 	_check(hud.get_arrows().is_empty(), "an on-screen wind-up gets no arrow")
 	GameEvents.attack_active.emit(foe, &"e_jab")
 
-	# Sprint marker: white brackets on PlayerController.get_sprint_target().
-	var stub := _SprintStub.new()
-	player.add_child(stub)
-	player.brain = stub
-	stub.target = foe
-	await _wait_real(0.2)
-	_check(hud.get_sprint_marker_target() == foe, "sprint marker on the sprint target")
-	var r := hud.get_sprint_marker_rect()
-	var c := cam.unproject_position(foe.get_aim_point())
-	_check(r.has_point(c) and r.size.x >= HUD.SPRINT_MARKER_MIN * 2.0, "marker brackets the target's chest (%s around %s)" % [r, c])
-	stub.target = null
-	await _frames(2)
-	_check(hud.get_sprint_marker_target() == null, "no sprint target: no marker")
-	player.brain = null
-	stub.queue_free()
+	# Removed Round 5 UI is not built.
+	_check(not ("_reticle" in hud) and not ("_lock_marker" in hud) and not ("_charge" in hud)
+		and not ("_counter_label" in hud) and not ("_sprint_marker" in hud) and not ("_focus_label" in hud)
+		and not ("focus" in hud._bars), "no Focus bars, reticle, lock marker, charge meter, counter-bonus cue or sprint marker")
 
-	# F3 debug overlay: mirrors Tuning.debug_overlay and shows P with its parts.
+	# F3 debug overlay: mirrors Tuning.debug_overlay; shows the Round 7 combat state.
 	var saved_overlay := Tuning.debug_overlay
 	Tuning.debug_overlay = true
 	await _frames(2)
@@ -370,57 +254,51 @@ func _round5(hud: HUD, world: Node3D, player: Fighter, cam: Camera3D) -> void:
 	info.attacker = player
 	info.victim = foe
 	info.move_id = &"cross"
-	info.charge_level = 3
-	info.power_base = 2.0
-	info.speed_bonus = 3.0
-	info.counter_bonus = 2.5
-	info.finisher_bonus = 0.0
-	info.power = 2.0 * 3.2 + 3.0 + 2.5
-	info.tier = Power.tier_of(info.power)
-	info.damage = 25.6
+	info.react = &"snap"
+	info.damage = 7.0
+	info.weight = 0.3
+	info.push = 0.6
+	info.stun = 0.5
+	info.chain_index = 2
 	player.combat.last_dealt = info
-	var b := HUD.power_breakdown(info)
-	_check(is_equal_approx(b["base"], 2.0) and is_equal_approx(b["charge_mult"], 3.2) and is_equal_approx(b["base_part"], 6.4),
-		"P parts: base 2.0 x charge 3.2 = 6.4")
-	var info2 := HitInfo.new()
-	info2.power_base = 6.4  # a producer that stores base x charge in power_base
-	info2.charge_level = 3
-	info2.power = 6.4
-	_check(is_equal_approx(HUD.power_breakdown(info2)["base"], 2.0), "power_base holding base x charge is read back as base 2.0")
 	var text := hud.get_debug_text()
-	print("    overlay:\n      " + "\n      ".join(text.split("\n").slice(0, 6)))
-	_check(text.contains("P 11.90") and text.contains("SEVER") and text.contains("base 2.00 x charge 3.20 (6.40)")
-		and text.contains("speed 3.00") and text.contains("counter 2.50") and text.contains("finisher 0.00"),
-		"overlay shows P 11.90, its parts and the tier")
-	_check(text.contains("sprint_charge") and text.contains("FOCUS") and text.contains("HP 100 / 100"), "overlay shows speed, sprint_charge, Focus and health")
+	var own := text.substr(0, text.find("FPS"))
+	print("    overlay:\n      " + "\n      ".join(own.strip_edges().split("\n")))
+	_check(own.contains("MOVE") and own.contains("STRING     1/3 (next punch: JAB)") and own.contains("CHAIN 0 hits")
+		and own.contains("GLIDE off"), "overlay: move, string position, chain, glide")
+	_check(own.contains("TARGET     %s (last hit)  react " % foe.name), "overlay: the target (falls back to the last hit's victim) and its reaction state")
+	_check(own.contains("LAST HIT   cross") and own.contains("SNAP") and own.contains("w 0.30") and own.contains("push 0.60")
+		and own.contains("stun 0.50") and own.contains("chain #2"), "overlay: the last hit's Round 7 fields")
+	_check(own.contains("HP 100 / 100") and own.contains("SPEED") and own.contains("PROMPTS"), "overlay: speed, health, open prompts")
+	_check(own.contains("UPGRADES   speed cap") and own.contains("teleport") and own.contains("pursuit x"),
+		"overlay: the god-path upgrades (speed cap, ram, teleport, pursuit chain)")
+	var stale := PackedStringArray()
+	for w in ["FOCUS", "sprint_charge", "charge", "P 0."]:
+		if own.contains(w):
+			stale.append(w)
+	_check(stale.is_empty(), "overlay: nothing from removed systems (found: %s)" % ", ".join(stale))
 	var world_line := HUD.world_debug_line()
 	print("    " + world_line)
 	_check(text.contains("WORLD") and world_line.contains("debris") and world_line.contains("/%d" % Tuning.DEBRIS_MAX)
 		and world_line.contains("smashed") and world_line.contains("marks"), "overlay shows debris (cap), clutter smashed and floor marks")
+	# The overlay lines for a live strike (B's values through the contract).
+	var lines := "\n".join(HUD.combat_debug_lines({"move": &"uppercut", "phase": "ACTIVE", "string_index": 2, "chain": 4,
+		"glide": true, "buffered": "punch", "hud_combo": 4, "target": "Grunt3 (combat target)", "target_react": &"fold",
+		"target_left": 0.62, "target_dist": 1.4, "target_down": false, "target_lifted": false}))
+	print("    live strike:\n      " + lines.replace("\n", "\n      "))
+	_check(lines.contains("uppercut") and lines.contains("ACTIVE") and lines.contains("buffered punch")
+		and lines.contains("3/3 (next punch: HOOK)") and lines.contains("CHAIN 4 hits") and lines.contains("GLIDE ON")
+		and lines.contains("Grunt3 (combat target)  react FOLD 0.62 s"), "overlay lines: move, phase, buffer, string, chain, glide, target state")
+	var probe := hud.gather_combat_debug()
+	_check(probe.has("move") and probe.has("string_index") and probe.has("chain") and probe.has("glide") and probe.has("target_react"),
+		"gather_combat_debug reads the contract (%s)" % [probe.keys()])
 	hud.toggle_debug()
 	_check(not hud.is_debug_visible() and not Tuning.debug_overlay, "F3 hides it and clears Tuning.debug_overlay")
 	Tuning.debug_overlay = saved_overlay
 	GameMenus.save_debug_settings()
-
-	# Help rows for the Round 5 controls.
-	var rows := UIKit.control_rows()
-	var by_title := {}
-	for row: Array in rows:
-		by_title[row[0]] = row
-	_check(by_title.has("Light") and by_title.has("Heavy") and by_title.has("Sweep") and by_title.has("Focus"),
-		"help rows: Light, Heavy, Sweep, Focus")
-	if by_title.has("Heavy") and by_title.has("Sweep") and by_title.has("Kick"):
-		_check(String(by_title["Heavy"][1]).contains("RMB") and String(by_title["Heavy"][2]).contains("Y"), "Heavy: RMB / L, Y (%s | %s)" % [by_title["Heavy"][1], by_title["Heavy"][2]])
-		_check(by_title["Sweep"][1] == "S + E" and String(by_title["Kick"][1]).contains("E"), "Sweep: S + E; Kick on E")
-		_check(String(by_title["Block"][3]).contains("parry"), "Block row explains the parry")
 	foe.queue_free()
 	behind.queue_free()
 	await _frames(2)
-
-class _SprintStub extends Node:
-	var target: Fighter
-	func get_sprint_target() -> Fighter:
-		return target if is_instance_valid(target) else null
 
 ## Stand-in for a Destructible with D's round-3 fields.
 class _FakePanel extends Node3D:

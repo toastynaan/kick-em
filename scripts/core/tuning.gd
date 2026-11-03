@@ -291,10 +291,14 @@ static var gore: int = Gore.DISMEMBER
 # =============================================================================
 
 # --- Debug settings (pause menu > Debug. J writes them, everyone reads) ------
+## Round 7: the player's upgrades are these settings (pause menu > Debug) until
+## the progression round. Every reader takes them live.
 static var debug_speed_cap := 8.0     ## m/s sprint cap: 8 base; 10 and 12 are the upgraded caps
 static var debug_ram_level := 0       ## Battering Ram 0 (not earned) .. 3
-static var debug_start_focus := 1.0   ## Focus bars at the start of each wave (FOCUS_WAVE_START)
-static var debug_overlay := false     ## P, tier, speed, Focus, health overlay (HUD)
+static var debug_teleport := true     ## Round 7: Dash just before a hit teleports behind the attacker
+static var debug_pursuit_max := 2     ## Round 7: pursuits that may chain off one launch (0 = no pursuit), 0..3
+static var debug_start_focus := 1.0   ## SUPERSEDED (Round 7 removed the Focus meter); unread
+static var debug_overlay := false     ## debug overlay (HUD)
 
 # --- Power score P (Strikes and body reactions) -------------------------------
 ## P = base x CHARGE_MULT[level] + speed_bonus + counter_bonus + finisher_bonus.
@@ -408,6 +412,8 @@ const SLOW_TIME := {
 	&"last_kill": {"scale": 0.2, "time": 1.0, "ease": 0.15, "cooldown": false},
 	&"player_death": {"scale": 0.3, "time": 1.0, "ease": 0.15, "cooldown": false},
 	&"focus": {"scale": 0.3, "time": 2.0, "ease": 0.15, "cooldown": false},
+	# Round 7: a player launch payoff (hit_landed with HitInfo.react == &"launch").
+	&"finisher": {"scale": 0.35, "time": 0.25, "ease": 0.1, "cooldown": true},
 }
 const SLOW_TIME_COOLDOWN := 1.0      ## real s between cooldown-respecting slow-motion events
 
@@ -478,6 +484,7 @@ const RAM_SPEED_SHARE := 0.85    ## of the speed cap
 const RAM_HITSTOP := 0.05
 ## Per level 0..3: what happens to the victim and to you. loss: share of speed lost
 ## (-1 = drop to walk). self: &"none" | &"stumble" | &"knockdown".
+## Round 7: level 3 LAUNCHES normal enemies (R7_RAM_LAUNCH_*) and knocks heavies down.
 const RAM_TABLE := [
 	{"normal": {"victim": &"stumble", "self": &"stumble", "loss": -1.0},
 		"heavy": {"victim": &"flinch", "self": &"knockdown", "loss": -1.0}},
@@ -485,7 +492,7 @@ const RAM_TABLE := [
 		"heavy": {"victim": &"stumble", "self": &"stumble", "loss": -1.0}},
 	{"normal": {"victim": &"knockdown", "self": &"none", "loss": 0.15},
 		"heavy": {"victim": &"stumble", "self": &"none", "loss": 0.3}},
-	{"normal": {"victim": &"knockdown", "self": &"none", "loss": 0.1},
+	{"normal": {"victim": &"launch", "self": &"none", "loss": 0.05},
 		"heavy": {"victim": &"knockdown", "self": &"none", "loss": 0.15}},
 ]
 const PLAYER_GETUP_AFTER := 0.8  ## s on the ground after the player is knocked down
@@ -518,11 +525,14 @@ const PROP_KINDS: Array[StringName] = [&"brick", &"bottle", &"chair_leg", &"crat
 
 # --- Enemies (Enemy types) ---------------------------------------------------------------
 ## Startup frames per enemy move early in a run (never under ENEMY_STARTUP_MIN).
-const ENEMY_STARTUP := {&"e_jab": 18.0, &"e_hook": 22.0, &"e_kick": 24.0, &"e_grab": 20.0,
-	&"e_stick_swing": 20.0, &"e_stick_thrust": 24.0, &"e_heavy": 30.0, &"e_charge": 28.0,
-	&"e_grab_slam": 26.0}
-const ENEMY_STARTUP_EARLY_MIN := 18.0  ## frames: early in a run, never faster
-const ENEMY_STARTUP_MIN := 12.0
+## Round 7: every tell lasts at least R7_COUNTER_WINDOW + R7_TELL_MARGIN (30
+## frames, AttackDirector.tell_min_frames); the table sits above that floor so
+## moves still read differently (quick jab, slow overhead and charge).
+const ENEMY_STARTUP := {&"e_jab": 30.0, &"e_hook": 34.0, &"e_kick": 36.0, &"e_grab": 34.0,
+	&"e_stick_swing": 34.0, &"e_stick_thrust": 36.0, &"e_heavy": 44.0, &"e_charge": 42.0,
+	&"e_grab_slam": 40.0}
+const ENEMY_STARTUP_EARLY_MIN := 30.0  ## frames: early in a run, never faster
+const ENEMY_STARTUP_MIN := 30.0
 const ENEMY_STARTUP_SHRINK_FROM := 5   ## from this wave (1-based)...
 const ENEMY_STARTUP_SHRINK := 2.0      ## ...frames faster per wave
 const TOKEN_MAX := 2
@@ -634,3 +644,207 @@ const TILE_BREAK_ENERGY := 600.0     ## J: a tile in the tiled plaza pops out as
 ## Blasts: everything breakable within the radius takes the source's energy with
 ## linear falloff (glass shatters, light props hop, crates crack).
 const BLAST := {&"slam": 2.5, &"heavy_landing": 2.5, &"wall_break": 1.5, &"structure": 2.0}
+
+# =============================================================================
+# Round 7: Freeflow combat (docs/Round 7 — Freeflow Combat.md). Wins over every
+# block above for the player's kit: moves, reactions, chains, targeting,
+# defence, grabs, drive, throw, camera. Frames are 1/60 s of the fighter's OWN
+# time (Tuning.frames()); times are seconds (real for input windows and
+# hitstop, the fighter's own for stun). Contract: docs/ARCHITECTURE.md "Round 7".
+# =============================================================================
+
+# --- Player moves ------------------------------------------------------------------
+## Per move: "f" = Vector3(startup, active, recovery on a miss) frames; "dmg";
+## "react" = Fighter.react kind (&"snap" | &"spin" | &"fold" | &"lift" | &"buckle" |
+## &"push" | &"knockdown" | &"launch"); "push" m; "stun" s the victim can't act
+## (0 for knockdown: the ragdoll's get-up decides); "hitstop" real s (attacker
+## and victim); "weight" 0..1 (FX, sound, camera punch); "tier" = the
+## HitInfo.TIER_NAMES name listeners see; "guard_break": breaks a guard and tell armor;
+## a move whose own "react" is &"launch" also carries "launch_speed" m/s and "launch_angle" degrees.
+const R7_MOVES := {
+	&"jab": {"f": Vector3(7, 3, 14), "dmg": 5.0, "react": &"snap", "push": 0.4, "stun": 0.45,
+		"hitstop": 0.07, "weight": 0.2, "tier": &"flinch", "guard_break": false},
+	&"cross": {"f": Vector3(9, 3, 16), "dmg": 7.0, "react": &"snap", "push": 0.6, "stun": 0.5,
+		"hitstop": 0.08, "weight": 0.3, "tier": &"flinch", "guard_break": false},
+	&"hook": {"f": Vector3(11, 4, 18), "dmg": 9.0, "react": &"spin", "push": 0.7, "stun": 0.6,
+		"hitstop": 0.10, "weight": 0.45, "tier": &"stagger", "guard_break": false},
+	&"heavy_jab": {"f": Vector3(20, 4, 18), "dmg": 10.0, "react": &"snap", "push": 1.4, "stun": 0.7,
+		"hitstop": 0.12, "weight": 0.6, "tier": &"stagger", "guard_break": true},
+	&"heavy_cross": {"f": Vector3(22, 4, 20), "dmg": 13.0, "react": &"snap", "push": 1.8, "stun": 0.75,
+		"hitstop": 0.13, "weight": 0.7, "tier": &"stagger", "guard_break": true},
+	&"heavy_hook": {"f": Vector3(24, 5, 22), "dmg": 15.0, "react": &"knockdown", "push": 1.5, "stun": 0.0,
+		"hitstop": 0.14, "weight": 0.8, "tier": &"knockdown", "guard_break": true},
+	&"uppercut": {"f": Vector3(12, 4, 20), "dmg": 10.0, "react": &"lift", "push": 0.3, "stun": 0.0,
+		"hitstop": 0.11, "weight": 0.6, "tier": &"stagger", "guard_break": true},
+	&"gut_punch": {"f": Vector3(10, 4, 20), "dmg": 8.0, "react": &"fold", "push": 0.3, "stun": 1.1,
+		"hitstop": 0.12, "weight": 0.55, "tier": &"stagger", "guard_break": true},
+	&"leg_kick": {"f": Vector3(10, 4, 18), "dmg": 7.0, "react": &"buckle", "push": 0.2, "stun": 0.9,
+		"hitstop": 0.09, "weight": 0.45, "tier": &"stagger", "guard_break": true},
+	&"front_kick": {"f": Vector3(14, 4, 22), "dmg": 10.0, "react": &"push", "push": 2.8, "stun": 0.8,
+		"hitstop": 0.11, "weight": 0.65, "tier": &"stagger", "guard_break": true},
+	&"roundhouse": {"f": Vector3(18, 5, 26), "dmg": 14.0, "react": &"knockdown", "push": 1.5, "stun": 0.0,
+		"hitstop": 0.14, "weight": 0.85, "tier": &"knockdown", "guard_break": true},
+	&"counter": {"f": Vector3(4, 3, 16), "dmg": 8.0, "react": &"push", "push": 1.2, "stun": 0.9,
+		"hitstop": 0.10, "weight": 0.6, "tier": &"stagger", "guard_break": true},
+	# Heavy kicks (hold the kick's button past R7_HOLD_THRESHOLD; startup counts from the press).
+	&"heavy_leg_kick": {"f": Vector3(18, 4, 20), "dmg": 11.0, "react": &"buckle", "push": 0.3, "stun": 1.3,
+		"hitstop": 0.12, "weight": 0.65, "tier": &"stagger", "guard_break": true},
+	&"heavy_front_kick": {"f": Vector3(22, 4, 24), "dmg": 15.0, "react": &"push", "push": 4.5, "stun": 1.0,
+		"hitstop": 0.14, "weight": 0.8, "tier": &"knockdown", "guard_break": true},
+	&"heavy_roundhouse": {"f": Vector3(26, 5, 28), "dmg": 19.0, "react": &"launch", "push": 0.0, "stun": 0.0,
+		"hitstop": 0.16, "weight": 0.95, "tier": &"launch", "guard_break": true,
+		"launch_speed": 11.0, "launch_angle": 20.0},
+}
+## The punch button's string: 1st, 2nd, 3rd press (wraps to the 1st), and the
+## heavy version of each position (still held at R7_HOLD_THRESHOLD).
+const R7_PUNCH_STRING: Array[StringName] = [&"jab", &"cross", &"hook"]
+## Heavy version of a move whose button is still held at R7_HOLD_THRESHOLD: the
+## punch string's positions and the three kicks. Uppercut and gut punch have none.
+const R7_HEAVY_OF := {&"jab": &"heavy_jab", &"cross": &"heavy_cross", &"hook": &"heavy_hook",
+	&"leg_kick": &"heavy_leg_kick", &"front_kick": &"heavy_front_kick", &"roundhouse": &"heavy_roundhouse"}
+const R7_HOLD_THRESHOLD := 0.2   ## real s: a press still held this long is the heavy version
+
+# --- Payoffs: move on a victim state -> replacement result -------------------------
+## R7_PAYOFFS[move][state] = {"react", optional "push", "stun", "dmg_mult",
+## "launch_speed" m/s, "launch_angle" degrees up, "lift" m}. A move/state pair
+## not listed uses the move's own entry. "repop" = the juggle re-pop.
+const R7_PAYOFFS := {
+	&"jab": {&"lift": {"react": &"repop"}},
+	&"cross": {&"lift": {"react": &"repop"}},
+	&"hook": {&"lift": {"react": &"repop"}},
+	&"leg_kick": {&"lift": {"react": &"repop"}},
+	&"heavy_jab": {&"fold": {"react": &"knockdown"}, &"buckle": {"react": &"knockdown"}, &"lift": {"react": &"repop"}},
+	&"heavy_cross": {&"fold": {"react": &"knockdown"}, &"buckle": {"react": &"knockdown"}, &"lift": {"react": &"repop"}},
+	&"heavy_hook": {&"fold": {"react": &"launch", "launch_speed": 9.0, "launch_angle": 25.0},
+		&"buckle": {"react": &"launch", "launch_speed": 9.0, "launch_angle": 25.0}, &"lift": {"react": &"repop"}},
+	&"uppercut": {&"fold": {"react": &"lift", "lift": 1.5, "dmg_mult": 1.5}, &"buckle": {"react": &"lift"},
+		&"lift": {"react": &"repop"}},
+	&"gut_punch": {&"buckle": {"react": &"fold"}, &"lift": {"react": &"repop"}},
+	&"front_kick": {&"fold": {"react": &"launch", "launch_speed": 10.0, "launch_angle": 25.0},
+		&"lift": {"react": &"launch", "launch_speed": 13.0, "launch_angle": 20.0},
+		&"buckle": {"react": &"knockdown"}},
+	&"roundhouse": {&"fold": {"react": &"knockdown", "dmg_mult": 1.5},
+		&"lift": {"react": &"launch", "launch_speed": 15.0, "launch_angle": 12.0},
+		&"buckle": {"react": &"knockdown", "dmg_mult": 1.5}},
+	&"heavy_leg_kick": {&"fold": {"react": &"knockdown"}, &"lift": {"react": &"repop"}},
+	&"heavy_front_kick": {&"fold": {"react": &"launch", "launch_speed": 13.0, "launch_angle": 20.0},
+		&"lift": {"react": &"launch", "launch_speed": 15.0, "launch_angle": 15.0},
+		&"buckle": {"react": &"launch", "launch_speed": 10.0, "launch_angle": 25.0}},
+	&"heavy_roundhouse": {&"fold": {"react": &"launch", "launch_speed": 13.0, "launch_angle": 15.0},
+		&"lift": {"react": &"launch", "launch_speed": 18.0, "launch_angle": 10.0},
+		&"buckle": {"react": &"launch", "launch_speed": 13.0, "launch_angle": 15.0}},
+}
+
+# --- Reactions (Fighter.react) --------------------------------------------------------
+const R7_LIFT_HEIGHT := 1.0      ## m the uppercut pops the feet above the floor
+const R7_LIFT_PEAK_TIME := 0.35  ## s to the peak (sets the pop's gravity: g = 2h / t^2)
+const R7_REPOP_HEIGHT := 0.5     ## m a juggle re-pop adds above the current height
+const R7_JUGGLE_MAX := 2         ## re-pops per lift; past it the body falls into a knockdown
+const R7_PUSH_SLIDE_SHARE := 0.4 ## the push slides over this share of the stun
+const R7_PUSH_STEP_FROM := 1.0   ## m: pushes this long add stumble steps
+const R7_HEAVY_PUSH_MULT := 0.6  ## heavy enemies (Fighter.is_heavy)
+const R7_HEAVY_STUN_MULT := 0.75
+const R7_HEAVY_LIFT_MULT := 0.6
+const R7_SEVER_ON_KILL := 0.35   ## chance a killing launch or drive slam severs a limb
+
+# --- Chains and the input buffer -----------------------------------------------------------
+const R7_CHAIN_CUT := 0.5        ## on a hit the buffered press starts after this share of recovery
+const R7_CHAIN_GRACE := 0.3      ## s after recovery in which the chain (and punch string) stays alive
+## Anti-infinite (replaces COMBO_ESCAPE_HITS / COMBO_STUN_DECAY_FROM / COMBO_STUN_DECAY / COMBO_STUN_MIN for player strikes).
+const R7_COMBO_ESCAPE_HITS := 10
+const R7_COMBO_STUN_DECAY_FROM := 6
+const R7_COMBO_STUN_DECAY := 0.1
+const R7_COMBO_STUN_MIN := 0.6
+
+# --- Freeflow targeting and the auto-follow ---------------------------------------------------
+const R7_TARGET_RANGE := 6.0     ## m
+const R7_TARGET_CONE := 70.0     ## degrees each side of the stick (or camera forward)
+const R7_TARGET_KEEP_EXTRA := 2.0 ## m beyond R7_TARGET_RANGE before the combat target clears
+const R7_GLIDE_FROM := 0.6       ## m beyond the move's reach before a glide starts
+const R7_GLIDE_SPEED := 11.0     ## m/s
+const R7_GLIDE_MAX_TIME := 0.35  ## s
+const R7_FOLLOW_MAX_PUSH := 1.5  ## m: pushes up to this get the follow step
+const R7_FOLLOW_SHARE := 0.8     ## of the push the attacker follows during recovery
+const R7_CONNECT_MARGIN := 0.5   ## m beyond reach in which the target still connects on the first active frame
+
+# --- Hit feel ----------------------------------------------------------------------------------
+const R7_PLAYER_HITSTOP_MAX := 0.16  ## replaces PLAYER_HITSTOP_MAX
+const R7_CAM_PUNCH_FOV := 4.0    ## degrees x weight
+const R7_CAM_PUNCH_TRAUMA := 0.25 ## x weight
+## Launch payoffs slow time: SLOW_TIME[&"finisher"] (TimeDirector requests it from hit_landed).
+
+# --- Defence: counter and dodge -------------------------------------------------------------------
+const R7_COUNTER_WINDOW := 0.4   ## real s before an enemy strike's first active frame (and through its active frames)
+const R7_COUNTER_INVULN := 0.45  ## real s from the press
+const R7_COUNTER_GLIDE := 3.0    ## m: the counter glides to an attacker this far away
+const R7_COUNTER_WHIFF_LOCK := 0.4 ## real s after a press with no counterable window
+const R7_TELL_MARGIN := 0.1      ## s every enemy strike's tell lasts beyond R7_COUNTER_WINDOW
+const R7_DODGE_DIST := 2.5       ## m
+const R7_DODGE_TIME := 0.22      ## s
+const R7_DODGE_INVULN := 0.25    ## s from the press
+const R7_DODGE_COOLDOWN := 0.2   ## s after a dodge ends
+
+# --- Grab, drive, throw ------------------------------------------------------------------------------
+const R7_GRAB_GLIDE := 3.0       ## m: a grab glides to a target this far away
+const R7_HOLD_MAX := 3.0         ## s of clinch before the victim struggles out (driving resets it)
+const R7_DRIVE_START_SPEED := 4.0  ## m/s
+const R7_DRIVE_MAX_SPEED := 9.5    ## m/s
+const R7_DRIVE_RAMP_TIME := 1.0    ## s from start to max (ease-out)
+const R7_DRIVE_TURN_RATE := 120.0  ## degrees/s
+const R7_DRIVE_MAX_TIME := 3.0     ## s, then the body is thrown forward at the current speed
+const R7_DRIVE_MASS_SHARE := 0.5   ## of the player's mass added to the victim's for slam energy
+const R7_DRIVE_MIN_SPEED := 3.0    ## m/s the drive keeps at least after breaking through
+const R7_DRIVE_SLAM_MIN_SPEED := 3.0 ## m/s: slower contacts are only a shove (stagger, hold ends)
+const R7_DRIVE_BREAK_DAMAGE := 8.0
+const R7_DRIVE_SLAM_DAMAGE := 10.0
+const R7_DRIVE_SLAM_DAMAGE_PER_MS := 2.0
+const R7_DRIVE_SLAM_HITSTOP := 0.12
+const R7_DRIVE_BOWL_DAMAGE := 6.0
+const R7_DRIVE_BOWL_KEEP := 0.85   ## of the drive speed kept after bowling an enemy
+const R7_THROW_SPEED_MIN := 8.0    ## m/s: a tap
+const R7_THROW_SPEED_MAX := 18.0   ## m/s: a full wind-up
+const R7_THROW_WINDUP_FULL := 0.7  ## s
+const R7_THROW_PITCH := 8.0        ## degrees up
+const R7_THROW_ASSIST_CONE := 20.0 ## degrees
+
+# --- Camera ------------------------------------------------------------------------------------------
+const R7_CAM_LEAN := 0.25          ## share of the way the look-at leans toward the combat target
+const R7_CAM_AUTO_YAW_RATE := 40.0 ## degrees/s at most, only to keep the player and target on screen
+const R7_CAM_DRIVE_FOV := 8.0      ## degrees added while driving
+const R7_CAM_DRIVE_PULLBACK := 1.0 ## m
+const R7_CAM_DRIVE_DROP := 0.3     ## m lower
+const R7_CAM_THROW_ZOOM_FOV := 5.0 ## degrees narrower at a full wind-up
+
+# --- Round 7 amendment (user, 2026-11-03): the god path ---------------------------------
+# Jump, wall run, vault/mantle, teleport, pursuit and the Battering Ram stay.
+# Teleport and pursuit are free (cooldowns and the chain cap only); the Focus
+# meter is gone. Upgrades are the debug settings above (speed cap, ram level,
+# teleport, pursuit chain). See the doc's "God path" section.
+const R7_TELEPORT_WINDOW := 0.2    ## real s: a Dash press this close before an enemy attack's first active frame teleports (else it dodges)
+const R7_TELEPORT_COOLDOWN := 0.6  ## real s between teleports
+## Pursuit: Dash within PURSUIT_WINDOW after a launch the player caused, stick
+## neutral or toward the body: teleport next to it (PURSUIT_DIST, hang
+## PURSUIT_HANG) and the next attack press is the pursuit hit. The stick at that
+## press decides: pulled back toward the camera (deflected 0.3 or more, within
+## 60 degrees of straight back) spikes the body down into the floor; otherwise it
+## relaunches along camera forward.
+const R7_PURSUIT_RELAUNCH_SPEED := 15.0 ## m/s (heavies x HEAVY_LAUNCH_MULT; never under the body's current speed; cap LAUNCH_SPEED_MAX)
+const R7_PURSUIT_RELAUNCH_ANGLE := 20.0 ## degrees up
+const R7_PURSUIT_DAMAGE := 10.0
+const R7_SPIKE_SPEED := 18.0       ## m/s straight down (5 degrees of camera-forward drift)
+const R7_SPIKE_DAMAGE := 14.0      ## plus the floor impact
+const R7_SPIKE_BLAST_RADIUS := 2.5 ## m: the spike's floor impact staggers enemies and blasts breakables in this radius
+## Sprint strikes: a strike committed at speed v >= SPEED_BONUS_FROM (6 m/s)
+## toward its target (wall-run strikes and vault drops count as the speed cap).
+## Punches and the leg kick push x (1 + R7_SPRINT_PUSH_PER_MS x (v - 6)) and become
+## at least a &"push"; heavies, front kick, roundhouse and uppercut LAUNCH at
+## R7_SPRINT_LAUNCH_BASE + R7_SPRINT_LAUNCH_PER_MS x (v - 6) m/s (cap LAUNCH_SPEED_MAX).
+const R7_SPRINT_PUSH_PER_MS := 0.25
+const R7_SPRINT_LAUNCH_BASE := 8.0
+const R7_SPRINT_LAUNCH_PER_MS := 1.5
+const R7_SPRINT_LAUNCH_ANGLE := 22.0
+## Battering Ram level 3 launch: runner speed x this, angle up.
+const R7_RAM_LAUNCH_SHARE := 1.3
+const R7_RAM_LAUNCH_ANGLE := 25.0
+## Ground cracks at speed: sprinting at or above this cracks the floor under each footstep (WorldDamage.damage_floor).
+const R7_SPEED_CRACK_FROM := 10.0  ## m/s (the first upgraded cap)

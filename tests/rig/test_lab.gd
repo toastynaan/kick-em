@@ -9,7 +9,8 @@ func _key(k: Key) -> void:
 	Input.parse_input_event(e)
 
 func _ready() -> void:
-	get_tree().create_timer(120.0).timeout.connect(func() -> void:
+	# Round 7: the pose browser steps through ~99 moves at 84 frames each.
+	get_tree().create_timer(200.0).timeout.connect(func() -> void:
 		print("LAB FAIL (timeout)")
 		get_tree().quit(1))
 	var lab: Node = load("res://scenes/ragdoll_lab.tscn").instantiate()

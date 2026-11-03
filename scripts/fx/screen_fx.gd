@@ -1,43 +1,35 @@
 extends CanvasLayer
 ## Autoload "ScreenFX" (Round 5): full-screen effects that sell speed and power
 ## (Feel Reference: Screen effects, On the character): radial speed blur, speed
-## lines, the Focus tint, the hit flash, limb trails and the teleport
-## after-image. Effects read GameEvents and poll the player's Traversal;
-## nobody calls this from gameplay code.
+## lines, the hit flash, limb trails and the teleport after-image. Effects read
+## GameEvents and poll the player's Traversal; nobody calls this from gameplay
+## code.
 ## OWNER: agent F (FX & audio).
 ##
 ## Rules from the doc: effect size follows ONE number (the hit tier for
-## strikes, sprint_charge for movement) and nothing is on or off: blur, lines,
-## trails and the tint all ramp.
+## strikes, sprint_charge for movement) and nothing is on or off: blur, lines
+## and trails all ramp.
 ## - Speed level = max(the player's Traversal.sprint_charge, a pulse from a
-##   pursuit teleport or an air dash). Blur strength = level^2 x Tuning.BLUR_MAX
-##   (0.15 at half charge, 0.6 at full), centred slightly above the middle.
-##   Speed lines ramp in from Tuning.SPEED_LINES_FROM. Trails on both hands and
-##   feet from Tuning.TRAIL_FROM (LimbTrails).
+##   pursuit teleport, an air dash or a glide). Blur strength = level^2 x
+##   Tuning.BLUR_MAX (0.15 at half charge, 0.6 at full), centred slightly above
+##   the middle. Speed lines ramp in from
+##   Tuning.SPEED_LINES_FROM. Trails on both hands and feet from
+##   Tuning.TRAIL_FROM (LimbTrails).
 ## - Hit flash: launch tier and up, white at Tuning.HIT_FLASH_ALPHA for
 ##   Tuning.HIT_FLASH_FRAMES rendered frames, at most one per Tuning.FX_FLASH_GAP.
-## - Focus tint: while TimeDirector.is_focus_active() the world desaturates to
-##   Tuning.FOCUS_SATURATION with a cool tint; the player and glowing limbs keep
-##   full colour and the player gets a thin rim glow. Approach (chosen after
-##   testing 4.8 on this machine): a stencil-masked full-screen pass. The
-##   player's and glowing limbs' materials get a next_pass
-##   (keep_color_mask.gdshader) that writes stencil 1 where they are visible;
-##   a full-screen quad (focus_tint.gdshader) drawn first in the transparent
-##   pass reads the screen texture and tints only where the stencil is not 1.
-##   Why: it needs no change to world materials (another module's), costs one
-##   full-screen pass plus the player's parts once more while Focus is on, keeps
-##   additive FX (glow halos, flashes, trails, after-images) in full colour
-##   because they draw after it, and the HUD (off-screen arrows) is a
-##   CanvasLayer above the 3D view. A canvas-layer pass could not tell the
-##   player's pixels from the world's, and per-material uniforms would need
-##   every world material to cooperate.
+## - Round 7 (Freeflow combat): a player hit (HitInfo.react set) flashes the
+##   screen from R7_FLASH_FROM weight (small, R7_FLASH_ALPHA by weight; a
+##   launch payoff gets the full HIT_FLASH_ALPHA); a counter flashes it too. A
+##   dodge leaves a short after-image where it started. A glide pulses the
+##   speed blur and draws speed streaks on both hands and feet, both scaled by
+##   the glide's distance. Focus mode and its tint are gone (Round 7); the god
+##   path (amendment) keeps the teleport after-image, the pursuit teleport's
+##   full blur and the air dash's.
 ## - Layer 5: above the 3D view, below the HUD (10) and menus (20), so the blur
 ##   and flash never touch the HUD.
 
 const LimbTrailsScript := preload("res://scripts/fx/limb_trails.gd")
 const SPEED_SHADER := preload("res://shaders/screen_speed.gdshader")
-const TINT_SHADER := preload("res://shaders/focus_tint.gdshader")
-const MASK_SHADER := preload("res://shaders/keep_color_mask.gdshader")
 const GHOST_SHADER := preload("res://shaders/ghost.gdshader")
 
 # --- Local tuning (candidates for Tuning) ---------------------------------------
@@ -45,16 +37,23 @@ const LAYER := 5
 const BLUR_CENTER := Vector2(0.5, 0.45)   ## screen UV, y down: slightly above the middle
 const PULSE_TIME := 0.3          ## s for a pursuit teleport's full-speed blur to fade
 const AIR_DASH_SPEED := 8.5      ## m/s: airborne faster than this counts as an air dash (fallback)
-const FOCUS_TINT := Color(0.82, 0.92, 1.12)
-const FOCUS_DARKEN := 0.08
-const FOCUS_RIM_COLOR := Color(0.45, 0.72, 1.0)
-const FOCUS_RIM_GLOW := 0.9      ## fighter.gdshader rim_glow on the player at full Focus
-const RIM_DEFAULT_COLOR := Color(0.75, 0.82, 1.0)  ## fighter.gdshader defaults
-const RIM_DEFAULT_GLOW := 0.1
 const AFTERIMAGE_POOL := 3
-const MASK_PRIORITY := -100
-const TINT_PRIORITY := -90
 const PLAYER_POLL := 0.5         ## s between player lookups
+## Round 7. Screen flash for a player hit from this weight (doc: "a small
+## screen flash for weight >= 0.7"), alpha from R7_FLASH_ALPHA.x there to .y
+## at weight 1; a launch payoff flashes at Tuning.HIT_FLASH_ALPHA.
+const R7_FLASH_FROM := 0.7
+const R7_FLASH_ALPHA := Vector2(0.07, 0.12)
+const COUNTER_FLASH_ALPHA := 0.1  ## the player's counter lands: a small white flash
+const DODGE_AFTERIMAGE_FADE := 0.18  ## s (world time) the dodge's after-image takes to fade
+## Glide: speed-level pulse from a short glide to FXRules.GLIDE_FULL (blur
+## 0.12 .. 0.43, speed lines only on the longest glides), held for the glide's
+## time (distance / Tuning.R7_GLIDE_SPEED) plus GLIDE_FADE; streak strength on
+## both hands and feet over the same range.
+const GLIDE_PULSE := Vector2(0.45, 0.85)
+const GLIDE_STREAK := Vector2(0.45, 0.9)
+const GLIDE_FADE := 0.12
+const GLIDE_BONES: Array[StringName] = [Bones.L_HAND, Bones.R_HAND, Bones.L_FOOT, Bones.R_FOOT]
 ## Upgraded caps (Feel Reference: Sprint that builds, "10, then 12 m/s: same
 ## signals, stronger"; lead decision): sprint_charge is relative to the cap, so
 ## the effects scale by k = 1 + UPGRADE_GAIN x (cap - base cap) / UPGRADE_SPAN
@@ -70,7 +69,7 @@ var flash_log: Array[Dictionary] = []
 var _player: Node3D
 var _player_poll := 0.0
 var _charge := 0.0
-var _pulse := 0.0                ## 0..1 speed pulse (pursuit teleport)
+var _pulse := 0.0                ## 0..1 speed pulse (pursuit teleport, glide)
 var _pulse_rate := 0.0
 var _level := 0.0
 var _k := 1.0                    ## upgraded-cap intensity scale
@@ -83,16 +82,10 @@ var _flash_rect: ColorRect
 var _flash_shown := -1           ## rendered frames shown (-1 idle)
 var _last_flash := -INF          ## real s
 var _trails: Node3D
-var _focus := 0.0
-var _tint_quad: MeshInstance3D
-var _tint_mat: ShaderMaterial
-var _mask_mat: ShaderMaterial
-var _kept: Dictionary = {}       ## material id -> ShaderMaterial carrying our mask
-var _kept_nodes: Dictionary = {} ## node id -> GeometryInstance3D carrying our mask as material_overlay
-var _rim_on := false
 var _ghost_mat: ShaderMaterial
 var _ghosts: Array[Node3D] = []
 var _ghost_age := PackedFloat32Array()
+var _ghost_fade := PackedFloat32Array()  ## s each after-image takes to fade
 var _ghost_next := 0
 
 
@@ -109,11 +102,13 @@ func _ready() -> void:
 	_trails = LimbTrailsScript.new()
 	_trails.name = "LimbTrails"
 	add_child(_trails)
-	_build_tint()
 	_build_ghosts()
 	GameEvents.hit_landed.connect(_on_hit_landed)
 	GameEvents.teleported.connect(_on_teleported)
 	GameEvents.strike_started.connect(_on_strike_started)
+	GameEvents.countered.connect(_on_countered)
+	GameEvents.dodged.connect(_on_dodged)
+	GameEvents.glide_started.connect(_on_glide_started)
 	GameEvents.round_started.connect(func(_m: StringName) -> void: reset())
 
 func _full_rect(node_name: String) -> ColorRect:
@@ -135,7 +130,7 @@ func get_blur_strength() -> float:
 	return _blur
 
 ## 0..1 speed level the effects follow: sprint_charge, or a pulse (pursuit
-## teleport, air dash) when that is higher. AudioFX's wind loop reads it too.
+## teleport, air dash, glide) when that is higher. AudioFX's wind loop reads it too.
 func get_speed_level() -> float:
 	return _level
 
@@ -155,10 +150,6 @@ func get_sprint_charge() -> float:
 func get_speed_lines() -> float:
 	return _lines
 
-## 0..1 how far the Focus tint has faded in.
-func get_focus_amount() -> float:
-	return _focus
-
 ## Alpha of the hit flash this frame (0 when not showing).
 func get_flash_alpha() -> float:
 	return _flash_rect.color.a if _flash_rect.visible else 0.0
@@ -175,26 +166,8 @@ func active_afterimages() -> int:
 			n += 1
 	return n
 
-## Materials currently keeping full colour through the Focus tint (tests).
-func kept_materials() -> Array:
-	var out: Array = []
-	for id: int in _kept:
-		var m = _kept[id]
-		if is_instance_valid(m):
-			out.append(m)
-	return out
-
-## Geometry keeping full colour through its material_overlay (group
-## &"focus_keep_color", e.g. a stick enemy's glowing stick) (tests).
-func kept_nodes() -> Array:
-	var out: Array = []
-	for id: int in _kept_nodes:
-		var g = _kept_nodes[id]
-		if is_instance_valid(g):
-			out.append(g)
-	return out
-
-## Full-speed look for `seconds`, fading out: pursuit teleports and air dashes.
+## A speed look at `level` that fades out over `seconds`: pursuit teleports
+## (full speed), Round 7 glides.
 func pulse_speed(level: float, seconds := PULSE_TIME) -> void:
 	_pulse = maxf(_pulse, clampf(level, 0.0, 1.0))
 	_pulse_rate = _pulse / maxf(seconds, 0.01)
@@ -224,8 +197,6 @@ func reset() -> void:
 	for i in _ghosts.size():
 		_ghost_age[i] = -1.0
 		_ghosts[i].visible = false
-	_focus = 0.0
-	_apply_focus()
 
 
 # =============================================================================
@@ -244,9 +215,8 @@ func _process(delta: float) -> void:
 	_update_speed(real)
 	_trails.call(&"update", real, _player, _level, _k)
 	_update_flash()
-	_update_focus(real)
-	# The after-image fades in world time: it lingers through the teleport's
-	# 0.3x slow motion, so the attack visibly passes through where you were.
+	# The after-image fades in world time: in slow motion it lingers, so an
+	# attack visibly passes through where the dodger was.
 	_update_ghosts(0.0 if get_tree().paused else delta)
 
 func _update_speed(real: float) -> void:
@@ -302,8 +272,18 @@ static func _real_now() -> float:
 # =============================================================================
 
 ## Contact frame: a white screen flash on launch tier and up (budgeted).
+## Round 7 player hits flash from R7_FLASH_FROM weight, small; a launch payoff
+## at the full alpha.
 func _on_hit_landed(info: HitInfo) -> void:
-	if info == null or info.kind == &"grab":
+	if info == null or info.kind == &"grab" or FXRules.is_throw_release(info):
+		return
+	if FXRules.is_round7(info):
+		if info.react == &"launch":
+			flash()
+			return
+		var w := FXRules.weight_of(info)
+		if w >= R7_FLASH_FROM - 1e-4:
+			flash(lerpf(R7_FLASH_ALPHA.x, R7_FLASH_ALPHA.y, clampf((w - R7_FLASH_FROM) / (1.0 - R7_FLASH_FROM), 0.0, 1.0)))
 		return
 	if FXRules.tier_of(info) >= HitInfo.Tier.LAUNCH:
 		flash()
@@ -314,6 +294,28 @@ func _on_teleported(fighter: Node3D, from: Vector3, _to: Vector3, kind: StringNa
 	afterimage(fighter, from)
 	if kind == &"pursuit":
 		pulse_speed(1.0)
+
+## The player's counter caught an attack: a small white flash (budgeted).
+func _on_countered(defender: Node3D, _attacker: Node3D) -> void:
+	if is_instance_valid(defender) and defender.is_in_group(&"player"):
+		flash(COUNTER_FLASH_ALPHA)
+
+## Dodge: a short after-image where the dodge started.
+func _on_dodged(fighter: Node3D, _direction: Vector3) -> void:
+	if is_instance_valid(fighter):
+		afterimage(fighter, fighter.global_position, DODGE_AFTERIMAGE_FADE)
+
+## Glide: speed streaks on both hands and feet for the glide's time, and (the
+## player's) a speed-blur pulse, both bigger for a longer glide.
+func _on_glide_started(fighter: Node3D, _target: Node3D, distance: float) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var t := FXRules.glide_share(distance)
+	var time := clampf(distance / Tuning.R7_GLIDE_SPEED, 0.05, Tuning.R7_GLIDE_MAX_TIME)
+	for b in GLIDE_BONES:
+		_trails.call(&"streak", fighter, b, time, lerpf(GLIDE_STREAK.x, GLIDE_STREAK.y, t))
+	if fighter.is_in_group(&"player"):
+		pulse_speed(lerpf(GLIDE_PULSE.x, GLIDE_PULSE.y, t), time + GLIDE_FADE)
 
 ## Strike trails on the striking limb of any charged attack (level 1+), from
 ## late in the startup to the end of the active frames.
@@ -330,145 +332,7 @@ func _on_strike_started(attacker: Node3D, _target: Node3D, move_id: StringName, 
 
 
 # =============================================================================
-# Focus tint
-# =============================================================================
-
-func _build_tint() -> void:
-	_mask_mat = ShaderMaterial.new()
-	_mask_mat.shader = MASK_SHADER
-	_mask_mat.render_priority = MASK_PRIORITY
-	_tint_mat = ShaderMaterial.new()
-	_tint_mat.shader = TINT_SHADER
-	_tint_mat.render_priority = TINT_PRIORITY
-	_tint_mat.set_shader_parameter(&"saturation", Tuning.FOCUS_SATURATION)
-	_tint_mat.set_shader_parameter(&"tint", FOCUS_TINT)
-	_tint_mat.set_shader_parameter(&"darken", FOCUS_DARKEN)
-	var quad := QuadMesh.new()
-	quad.size = Vector2(2, 2)
-	_tint_quad = MeshInstance3D.new()
-	_tint_quad.name = "FocusTint"
-	_tint_quad.mesh = quad
-	_tint_quad.material_override = _tint_mat
-	_tint_quad.layers = Layers.VIS_FX
-	_tint_quad.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_tint_quad.extra_cull_margin = 16384.0
-	_tint_quad.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
-	_tint_quad.visible = false
-	add_child(_tint_quad)
-
-func _update_focus(real: float) -> void:
-	var td := get_node_or_null(^"/root/TimeDirector")
-	var on: bool = td != null and td.has_method(&"is_focus_active") and td.call(&"is_focus_active")
-	var goal := 1.0 if on else 0.0
-	if is_equal_approx(_focus, goal):
-		if on:
-			_keep_colors(true)  # glows come and go while Focus is on
-		elif _rim_on or not _kept.is_empty() or not _kept_nodes.is_empty():
-			_apply_focus()  # finish the clean-up
-		return
-	_focus = move_toward(_focus, goal, real / maxf(Tuning.SLOWMO_EASE, 0.01))
-	_apply_focus()
-
-func _apply_focus() -> void:
-	var a := smoothstep(0.0, 1.0, _focus)
-	var on := _focus > 0.001
-	_tint_quad.visible = on
-	if on:
-		var cam := get_viewport().get_camera_3d()
-		if cam != null:  # keep the quad's node near the camera (never culled)
-			_tint_quad.global_position = cam.global_position
-		_tint_mat.set_shader_parameter(&"amount", a)
-	_keep_colors(on)
-	_set_player_rim(a if on else 0.0)
-
-## Materials that keep full colour: the player's parts and the parts of every
-## live limb glow (enemy wind-up tells, charge glows). Glows are never dimmed.
-func _keep_colors(on: bool) -> void:
-	var want: Dictionary = {}
-	if on:
-		for m in _player_materials():
-			want[m.get_instance_id()] = m
-		var bfx := get_node_or_null(^"/root/BloodFX")
-		if bfx != null:
-			for g in bfx.get(&"_glows"):
-				if not is_instance_valid(g):
-					continue
-				for part in g.get(&"parts"):
-					if is_instance_valid(part):
-						var m: ShaderMaterial = bfx.call(&"_part_material", part)
-						if m != null:
-							want[m.get_instance_id()] = m
-	for id: int in _kept.keys():
-		if not want.has(id):
-			var m = _kept[id]
-			if is_instance_valid(m) and (m as Material).next_pass == _mask_mat:
-				(m as Material).next_pass = null
-			_kept.erase(id)
-	for id: int in want:
-		if _kept.has(id):
-			continue
-		var m: ShaderMaterial = want[id]
-		if m.next_pass == null:
-			m.next_pass = _mask_mat
-			_kept[id] = m
-	_keep_group(on)
-
-## Any GeometryInstance3D in group &"focus_keep_color" (or under a node in it)
-## keeps full colour: other modules' glows that are not limb glows (the stick
-## enemy's stick, AIBrain's own material). The mask goes on as the node's
-## material_overlay, so their materials (maybe shared) are never touched.
-## Checked every frame while Focus is on: nodes that join mid-Focus are kept.
-func _keep_group(on: bool) -> void:
-	var want: Dictionary = {}
-	if on:
-		for n in get_tree().get_nodes_in_group(&"focus_keep_color"):
-			if n is GeometryInstance3D:
-				want[n.get_instance_id()] = n
-			else:
-				for g in n.find_children("*", "GeometryInstance3D", true, false):
-					want[g.get_instance_id()] = g
-	for id: int in _kept_nodes.keys():
-		if not want.has(id):
-			var g = _kept_nodes[id]
-			if is_instance_valid(g) and (g as GeometryInstance3D).material_overlay == _mask_mat:
-				(g as GeometryInstance3D).material_overlay = null
-			_kept_nodes.erase(id)
-	for id: int in want:
-		if _kept_nodes.has(id):
-			continue
-		var g: GeometryInstance3D = want[id]
-		if g.material_overlay == null:
-			g.material_overlay = _mask_mat
-			_kept_nodes[id] = g
-
-## A thin cool rim glow on the player while Focus is on.
-func _set_player_rim(a: float) -> void:
-	if a <= 0.0 and not _rim_on:
-		return
-	for m in _player_materials():
-		m.set_shader_parameter(&"rim_color", RIM_DEFAULT_COLOR.lerp(FOCUS_RIM_COLOR, a))
-		m.set_shader_parameter(&"rim_glow", lerpf(RIM_DEFAULT_GLOW, FOCUS_RIM_GLOW, a))
-	_rim_on = a > 0.0
-
-func _player_materials() -> Array[ShaderMaterial]:
-	var out: Array[ShaderMaterial] = []
-	if not is_instance_valid(_player):
-		return out
-	var rig = _player.get(&"rig")
-	var bfx := get_node_or_null(^"/root/BloodFX")
-	if not (rig is Node3D) or not is_instance_valid(rig) or not (rig as Node3D).has_method(&"get_mesh_parts") \
-			or bfx == null:
-		return out
-	for part in rig.call(&"get_mesh_parts"):
-		if is_instance_valid(part):
-			var m: ShaderMaterial = bfx.call(&"_part_material", part)
-			if m != null:
-				out.append(m)
-	return out
-
-
-# =============================================================================
-# After-image (teleport)
+# After-image (teleport; Round 7: the dodge)
 # =============================================================================
 
 func _build_ghosts() -> void:
@@ -477,6 +341,8 @@ func _build_ghosts() -> void:
 	_ghost_mat.set_shader_parameter(&"color", Tuning.TRAIL_COLOR)
 	_ghost_age.resize(AFTERIMAGE_POOL)
 	_ghost_age.fill(-1.0)
+	_ghost_fade.resize(AFTERIMAGE_POOL)
+	_ghost_fade.fill(Tuning.AFTERIMAGE_FADE)
 	for i in AFTERIMAGE_POOL:
 		var g := Node3D.new()
 		g.name = "AfterImage%d" % i
@@ -487,8 +353,8 @@ func _build_ghosts() -> void:
 		_ghosts.append(g)
 
 ## A copy of `fighter`'s mesh at `at` (its pose right now, moved there) that
-## fades over Tuning.AFTERIMAGE_FADE seconds of world time. Returns the copy's node.
-func afterimage(fighter: Node3D, at: Vector3) -> Node3D:
+## fades over `fade` seconds of world time. Returns the copy's node.
+func afterimage(fighter: Node3D, at: Vector3, fade := Tuning.AFTERIMAGE_FADE) -> Node3D:
 	if not is_instance_valid(fighter):
 		return null
 	var rig = fighter.get(&"rig")
@@ -523,6 +389,7 @@ func afterimage(fighter: Node3D, at: Vector3) -> Node3D:
 		(g.get_child(k) as Node3D).visible = false
 	g.visible = used > 0
 	_ghost_age[i] = 0.0 if used > 0 else -1.0
+	_ghost_fade[i] = maxf(fade, 0.01)
 	return g
 
 func _update_ghosts(world_delta: float) -> void:
@@ -530,7 +397,7 @@ func _update_ghosts(world_delta: float) -> void:
 		if _ghost_age[i] < 0.0:
 			continue
 		_ghost_age[i] += world_delta
-		var u := _ghost_age[i] / maxf(Tuning.AFTERIMAGE_FADE, 0.01)
+		var u := _ghost_age[i] / _ghost_fade[i]
 		if u >= 1.0:
 			_ghost_age[i] = -1.0
 			_ghosts[i].visible = false

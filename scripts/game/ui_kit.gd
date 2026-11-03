@@ -1,7 +1,8 @@
 class_name UIKit
 ## Shared look for the HUD and menus: one theme, big readable type, outlined
-## labels that read over the 3D scene, and the controls help built from
-## Controls.ACTIONS. OWNER: agent J (HUD, flow & menus).
+## labels that read over the 3D scene, the controls help built from
+## Controls.ACTIONS (Round 7 key map) and the key names for the device the
+## player used last. OWNER: agent J (HUD, flow & menus).
 
 const ACCENT := Color(1.0, 0.42, 0.18)
 const ACCENT_DIM := Color(0.55, 0.2, 0.08)
@@ -10,19 +11,24 @@ const TEXT_DIM := Color(0.72, 0.72, 0.74)
 const PANEL_BG := Color(0.05, 0.05, 0.07, 0.96)
 const HP_COLOR := Color(0.86, 0.16, 0.14)
 const HP_LOST := Color(1.0, 0.86, 0.45)
-const FOCUS_COLOR := Color(0.3, 0.85, 1.0)
-const PERFECT_COLOR := Color(0.55, 0.9, 1.0)
 const GRAB_COLOR := Color(1.0, 0.18, 0.15)
 const STRIKE_COLOR := Color(1.0, 1.0, 1.0)
-## Round 5 enemy wind-ups (Feel Reference: Enemies have to be readable first):
-## strikes glow orange, grabs blue. Off-screen arrows use the same colours.
-const TELL_STRIKE := Color(1.0, 0.5, 0.1)
-const TELL_GRAB := Color(0.25, 0.6, 1.0)
-const COUNTER_COLOR := Color(1.0, 0.82, 0.3)  ## live counter bonus (parry / teleport)
+## Enemy attacks (Round 7: Defence): orange = counterable (press Counter),
+## blue = uncounterable, grabs and the shoulder charge (dodge). Counter prompts
+## and off-screen arrows use the same colours as the world tells.
+const TELL_STRIKE := Tuning.TELL_COLOR_STRIKE
+const TELL_GRAB := Tuning.TELL_COLOR_GRAB
+## Pursuit cues (God path: "DASH: PURSUE", the hang's attack choice); apart
+## from the orange counter and blue dodge colours.
+const PURSUIT_COLOR := Color(0.45, 1.0, 0.72)
 const RESULT_GOOD := Color(1.0, 0.85, 0.35)
 
 static var _theme: Theme
 static var _heavy_font: Font
+## The player last used a gamepad (prompts show Y / RT instead of Space / Shift).
+## HUD and GameMenus feed every input event to note_input().
+static var pad_active := false
+static var _groups: Dictionary = {}   ## _binding_groups() cache (Controls.ACTIONS is const)
 
 ## Bold display font for titles, banners and pop text (system font with fallback).
 static func heavy_font() -> Font:
@@ -119,43 +125,101 @@ static func full_rect(name: String) -> Control:
 	return c
 
 # --- Controls help (F1) --------------------------------------------------------
-## What each action does, in the words the player needs (Feel Reference:
-## Controls and targeting; Round 5 key map in Controls).
+## What each action does, in the words the player needs (Round 7: Controls,
+## with the amendment's god path: jump and wall run, teleport, pursuit).
 const ACTION_HELP := {
-	&"move": "Move (camera-relative). Locked on: strafe around your target",
-	&"camera": "Turn the camera (it never turns on its own)",
-	&"punch": "Light (jab). Tap: next strike in the string. Hold: charge it",
-	&"heavy": "Heavy (cross). Tap or hold to charge. Holding a body: throw it",
-	&"kick": "Kick. Tap or hold to charge",
-	&"sweep": "Sweep: pull back (toward the camera) + Kick",
-	&"grab": "Grab a body or a prop; press again to let go. Blue glow: press to break their grab",
-	&"jump": "Jump. Sprinting along a wall: wall run. Attack in the air: dropping strike",
-	&"crouch": "Crouch (hold): ducks high attacks and standing grabs",
-	&"block": "Tap just before a hit lands: parry. Hold: guard (-80% damage)",
-	&"dash": "Tap: dash. In the parry window: teleport behind them (1 Focus). Hold: sprint",
-	&"focus": "Focus mode (1 bar): the world slows to 0.3x for 2 s, you don't",
-	&"lock_on": "Lock on to the enemy nearest the centre. Press again to unlock. No enemy: recentre",
-	&"lock_switch": "While locked on: switch to the next or previous enemy",
-	&"pause": "Pause menu (debug settings are in there)",
-	&"restart": "Restart the round (pause and results screens)",
+	&"move": "Move (camera-relative)",
+	&"camera": "Turn the camera. It only turns itself to keep your target in view",
+	&"punch": "Tap: jab, cross, hook (then back to the jab). Hold: the heavy version",
+	&"leg_kick": "Buckles the leg: the enemy drops to one knee. Hold: heavy kick",
+	&"gut_punch": "Folds the enemy over",
+	&"uppercut": "Pops the enemy into the air: keep hitting to juggle",
+	&"front_kick": "Shoves the enemy far back. Hold: heavy kick",
+	&"roundhouse": "Knockdown. Launches a lifted enemy into the walls. Hold: heavy kick",
+	&"kick_layer": "Gamepad kick layer: hold LT, then X / A / B for the three kicks",
+	&"grab": "Grab the enemy you face (or a prop). Press again to let go",
+	&"counter": "Orange icon over an enemy: counter its attack. Blue icon: dodge instead",
+	&"jump": "Jump. Sprint + jump at a wall: wall run. Attack in the air: dropping strike",
+	&"dash": "Tap: dodge, teleport just before a hit, pursue right after a launch. Hold: sprint",
+	&"pursuit": "Right after you launch someone: Dash to the flying body",
+	&"pursuit_hit": "Attack: launch it further. Pull back + attack: spike it into the ground",
+	&"throw": "Holding a body: throw it. Hold to wind up a harder throw",
+	&"knee": "Holding a body: knee it",
+	&"drive": "Holding a body: run it forward and slam it through walls",
+	&"release": "Holding a body: drop it",
+	&"pause": "Pause menu (the upgrades are in Debug settings)",
+	&"restart": "Restart the round",
 	&"help": "Show or hide this panel",
-	&"debug": "Debug overlay: P and its parts, tier, speed, Focus, health",
+	&"debug": "Debug overlay: move, string, chain, glide, the target's state",
 	&"fullscreen": "Switch between fullscreen and a window",
 }
 const ACTION_TITLES := {
-	&"move": "Move", &"camera": "Camera", &"punch": "Light", &"heavy": "Heavy", &"kick": "Kick",
-	&"sweep": "Sweep", &"grab": "Grab", &"jump": "Jump", &"crouch": "Crouch", &"block": "Block",
-	&"dash": "Dash / sprint", &"focus": "Focus", &"lock_on": "Lock on", &"lock_switch": "Switch target",
-	&"pause": "Pause", &"restart": "Restart",
+	&"move": "Move", &"camera": "Camera", &"punch": "Punch", &"leg_kick": "Leg kick",
+	&"gut_punch": "Gut punch", &"uppercut": "Uppercut", &"front_kick": "Front kick",
+	&"roundhouse": "Roundhouse", &"kick_layer": "Kick layer", &"grab": "Grab", &"counter": "Counter",
+	&"jump": "Jump", &"dash": "Dash / sprint", &"pursuit": "Pursuit", &"pursuit_hit": "Pursuit hit",
+	&"throw": "Holding: throw", &"knee": "Holding: knee", &"drive": "Holding: drive",
+	&"release": "Holding: release", &"pause": "Pause", &"restart": "Restart",
 	&"help": "Help", &"debug": "Debug", &"fullscreen": "Fullscreen",
 }
-## Combinations that are not actions of their own: [group, after group, keyboard, gamepad].
-const COMBO_ROWS := [[&"sweep", &"kick", "S + E", "Back + B"]]
+## While holding a body the buttons change (Round 7: Grab, drive and throw):
+## [row id, the action whose keys it uses, suffix added to the keys]. Listed
+## right after the Grab row.
+const HOLD_ROWS := [[&"throw", &"punch", ""], [&"knee", &"leg_kick", ""],
+	[&"drive", &"dash", " (hold)"], [&"release", &"grab", ""]]
+const HOLD_AFTER := &"grab"
+## The pursuit (God path) rows follow the Dash row.
+const PURSUIT_AFTER := &"dash"
 
 ## Rows of [title, keyboard+mouse, gamepad, description], one per action, built
-## from Controls.ACTIONS (move_* and cam_* are merged into one row each).
+## from Controls.ACTIONS (move_* and cam_* are merged into one row each). The
+## gamepad's kick-layer moves read "LT + X" (Controls.KICK_LAYER); the pursuit
+## rows follow Dash and the hold actions follow Grab.
 static func control_rows() -> Array:
-	var groups := {}  # group id -> {"kb": PackedStringArray, "pad": PackedStringArray}
+	var groups := _binding_groups()
+	var rows: Array = []
+	for gid: StringName in groups["order"]:
+		rows.append(_row(gid, groups[gid]["kb"], groups[gid]["pad"], ""))
+		if gid == PURSUIT_AFTER:
+			rows.append_array(_pursuit_rows(groups))
+		if gid == HOLD_AFTER:
+			for h: Array in HOLD_ROWS:
+				var src: StringName = h[1]
+				if groups.has(src):
+					rows.append(_row(h[0], groups[src]["kb"], groups[src]["pad"], h[2]))
+	return rows
+
+## Pursuit: Dash after a launch, then the pursuit hit (back + attack spikes).
+static func _pursuit_rows(groups: Dictionary) -> Array:
+	var dash_kb := _first_key(groups, &"dash", "kb")
+	var dash_pad := _first_key(groups, &"dash", "pad")
+	var back := "back"
+	if Controls.ACTIONS.has(&"move_back"):
+		for spec: Array in Controls.ACTIONS[&"move_back"]:
+			if spec[0] == &"key":
+				back = _binding_name(spec)
+				break
+	return [
+		[ACTION_TITLES[&"pursuit"], "%s (after a launch)" % dash_kb, "%s (after a launch)" % dash_pad, ACTION_HELP[&"pursuit"]],
+		[ACTION_TITLES[&"pursuit_hit"], "Attack / %s + attack" % back, "Attack / stick back + attack", ACTION_HELP[&"pursuit_hit"]],
+	]
+
+static func _first_key(groups: Dictionary, gid: StringName, device: String) -> String:
+	var list: PackedStringArray = groups.get(gid, {}).get(device, PackedStringArray())
+	return list[0] if not list.is_empty() else "-"
+
+static func _row(gid: StringName, kb_list: PackedStringArray, pad_list: PackedStringArray, suffix: String) -> Array:
+	var kb_text := " ".join(kb_list) if gid == &"move" else " / ".join(kb_list)
+	return [ACTION_TITLES.get(gid, String(gid).capitalize()),
+		kb_text + suffix if not kb_list.is_empty() else "-",
+		" / ".join(pad_list) + suffix if not pad_list.is_empty() else "-",
+		ACTION_HELP.get(gid, "")]
+
+## {group id: {"kb": names, "pad": names}, "order": [group ids]} from Controls.
+static func _binding_groups() -> Dictionary:
+	if not _groups.is_empty():
+		return _groups
+	var groups := {}
 	var order: Array[StringName] = []
 	for action: StringName in Controls.ACTIONS:
 		var gid := action
@@ -163,8 +227,6 @@ static func control_rows() -> Array:
 			gid = &"move"
 		elif String(action).begins_with("cam_"):
 			gid = &"camera"
-		elif action == &"lock_next" or action == &"lock_prev":
-			gid = &"lock_switch"
 		if not groups.has(gid):
 			groups[gid] = {"kb": PackedStringArray(), "pad": PackedStringArray()}
 			order.append(gid)
@@ -180,20 +242,53 @@ static func control_rows() -> Array:
 		var kb: PackedStringArray = groups[&"camera"]["kb"]
 		kb.insert(0, "Mouse")
 		groups[&"camera"]["kb"] = kb
-	var rows: Array = []
-	for gid in order:
-		var kb_list: PackedStringArray = groups[gid]["kb"]
-		var pad_list: PackedStringArray = groups[gid]["pad"]
-		var kb_text := " ".join(kb_list) if gid == &"move" else " / ".join(kb_list)
-		rows.append([ACTION_TITLES.get(gid, String(gid).capitalize()),
-			kb_text if not kb_list.is_empty() else "-",
-			" / ".join(pad_list) if not pad_list.is_empty() else "-",
-			ACTION_HELP.get(gid, "")])
-		for combo: Array in COMBO_ROWS:
-			if combo[1] == gid:
-				rows.append([ACTION_TITLES.get(combo[0], String(combo[0]).capitalize()), combo[2], combo[3],
-					ACTION_HELP.get(combo[0], "")])
-	return rows
+	# Gamepad kick layer: "LT + X" for the moves the layer turns a button into.
+	var layer: PackedStringArray = groups.get(&"kick_layer", {}).get("pad", PackedStringArray())
+	for base: StringName in Controls.KICK_LAYER:
+		var kicked: StringName = Controls.KICK_LAYER[base]
+		if not groups.has(kicked) or not groups.has(base) or layer.is_empty():
+			continue
+		var base_pad: PackedStringArray = groups[base]["pad"]
+		var pad: PackedStringArray = groups[kicked]["pad"]
+		for b in base_pad:
+			var n := "%s + %s" % [layer[0], b]
+			if not pad.has(n):
+				pad.append(n)
+		groups[kicked]["pad"] = pad
+	if groups.has(&"kick_layer") and not layer.is_empty():
+		groups[&"kick_layer"]["pad"] = PackedStringArray(["%s (hold)" % layer[0]])
+	groups["order"] = order
+	_groups = groups
+	return groups
+
+## The first key of `action` on the keyboard + mouse or the gamepad ("V",
+## "Y", "LT + X"); "-" when it has none. Prompts use the device in pad_active.
+static func key_label(action: StringName, pad := pad_active) -> String:
+	return _first_key(_binding_groups(), action, "pad" if pad else "kb")
+
+## Every key of `action` on one device, "V / Mouse thumb"; "-" when none.
+static func keys_label(action: StringName, pad := pad_active) -> String:
+	var list: PackedStringArray = _binding_groups().get(action, {}).get("pad" if pad else "kb", PackedStringArray())
+	return " / ".join(list) if not list.is_empty() else "-"
+
+## Follow the device the player is using (keyboard + mouse or gamepad).
+## Stick drift and tiny mouse moves do not switch it.
+static func note_input(event: InputEvent) -> void:
+	if event is InputEventJoypadButton:
+		if (event as InputEventJoypadButton).pressed:
+			pad_active = true
+	elif event is InputEventJoypadMotion:
+		if absf((event as InputEventJoypadMotion).axis_value) > 0.5:
+			pad_active = true
+	elif event is InputEventKey:
+		if (event as InputEventKey).pressed:
+			pad_active = false
+	elif event is InputEventMouseButton:
+		if (event as InputEventMouseButton).pressed:
+			pad_active = false
+	elif event is InputEventMouseMotion:
+		if (event as InputEventMouseMotion).relative.length() > 4.0:
+			pad_active = false
 
 static func _binding_name(spec: Array) -> String:
 	match spec[0]:
@@ -204,6 +299,7 @@ static func _binding_name(spec: Array) -> String:
 				KEY_SPACE: return "Space"
 				KEY_SHIFT: return "Shift"
 				KEY_TAB: return "Tab"
+				KEY_BACKSPACE: return "Backspace"
 			var mods: int = spec[2] if spec.size() > 2 else 0  # e.g. "Option+Enter" on macOS
 			return OS.get_keycode_string(int(spec[1]) | mods)
 		&"mouse":
@@ -213,6 +309,8 @@ static func _binding_name(spec: Array) -> String:
 				MOUSE_BUTTON_MIDDLE: return "MMB"
 				MOUSE_BUTTON_WHEEL_UP: return "Wheel up"
 				MOUSE_BUTTON_WHEEL_DOWN: return "Wheel down"
+				MOUSE_BUTTON_XBUTTON1: return "Mouse thumb"
+				MOUSE_BUTTON_XBUTTON2: return "Mouse thumb 2"
 			return "Mouse %d" % int(spec[1])
 		&"joy":
 			match int(spec[1]):
@@ -237,7 +335,8 @@ static func _binding_name(spec: Array) -> String:
 				JOY_AXIS_TRIGGER_RIGHT: return "RT"
 			return "Axis %d" % int(spec[1])
 
-## Centered panel listing every binding. Hidden by default.
+## Centered panel listing every binding. Hidden by default. Sized to fit a
+## 1600x900 window.
 static func controls_panel() -> PanelContainer:
 	var panel := PanelContainer.new()
 	panel.name = "ControlsHelp"
@@ -248,26 +347,30 @@ static func controls_panel() -> PanelContainer:
 	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	var box := VBoxContainer.new()
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_theme_constant_override(&"separation", 8)
 	panel.add_child(box)
-	box.add_child(label("CONTROLS", 40, ACCENT, true))
+	box.add_child(label("CONTROLS", 34, ACCENT, true))
 	var grid := GridContainer.new()
 	grid.columns = 4
 	grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	grid.add_theme_constant_override(&"v_separation", 2)
 	box.add_child(grid)
 	for h in ["", "Keyboard + mouse", "Gamepad", ""]:
-		grid.add_child(label(h, 17, TEXT_DIM))
+		grid.add_child(label(h, 15, TEXT_DIM))
 	for row: Array in control_rows():
-		grid.add_child(label(row[0], 21, ACCENT, true, 5))
-		grid.add_child(label(row[1], 21, TEXT))
-		grid.add_child(label(row[2], 21, TEXT))
-		var d := label(row[3], 18, TEXT_DIM)
-		d.custom_minimum_size.x = 560
+		grid.add_child(label(row[0], 18, ACCENT, true, 4))
+		grid.add_child(label(row[1], 18, TEXT))
+		grid.add_child(label(row[2], 18, TEXT))
+		var d := label(row[3], 16, TEXT_DIM)
+		d.custom_minimum_size.x = 680
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		grid.add_child(d)
-	var focus_note := label("Focus (3 bars, each wave starts with 1): Focus mode, a teleport and a pursuit each cost a full bar. Fills from parries and strong hits, never over time.", 18, FOCUS_COLOR)
-	focus_note.custom_minimum_size.x = 900
-	focus_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	box.add_child(focus_note)
-	box.add_child(label("F1 closes this panel", 16, TEXT_DIM))
+	var tells := label("Orange icon over an enemy: Counter (%s / %s). Blue icon: it can't be countered, Dodge (%s / %s)." % [
+		keys_label(&"counter", false), key_label(&"counter", true), key_label(&"dash", false), key_label(&"dash", true)],
+		16, TELL_STRIKE)
+	tells.custom_minimum_size.x = 900
+	tells.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(tells)
+	box.add_child(label("F1 closes this panel", 15, TEXT_DIM))
 	panel.visible = false
 	return panel

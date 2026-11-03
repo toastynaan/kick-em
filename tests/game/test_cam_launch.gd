@@ -1,16 +1,26 @@
 extends Node
-## F1 launch camera (Feel Reference: Camera > Launch; Build task F1): 50
-## launches in random directions (random launch power and camera yaw, some
-## with the player turning the camera, some locked on, every fifth a thrown
-## body (GameEvents.thrown), walls and pillars around). On every rendered frame the player's chest, head and feet must be
-## inside the viewport (Camera3D.unproject_position against the visible rect,
-## measured after the rig has placed the camera). Also logged: the launch yaw
-## never passes Tuning.CAM_LAUNCH_YAW_RATE and never runs while the player is
-## turning the camera, the framing distance never passes CAM_LAUNCH_DIST, the
-## look-at lean is gone by CAM_LAUNCH_FOLLOW, the arm never shortens for a
-## ragdoll (WORLD-only casts), and how often the body was framed.
+## F1 launch camera (Feel Reference: Camera > Launch; Build task F1) under
+## Round 7 (Acceptance 10: the player stays on screen through launches): 50
+## launches in random directions (random camera yaw; two in five are Round 7
+## launch payoffs (HitInfo.react &"launch", the R7_PAYOFFS speeds and angles,
+## with TimeDirector's finisher slow time), one in five with the player
+## turning the camera, one in five with a combat target the look-at was leaning
+## toward (test_cam_fake_rig.gd), one in five a thrown body (GameEvents.thrown);
+## walls and pillars around). On every rendered frame the player's chest, head
+## and feet must be inside the viewport (Camera3D.unproject_position against the
+## visible rect, measured after the rig has placed the camera). Also logged: the
+## launch yaw never passes Tuning.CAM_LAUNCH_YAW_RATE (the combat auto-yaw never
+## passes R7_CAM_AUTO_YAW_RATE) and neither runs while the player is turning
+## the camera, the framing distance never passes CAM_LAUNCH_DIST, the look-at
+## lean is gone by CAM_LAUNCH_FOLLOW, the arm never shortens for a ragdoll
+## (WORLD-only casts), how often the body was framed, and each launch payoff
+## asked TimeDirector for the finisher exactly once.
 
+const FakeRig := preload("res://tests/game/test_cam_fake_rig.gd")
 const LAUNCHES := 50
+## Round 7 launch payoffs: [move, victim state] from Tuning.R7_PAYOFFS.
+const PAYOFFS: Array = [[&"heavy_hook", &"fold"], [&"front_kick", &"fold"], [&"front_kick", &"lift"],
+	[&"roundhouse", &"lift"]]
 const WATCH := 1.6          ## real s watched per launch (the 1.0 s follow and the return)
 const SEED := 20261102
 
@@ -35,6 +45,9 @@ var _body_frames := 0
 var _body_in := 0
 var _corrections := 0
 var _launch_index := 0
+var _max_combat_yaw := 0.0
+var _combat_yaw_input := 0
+var _other: Fighter
 
 class Probe:
 	extends Node
@@ -105,10 +118,13 @@ func _measure() -> void:
 	_max_yaw_rate = maxf(_max_yaw_rate, _rig.get_auto_yaw_rate())
 	if _rig.get_auto_yaw_rate() > 0.0 and _rig.get_input_age() < CameraRig.LAUNCH_INPUT_YIELD:
 		_yaw_during_input += 1
+	_max_combat_yaw = maxf(_max_combat_yaw, _rig.get_combat_yaw_rate())
+	if _rig.get_combat_yaw_rate() > 0.0 and _rig.get_input_age() < Tuning.CAM_MOUSE_IDLE:
+		_combat_yaw_input += 1
 	_max_dist = maxf(_max_dist, _rig.get_distance())
 	if _rig.get_view_correction() > 0.0005:
 		_corrections += 1
-	if age > Tuning.CAM_LAUNCH_FOLLOW + 0.1 and not _rig.is_locked():
+	if age > Tuning.CAM_LAUNCH_FOLLOW + 0.1:
 		_late_lean = maxf(_late_lean, _rig._launch_lean.length())
 	if age < Tuning.CAM_LAUNCH_FOLLOW and is_instance_valid(_victim):
 		_body_frames += 1
@@ -128,7 +144,7 @@ func _run() -> void:
 	add_child(world)
 	_player = FighterFactory.spawn_player(world, Transform3D(Basis(), Vector3(0, 0.05, 0)))
 	AttackDirector.set_player(_player)
-	_rig = CameraRig.new()
+	_rig = FakeRig.new()
 	_rig.target = _player
 	add_child(_rig)
 	var probe := Probe.new()
@@ -151,8 +167,11 @@ func _run() -> void:
 		blocker.queue_free()
 		await get_tree().process_frame
 	var with_input := 0
-	var with_lock := 0
+	var with_target := 0
 	var with_throw := 0
+	var with_r7 := 0
+	var finisher_ok := 0
+	var finisher_rows := PackedStringArray()
 	for i in LAUNCHES:
 		_launch_index = i
 		# Fresh victim at a random side of the player, 1.3 m off.
@@ -163,37 +182,67 @@ func _run() -> void:
 		_player.teleport_to(Vector3(0, 0.05, 0), at)
 		_victim = FighterFactory.spawn_dummy(world, &"grunt", Transform3D(Basis.looking_at(-at), at))
 		# Random camera yaw (the player turned the camera earlier).
-		_rig.unlock()
 		_rig.apply_manual_input(Vector2(_rng.randf_range(-PI, PI), 0.0))
+		_rig.set(&"fake_target", null)
+		if is_instance_valid(_other):
+			_other.queue_free()
 		await _wait_real(0.35)
-		var lock := i % 5 == 3
-		if lock:
-			_rig._set_lock(_victim)
-			with_lock += 1
-			await _wait_real(0.3)
-		# Launch away from the player, +-50 deg, P 5..12 (launch .. severing launch).
+		if i % 5 == 3:
+			# The look-at was leaning toward another enemy (the combat target) when the launch lands.
+			var side := Vector3(-at.z, 0.0, at.x).normalized() * 2.2 + Vector3(0, 0.05, 0)
+			_other = FighterFactory.spawn_dummy(world, &"grunt", Transform3D(Basis.looking_at(-side), side))
+			_rig.set(&"fake_target", _other)
+			with_target += 1
+			await _wait_real(0.8)
+		# Launch away from the player, +-50 deg.
 		var dir := Vector3(at.x, 0.0, at.z).normalized().rotated(Vector3.UP, deg_to_rad(_rng.randf_range(-50.0, 50.0)))
-		var power := _rng.randf_range(5.0, 12.0)
-		var v := Power.launch_velocity(power, dir, _victim.get_total_mass())
 		var info := HitInfo.new()
 		info.attacker = _player
 		info.victim = _victim
-		info.move_id = &"kick"
-		info.power = power
-		info.tier = Power.tier_of(power)
-		info.reaction = HitInfo.reaction_for_tier(info.tier)
-		info.launch_velocity = v
 		info.hit_position = _victim.get_aim_point()
 		info.hit_direction = dir
 		info.damage = 1.0
+		var r7 := i % 5 == 0 or i % 5 == 2
+		var v := Vector3.ZERO
+		if r7:
+			# Round 7 launch payoff: the table's speed and angle, react &"launch", the move's weight.
+			var pay: Array = PAYOFFS[(int(i / 5.0) * 2 + (1 if i % 5 == 2 else 0)) % PAYOFFS.size()]
+			var row: Dictionary = Tuning.R7_PAYOFFS[pay[0]][pay[1]]
+			var up := deg_to_rad(float(row["launch_angle"]))
+			v = (dir * cos(up) + Vector3.UP * sin(up)) * float(row["launch_speed"])
+			info.move_id = pay[0]
+			info.react = &"launch"
+			info.payoff = true
+			info.victim_state = pay[1]
+			info.weight = float(Tuning.R7_MOVES[pay[0]]["weight"])
+			info.tier = HitInfo.Tier.LAUNCH
+			with_r7 += 1
+		else:
+			# Round 5 power launches (P 5..12: launch .. severing launch): other sources still frame alike.
+			var power := _rng.randf_range(5.0, 12.0)
+			v = Power.launch_velocity(power, dir, _victim.get_total_mass())
+			info.move_id = &"kick"
+			info.power = power
+			info.tier = Power.tier_of(power)
+			info.reaction = HitInfo.reaction_for_tier(info.tier)
+		info.launch_velocity = v
 		_victim.launch(v, _victim.get_aim_point())
 		if i % 5 == 4:
 			# A thrown body (G's Carry emits thrown): framed by the same rules.
 			GameEvents.thrown.emit(_player, _victim, v)
 			with_throw += 1
 		else:
+			var n0 := TimeDirector.get_finisher_requests()
 			GameEvents.fighter_launched.emit(_victim, v)
 			GameEvents.hit_landed.emit(info)
+			var asked := TimeDirector.get_finisher_requests() - n0
+			if r7:
+				var slowed := absf(Engine.time_scale - float(Tuning.SLOW_TIME[&"finisher"]["scale"])) < 0.001
+				if asked == 1 and slowed:
+					finisher_ok += 1
+				finisher_rows.append("%s on %s %.0f m/s: %d request, %.2fx" % [info.move_id, info.victim_state, v.length(), asked, Engine.time_scale])
+			elif asked != 0:
+				finisher_rows.append("launch %d (no payoff) asked for the finisher" % i)
 		_launch_t0 = TimeDirector.now()
 		_measuring = true
 		var turning := i % 5 == 1
@@ -208,8 +257,9 @@ func _run() -> void:
 		_measuring = false
 		TimeDirector.reset()
 
-	print("  F1 measured: %d launches (%d thrown bodies, %d with camera input, %d locked), %d frames watched" % [
-		LAUNCHES, with_throw, with_input, with_lock, _frames])
+	print("  F1 measured: %d launches (%d Round 7 launch payoffs, %d thrown bodies, %d with camera input, %d with a combat target), %d frames watched" % [
+		LAUNCHES, with_r7, with_throw, with_input, with_target, _frames])
+	print("  finisher: ", "; ".join(finisher_rows.slice(0, 6)), " ...")
 	print("  F1 worst viewport margin (px, negative = outside): chest %.0f, head %.0f, feet %.0f  (worst at %s)" % [
 		_worst["chest"], _worst["head"], _worst["feet"], _worst_at])
 	print("  F1 body framed on %d / %d follow frames (%.0f%%); view corrections on %d frames" % [
@@ -219,6 +269,11 @@ func _run() -> void:
 	_check(_max_yaw_rate <= deg_to_rad(Tuning.CAM_LAUNCH_YAW_RATE) + 0.001,
 		"launch yaw never faster than %.0f deg/s (max %.1f deg/s)" % [Tuning.CAM_LAUNCH_YAW_RATE, rad_to_deg(_max_yaw_rate)])
 	_check(_yaw_during_input == 0, "no launch yaw while the player turns the camera (%d frames)" % _yaw_during_input)
+	_check(_max_combat_yaw <= deg_to_rad(Tuning.R7_CAM_AUTO_YAW_RATE) + 0.001 and _combat_yaw_input == 0,
+		"combat auto-yaw at most %.0f deg/s (max %.1f), never within %.1f s of camera input (%d frames)" % [
+		Tuning.R7_CAM_AUTO_YAW_RATE, rad_to_deg(_max_combat_yaw), Tuning.CAM_MOUSE_IDLE, _combat_yaw_input])
+	_check(finisher_ok == with_r7 and finisher_rows.size() == with_r7,
+		"every launch payoff asked TimeDirector for the finisher once, and it slowed time (%d / %d; other launches never asked)" % [finisher_ok, with_r7])
 	_check(_max_dist <= Tuning.CAM_LAUNCH_DIST + 0.01, "framing distance never past %.0f m (max %.2f m)" % [Tuning.CAM_LAUNCH_DIST, _max_dist])
 	_check(_late_lean < 0.15, "the look-at lean is gone by %.1f s + 0.1 (max %.2f m left)" % [Tuning.CAM_LAUNCH_FOLLOW, _late_lean])
 	_check(_body_in > _body_frames * 0.5, "the flying body is framed on most follow frames (%d / %d)" % [_body_in, _body_frames])

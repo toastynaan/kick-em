@@ -9,10 +9,7 @@ extends Node3D
 ## 3. A slam (an air attack from over 2 m) craters at once (exactly level 2:
 ##    one impact, one mark), and its blast shatters a glass pane 2.0 m away (not
 ##    one 3.2 m away) and hops a brick.
-## 3b. A real carry body slam (G's Carry: grab, a normal jump, Light in the air)
-##    is one crater: exactly one floor mark, level 2 (the landing, body_slammed
-##    and the victim's own floor impact are one impact), and its blast breaks
-##    K's glass (Furniture &"glass") 1.8 m away.
+## (3b, the carry body slam, went with Round 7: the air body slam is removed.)
 ## 4. A launched body slammed into the floor marks it (body_impact).
 ## 5. The tiled plaza: a hard landing on it pops tiles as persistent pieces
 ##    (surface &"tile"), and floor_damaged reports &"tile".
@@ -79,9 +76,6 @@ func _ready() -> void:
 			b["radius"], b["power"]]), near_glass.is_broken, far_glass.is_broken, hop["vy"]],
 		r["level"] == &"heavy" and r["floor"] == 2 and slam_blasts.size() == 1 and near_glass.is_broken \
 		and not far_glass.is_broken and float(hop["vy"]) > 0.5)
-
-	# 3b. A real carry body slam.
-	await _carry_slam(p)
 
 	# 4. A launched body slammed down into the floor.
 	var body := WorldTestUtil.spawn_body(self, Transform3D(Basis(), Vector3(-15, 0.05, 10)), false, &"player")
@@ -159,65 +153,3 @@ func _drop(p: Fighter, at: Vector3, height: float, slam: bool) -> Dictionary:
 	await WorldTestUtil.wait_game(self, 0.6)
 	return res
 
-## 3b. The player grabs a grunt (G's Carry), jumps (a normal jump) and presses
-## Light in the air: a body slam. K's glass stands 1.8 m to the side.
-func _carry_slam(p: Fighter) -> void:
-	Carry.force_enabled = true
-	var at := Vector3(0.0, 0.0, 12.0)
-	p.velocity = Vector3.ZERO
-	p.global_transform = Transform3D(Basis.looking_at(Vector3.FORWARD, Vector3.UP), at + Vector3(0, 0.05, 0))
-	p.reset_physics_interpolation()
-	var glass := Furniture.create(&"glass", Transform3D(Basis(Vector3.UP, PI * 0.5), at + Vector3(1.8, 0.0, 0.3)))
-	add_child(glass)
-	var e := FighterFactory.spawn_dummy(self, &"grunt", Transform3D(Basis.looking_at(Vector3.BACK, Vector3.UP),
-		at + Vector3(0.0, 0.05, -1.0)), Fighter.TEAM_ENEMY)
-	e.max_hp = 1000.0
-	e.hp = 1000.0
-	await WorldTestUtil.wait_game(self, 0.2)
-	var slams: Array = []
-	var on_slam := func(h: Node3D, v: Node3D, pos: Vector3) -> void: slams.append([h, v, pos])
-	GameEvents.body_slammed.connect(on_slam)
-	var reached: Array = []
-	var on_blast := func(c: Vector3, _r: float, _pw: float, source: StringName, hit: Array) -> void:
-		for x: Array in hit:
-			if x[0] == glass:
-				reached.append("%s %.0f J -> %s" % [source, x[1], x[2]])
-	WorldDamage.blasted.connect(on_blast)
-	var held := p.carry.grab_now(e, &"", true)
-	await WorldTestUtil.wait_game(self, 0.35)
-	var n0 := _floor_events.size()
-	var cells0 := WorldDamage.get_floor_counts()
-	var jumped := p.traversal.on_jump_pressed()
-	await WorldTestUtil.wait_game(self, 0.18)
-	p.combat.press(CombatController.Action.LIGHT)
-	await WorldTestUtil.wait_game(self, 0.03)
-	var slamming := p.carry.is_slamming()
-	p.combat.release(CombatController.Action.LIGHT)
-	var t := 0.0
-	while slams.is_empty() and t < 1.5:
-		await get_tree().physics_frame
-		t += 1.0 / 120.0
-	await WorldTestUtil.wait_game(self, 1.0)
-	GameEvents.body_slammed.disconnect(on_slam)
-	WorldDamage.blasted.disconnect(on_blast)
-	var marks := _floor_events.slice(n0)
-	var cells := WorldDamage.get_floor_counts()
-	var pos: Vector3 = slams[0][2] if not slams.is_empty() else at
-	var e_slam := 0.5 * (p.get_total_mass() + e.get_total_mass()) * WorldDamage.SLAM_SPEED * WorldDamage.SLAM_SPEED
-	var new_craters := int(cells["craters"]) - int(cells0["craters"])
-	var new_cracks := int(cells["cracks"]) - int(cells0["cracks"])
-	var new_rubble := int(cells["rubble"]) - int(cells0["rubble"])
-	var glass_by_blast := reached.filter(func(x: String) -> bool: return x.ends_with("break")).size() >= 1
-	_line("carry body slam (grab=%s, jump=%s, slamming=%s, body_slammed %d at %s, %.0f J): floor_damaged %s; new cells: %d cracks, %d craters, %d rubble; floor level there %d; K's glass at 1.8 m: %s, broken=%s" % [
-		held, jumped, slamming, slams.size(), pos, e_slam, marks.map(func(x: Dictionary) -> String: return "level %d at %s" % [
-			x["level"], x["pos"]]), new_cracks, new_craters, new_rubble, WorldDamage.floor_level_at(pos), reached,
-		glass.is_broken],
-		held and jumped and slamming and slams.size() == 1 and marks.size() == 1 and int(marks[0]["level"]) == 2 \
-		and new_craters == 1 and new_cracks == 0 and new_rubble == 0 and WorldDamage.floor_level_at(pos) == 2 \
-		and glass.is_broken and glass_by_blast)
-	Carry.force_enabled = false
-	e.queue_free()
-	if is_instance_valid(glass):
-		glass.queue_free()
-	p.velocity = Vector3.ZERO
-	await WorldTestUtil.wait_game(self, 0.5)

@@ -4,9 +4,13 @@ extends "res://tests/move/move_test_base.gd"
 ## - base level, heavy: the runner is knocked down (the heavy only flinches)
 ##   and can act again within 1.1 s;
 ## - base level, grunt: both stumble, the runner drops to walking speed;
-## - level 3: a line of 3 grunts are all knocked down;
+## - level 3 (Round 7 amendment): a line of 3 grunts are all launched, ahead and
+##   up at the runner's speed x R7_RAM_LAUNCH_SHARE, R7_RAM_LAUNCH_ANGLE up
+##   (speed and angle printed), the runner keeps 95% per ram; the launches go
+##   through the hit pipeline with the player as the attacker (pursuit window);
 ## - every collision adds a 50 ms hitstop on both;
-## - no collision at any level launches (tiers <= knockdown, bodies drop in place);
+## - levels 0-2 never launch (tiers <= knockdown, bodies drop in place); level 3
+##   launches normal enemies and knocks heavies down;
 ## - 200 sprint attacks at base level never knock the player down;
 ## - below 85% of the cap a touch is not a ram.
 
@@ -23,7 +27,7 @@ func run() -> void:
 	await _base_grunt(p)
 	await _slow_touch(p)
 	await _level3_line(p)
-	await _no_launch_any_level(p)
+	await _no_launch_any_level(p)  # levels 0-2 (and heavies at 3) never launch; a level-3 grunt does
 	await _sprint_attacks(p, 200)
 	done()
 
@@ -132,26 +136,74 @@ func _slow_touch(p: Fighter) -> void:
 
 func _level3_line(p: Fighter) -> void:
 	Tuning.debug_ram_level = 3
+	# Spaced and staggered so a launched body does not bowl the next one (it
+	# flies to the side the grunt stood on).
 	var line: Array[Fighter] = []
-	for z in [-2.0, -5.0, -8.0]:
-		line.append(spawn_enemy(&"grunt", Vector3(0.0, 0.0, z)))
+	for spot: Vector2 in [Vector2(0.25, -2.0), Vector2(-0.25, -10.0), Vector2(0.25, -18.0)]:
+		line.append(spawn_enemy(&"grunt", Vector3(spot.x, 0.0, spot.y)))
 	await ticks(10)
+	await settle(p, 10)
+	p.global_position = Vector3(0.0, 0.02, LANE_Z0)
+	p.rotation.y = 0.0
+	await ticks(6)
 	clear_events()
-	await _ram_run(p)
-	await wait_until(func() -> bool: return count_events(&"rammed") >= 3 or p.global_position.z < -12.0, 300)
+	var v_before: Array[float] = []
+	var v_after_each: Array[float] = []
+	p.move_input = Vector3.FORWARD
+	dash_down(p)
+	var prev := 0.0
+	for i in 600:
+		var n := count_events(&"rammed")
+		await get_tree().physics_frame
+		if count_events(&"rammed") > n:
+			v_before.append(prev)
+			v_after_each.append(hspeed(p))
+		prev = hspeed(p)
+		if count_events(&"rammed") >= 3 or p.global_position.z < -22.0:
+			break
+	var v_after := hspeed(p)
 	await ticks(20)
 	var tiers := []
-	var downed := 0
+	var flying := 0
+	var rows := []
+	var ok_speed := true
 	for g in line:
 		var info := _victim_info(p, g)
 		tiers.append(HitInfo.tier_name(info.tier) if info else &"-")
-		if g.is_down():
-			downed += 1
-	print("  level 3 through a line of 3 grunts: rams %d, tiers %s, down %d, runner down %s, speed after %.2f" % [
-		count_events(&"rammed"), tiers, downed, p.is_down(), hspeed(p)])
-	check(count_events(&"rammed") == 3 and tiers == [&"knockdown", &"knockdown", &"knockdown"] and downed == 3,
-		"at level 3 a line of 3 grunts all get knocked down")
-	check(not p.is_down(), "the runner keeps running")
+		if g.is_launched() or g.is_down():
+			flying += 1
+		var lv: Vector3 = info.launch_velocity if info else Vector3.ZERO
+		var flat := Vector2(lv.x, lv.z).length()
+		var ang := rad_to_deg(atan2(lv.y, flat))
+		rows.append("%.2f m/s at %.1f deg" % [lv.length(), ang])
+		if info == null or not near(ang, Tuning.R7_RAM_LAUNCH_ANGLE, 0.5):
+			ok_speed = false
+	# Each launch speed against the runner's speed at that ram.
+	var ratios := []
+	for i in mini(v_before.size(), line.size()):
+		var info := _victim_info(p, line[i])
+		var r := (info.launch_velocity.length() / maxf(v_before[i], 0.01)) if info else 0.0
+		ratios.append("%.2f" % r)
+		if not near(r, Tuning.R7_RAM_LAUNCH_SHARE, 0.1):
+			ok_speed = false
+	var keeps := []
+	var ok_keep := v_before.size() == 3
+	for i in mini(v_before.size(), v_after_each.size()):
+		var k := v_after_each[i] / maxf(v_before[i], 0.01)
+		keeps.append("%.2f->%.2f (%.0f%%)" % [v_before[i], v_after_each[i], k * 100.0])
+		ok_keep = ok_keep and near(k, 0.95, 0.02)
+	print("  level 3 through a line of 3 grunts: rams %d, tiers %s, launched %d, launches %s (x runner speed %s; want x%.1f, %.0f deg up), runner per ram %s, %.2f m/s after, down %s" % [
+		count_events(&"rammed"), tiers, flying, rows, ratios, Tuning.R7_RAM_LAUNCH_SHARE, Tuning.R7_RAM_LAUNCH_ANGLE,
+		keeps, v_after, p.is_down()])
+	check(count_events(&"rammed") == 3 and tiers == [&"launch", &"launch", &"launch"] and flying == 3,
+		"at level 3 a line of 3 grunts are all launched")
+	check(ok_speed and ratios.size() == 3, "each flies at the runner's speed x %.1f, %.0f degrees up" % [Tuning.R7_RAM_LAUNCH_SHARE, Tuning.R7_RAM_LAUNCH_ANGLE])
+	var launched_ev := 0
+	for e in events_of(&"fighter_launched"):
+		if line.has(e[0]):
+			launched_ev += 1
+	check(launched_ev >= 3, "the launches go through the hit pipeline (HitInfo attacker = the player) and Fighter.launch (fighter_launched x %d)" % launched_ev)
+	check(not p.is_down() and ok_keep, "the runner keeps 95%% of its speed per ram (%s)" % ", ".join(keeps))
 	dash_up(p)
 	await settle(p, 30)
 	for g in line:
@@ -164,6 +216,7 @@ func _no_launch_any_level(p: Fighter) -> void:
 	var worst_speed := 0.0
 	var launches := 0
 	var rows := []
+	var l3_grunt_launched := false
 	for lvl in 4:
 		for arch: StringName in [&"grunt", &"heavy"]:
 			Tuning.debug_ram_level = lvl
@@ -178,6 +231,15 @@ func _no_launch_any_level(p: Fighter) -> void:
 				peak = maxf(peak, Vector2(cv.x, cv.z).length())
 			var info := _victim_info(p, e)
 			var t := info.tier if info else 0
+			rows.append("L%d %s:%s %.1f" % [lvl, arch, HitInfo.tier_name(t), peak])
+			if lvl == 3 and arch == &"grunt":
+				# The amendment: level 3 launches normal enemies (checked above and here).
+				l3_grunt_launched = info != null and info.tier == HitInfo.Tier.LAUNCH and peak > 5.0
+				dash_up(p)
+				await settle(p, 90)
+				e.queue_free()
+				await ticks(2)
+				continue
 			worst_tier = maxi(worst_tier, t)
 			worst_speed = maxf(worst_speed, peak)
 			for le in events_of(&"fighter_launched"):
@@ -185,16 +247,16 @@ func _no_launch_any_level(p: Fighter) -> void:
 					launches += 1
 			if info != null and (HitInfo.is_launch_tier(info.tier) or info.launch_velocity.length() > 0.0):
 				launches += 1
-			rows.append("L%d %s:%s %.1f" % [lvl, arch, HitInfo.tier_name(t), peak])
 			dash_up(p)
 			await settle(p, 90)
 			e.queue_free()
 			await ticks(2)
 	Tuning.debug_ram_level = 0
 	print("  every level x grunt/heavy (tier, victim peak horizontal COM m/s): %s" % ", ".join(rows))
-	check(launches == 0 and worst_tier <= HitInfo.Tier.KNOCKDOWN, "no collision at any level causes a launch (worst tier %s)" % HitInfo.tier_name(worst_tier))
+	check(launches == 0 and worst_tier <= HitInfo.Tier.KNOCKDOWN, "levels 0-2 and heavies at level 3: no launch (worst tier %s)" % HitInfo.tier_name(worst_tier))
 	# The slowest launch (6 m/s at 30 degrees) moves 5.2 m/s sideways.
-	check(worst_speed < 4.5, "rammed bodies never fly: peak horizontal %.2f m/s (a launch is >= 5.2)" % worst_speed)
+	check(worst_speed < 4.5, "those rammed bodies never fly: peak horizontal %.2f m/s (a launch is >= 5.2)" % worst_speed)
+	check(l3_grunt_launched, "level 3 launches a grunt (the amendment)")
 
 func _sprint_attacks(p: Fighter, n: int) -> void:
 	Tuning.debug_ram_level = 0

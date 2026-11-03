@@ -1,14 +1,15 @@
 extends Node
 ## Crowd attack rate (Upgrade 2 risk: target one attack turn every 1-1.5 s
-## of open play; a grunt's jab-cross string is one turn) and Focus clocks.
+## of open play; a grunt's jab-cross string is one turn) and the slow-motion clocks.
 ## Four Grunts already fighting round an open, invulnerable player:
 ## A. 30 s at 1x: mean gap between turns within [RATE_MIN, RATE_MAX] s, and
 ##    no two different attackers' first active frames closer than
 ##    Tuning.TOKEN_ACTIVE_GAP.
-## B. 15 s (real) of Focus (TimeDirector.begin_focus: world at 0.3x): attacks
-##    keep coming, no token is lost to a timeout, enemy wind-ups last ~3.3x
-##    longer in real time (enemy frame data runs in their scaled time), spacing
-##    holds. OWNER: agent C (AI tests).
+## B. 15 s (real) of slow motion (TimeDirector.request_slowmo: world at
+##    SLOW_SCALE; Round 7 removed Focus mode, slow motion comes from finishers,
+##    wall breaks and KOs): attacks keep coming, no token is lost to a timeout,
+##    enemy wind-ups last ~1/SLOW_SCALE longer in real time (enemy frame data
+##    runs in their scaled time), spacing holds. OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 const RATE_MIN := 0.9
@@ -16,6 +17,8 @@ const RATE_MAX := 1.6
 ## s (world): a tell this soon after the same attacker's previous one is its
 ## string's next hit, not a new turn.
 const STRING_GAP := 1.0
+## World time scale of part B (the old Focus scale; a long finisher-like slow motion).
+const SLOW_SCALE := 0.3
 
 var failures := 0
 var player: Fighter
@@ -74,28 +77,33 @@ func _run() -> void:
 	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "1x: first active frames of different attackers >= %.0f frames apart (closest %.1f)" % [
 		Tuning.TOKEN_ACTIVE_GAP * 60.0, _min_gap(1) * 60.0])
 
-	# --- B: Focus, world at 0.3x for 15 s of real time.
+	# --- B: slow motion, world at SLOW_SCALE for 15 s of real time.
 	tells.clear()
 	actives.clear()
 	wasted = 0
-	TimeDirector.begin_focus(Tuning.FOCUS_SCALE)
-	await _run_for(15.0)
-	print("[ai] info: time scale during Focus %.2f" % Engine.time_scale)
-	TimeDirector.end_focus()
+	var granted := TimeDirector.request_slowmo(SLOW_SCALE, 15.0, TimeDirector.PRIO_DODGE)
+	await _run_for(1.0)
+	var scale_seen := Engine.time_scale
+	await _run_for(14.0)
+	print("[ai] info: slow motion granted %s, time scale %.2f" % [granted, scale_seen])
+	TimeDirector.reset()
+	Engine.time_scale = 1.0
+	check(granted and absf(scale_seen - SLOW_SCALE) < 0.05, "slow motion runs at %.2f (%.2f)" % [SLOW_SCALE, scale_seen])
 	var tells_b := tells.duplicate()
 	var real_tell := _real_tell_time()
-	print("[ai] info: Focus: %d tells in 15 s real (4.5 s world); tell to active %.2f s real; tokens wasted %d" % [tells_b.size(), real_tell, wasted])
-	check(tells_b.size() >= 2, "Focus: attacks keep coming (%d tells)" % tells_b.size())
-	check(wasted <= 1, "Focus: no token lost to a timeout (%d released unused)" % wasted)
-	var min_startup := Tuning.frames(Tuning.ENEMY_STARTUP_EARLY_MIN)
-	check(real_tell < 0.0 or real_tell > min_startup / Tuning.FOCUS_SCALE * 0.8,
-		"Focus: a wind-up lasts ~1/%.1f longer in real time (%.2f s, >= %.2f)" % [Tuning.FOCUS_SCALE, real_tell, min_startup / Tuning.FOCUS_SCALE * 0.8])
-	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "Focus: first active frames >= %.0f frames apart in world time (closest %.1f)" % [
+	print("[ai] info: slow motion: %d tells in 15 s real (%.1f s world); tell to active %.2f s real; tokens wasted %d" % [
+		tells_b.size(), 15.0 * SLOW_SCALE, real_tell, wasted])
+	check(tells_b.size() >= 2, "slow motion: attacks keep coming (%d tells)" % tells_b.size())
+	check(wasted <= 1, "slow motion: no token lost to a timeout (%d released unused)" % wasted)
+	var min_startup := Tuning.frames(AttackDirector.tell_min_frames())
+	check(real_tell < 0.0 or real_tell > min_startup / SLOW_SCALE * 0.8,
+		"slow motion: a wind-up lasts ~1/%.1f longer in real time (%.2f s, >= %.2f)" % [SLOW_SCALE, real_tell, min_startup / SLOW_SCALE * 0.8])
+	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "slow motion: first active frames >= %.0f frames apart in world time (closest %.1f)" % [
 		Tuning.TOKEN_ACTIVE_GAP * 60.0, _min_gap(1) * 60.0])
-	# And straight after Focus.
+	# And straight after it.
 	actives.clear()
 	await _run_for(8.0)
-	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "after Focus: spacing holds (closest %.1f frames)" % (_min_gap(1) * 60.0))
+	check(_min_gap(1) >= Tuning.TOKEN_ACTIVE_GAP - 0.005, "after slow motion: spacing holds (closest %.1f frames)" % (_min_gap(1) * 60.0))
 	_finish()
 
 ## Tells that start an attack turn (not a string's later hit).
@@ -140,7 +148,7 @@ func _run_for(seconds: float) -> void:
 		await get_tree().physics_frame
 
 func _finish() -> void:
-	TimeDirector.end_focus()
+	TimeDirector.reset()
 	Engine.time_scale = 1.0
 	AttackDirector.reset()
 	print("[ai] test_crowd_rate: %s (%d failures)" % ["PASS" if failures == 0 else "FAIL", failures])

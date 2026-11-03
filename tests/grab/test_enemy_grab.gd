@@ -10,7 +10,13 @@ extends Node3D
 ## - no break, e_grab: the throw knocks the player down (preset KNOCKDOWN,
 ##   Tuning.DMG_ENEMY e_grab), never a launch tier, no limb lost; he gets up;
 ## - e_grab_slam (heavy): lift and slam, KNOCKDOWN, DMG_ENEMY e_grab_slam;
-## - a vanished or invulnerable player cannot be grabbed.
+## - an invulnerable player (a dodge, a counter, the get-up) cannot be grabbed;
+## - teleport (Tuning.debug_teleport on, H's Defence): the real player presses
+##   Dash (Input.action_press(&"dash") -> PlayerController -> CombatController
+##   -> Defence) inside R7_TELEPORT_WINDOW before an e_grab's first active
+##   frame: he teleports (or sidesteps), Defence.intercepts() takes the grab
+##   (connect_enemy_grab refuses it), and the grab misses: never held, no
+##   grab_started, no throw.
 ## OWNER: agent G.
 
 var _fail: Array[String] = []
@@ -23,10 +29,10 @@ func _ready() -> void:
 		get_tree().quit(1))
 	Carry.force_enabled = true
 	GameEvents.hit_landed.connect(func(info: HitInfo) -> void: _hits.append(info))
-	for sig: StringName in [&"grab_broken", &"grab_started", &"limb_severed"]:
+	for sig: StringName in [&"grab_broken", &"grab_started", &"limb_severed", &"teleported"]:
 		var s := sig
-		GameEvents.connect(s, func(a = null, b = null, c = null) -> void:
-			_events.append([s, a, b, c]))
+		GameEvents.connect(s, func(a = null, b = null, c = null, d = null) -> void:
+			_events.append([s, a, b, c, d]))
 	GrabTestUtil.make_floor(self)
 	await get_tree().physics_frame
 	await _held_then_thrown(&"grunt", &"e_grab", false)
@@ -35,6 +41,7 @@ func _ready() -> void:
 	await _break(-2)
 	await _late_press()
 	await _refusals()
+	await _teleport()
 	_finish()
 
 func _pair(archetype: StringName) -> Array:
@@ -152,13 +159,47 @@ func _refusals() -> void:
 	p.invuln_until = TimeDirector.now() + 1.0
 	var inv := e.carry.connect_enemy_grab(p, &"e_grab")
 	p.invuln_until = 0.0
-	var vanished := false
-	if p.defence != null and p.defence.is_enabled():
-		# Defence decides vanish itself; nothing to force here.
-		vanished = p.defence.is_vanished()
-	print("[refuse] invulnerable player grabbed=%s (vanish check active=%s)" % [inv, vanished])
+	print("[refuse] invulnerable player grabbed=%s" % inv)
 	_check(not inv and not p.carry.is_held(), "an invulnerable player cannot be grabbed")
 	await _clear(pr)
+
+func _teleport() -> void:
+	GrabTestUtil.reset_world()
+	GrabTestUtil.release_all_input()
+	_hits.clear()
+	_events.clear()
+	var was := Tuning.debug_teleport
+	Tuning.debug_teleport = true
+	var p := GrabTestUtil.spawn_player(self, Vector3.ZERO, Vector3.FORWARD)
+	var cam := GrabTestUtil.make_camera(self, p, Vector3.FORWARD)
+	var e := GrabTestUtil.spawn(self, &"grunt", Vector3(0.0, 0.0, -1.0), Vector3.BACK)
+	await GrabTestUtil.frames(self, 30)
+	var started := e.combat.start_enemy_attack(&"e_grab", Tuning.frames(float(Tuning.ENEMY_STARTUP[&"e_grab"])))
+	var in_window := await GrabTestUtil.wait_until(self, func() -> bool:
+		var t := e.combat.time_to_active()
+		return t > 0.0 and t <= Tuning.R7_TELEPORT_WINDOW - Tuning.frames(2.0), 1.0)
+	var tta := e.combat.time_to_active()
+	await GrabTestUtil.key_tap(self, &"dash", 1)
+	var seen := {"intercepts": false, "refused": false, "held": false}
+	await GrabTestUtil.wait_until(self, func() -> bool:
+		if p.carry.is_held():
+			seen["held"] = true
+		if p.defence.intercepts(e, &"e_grab") and not seen["refused"]:
+			seen["intercepts"] = true
+			seen["refused"] = not e.carry.connect_enemy_grab(p, &"e_grab") and not p.carry.is_held()
+		return not e.combat.is_attacking(), 1.5)
+	await GrabTestUtil.wait(self, 0.3)
+	var tele: Array = _events.filter(func(ev: Array) -> bool: return ev[0] == &"teleported" and ev[1] == p)
+	var thrown := _hits.any(func(h: HitInfo) -> bool: return h.victim == p and h.move_id == &"e_grab")
+	print("[teleport] e_grab started=%s, Dash %.3f s before its first active frame (window %.2f s): teleported %s, intercepts=%s, connect refused=%s, held=%s, grab_started %d, thrown=%s, gap after %.2f m" % [
+		started, tta, Tuning.R7_TELEPORT_WINDOW, tele.map(func(ev: Array) -> StringName: return ev[4]), seen["intercepts"],
+		seen["refused"], seen["held"], _count(&"grab_started"), thrown, _gap(p, e)])
+	_check(started and in_window and tele.size() == 1, "Dash inside R7_TELEPORT_WINDOW before the grab teleports (real input)")
+	_check(seen["intercepts"] and seen["refused"], "Defence.intercepts() takes the grab: connect_enemy_grab refuses it")
+	_check(not seen["held"] and _count(&"grab_started") == 0 and not thrown, "the grab misses: never held, no throw")
+	Tuning.debug_teleport = was
+	GrabTestUtil.release_all_input()
+	await _clear([p, e, cam])
 
 func _check(ok: bool, what: String) -> void:
 	print(("  ok   " if ok else "  FAIL ") + what)

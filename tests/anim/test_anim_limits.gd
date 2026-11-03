@@ -43,7 +43,11 @@ func _ready() -> void:
 	# --- 2. Contact poses reach their targets (the limits did not bend them away). ---
 	var miss_bad: Array = []
 	var worst_miss := 0.0
-	for id in PoseLibrary.ROUND5_MOVE_IDS:
+	var contact_ids: Array[StringName] = PoseLibrary.ROUND5_MOVE_IDS.duplicate()
+	for id in PoseLibrary.ROUND7_STRIKE_IDS:
+		if not contact_ids.has(id):
+			contact_ids.append(id)
+	for id in contact_ids:
 		if not PoseLibrary.STRIKE_BONES.has(id):
 			continue
 		var pname := _contact_pose(id)

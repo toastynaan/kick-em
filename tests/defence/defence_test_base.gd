@@ -1,20 +1,20 @@
 extends "res://tests/input/input_test_base.gd"
-## Shared helpers for tests/defence/* (Round 5: parry, teleport, sidestep,
-## pursuit, Focus). Builds on the input test base (floor, events, checks).
+## Shared helpers for tests/defence/* (Round 7: the counter, the free teleport
+## and pursuit). Builds on the input test base (floor, events, checks).
 ## OWNER: agent H (fighter, player & defence).
 
-const DEF_EVENTS: Array[StringName] = [&"parried", &"parry_whiffed", &"teleported", &"sidestepped",
-	&"counter_bonus_changed", &"hit_landed", &"pursuit", &"attack_active", &"fighter_launched"]
+const DEF_EVENTS: Array[StringName] = [&"counter_window", &"hit_landed", &"attack_active",
+	&"fighter_launched", &"teleported", &"sidestepped", &"pursuit", &"dodged"]
 
 func _ready() -> void:
-	_timeout = 280.0
+	_timeout = 900.0
 	for sig: StringName in DEF_EVENTS:
 		var s := sig
 		GameEvents.connect(s, func(a = null, b = null, c = null, d = null) -> void:
 			events.append([s, a, b, c, TimeDirector.now(), d]))
 	super._ready()
 
-## An enemy dummy (no brain) `dist` m in front of the player, facing it.
+## An enemy dummy (no brain) at `offset` from the player, facing it.
 func spawn_attacker(p: Fighter, archetype: StringName, offset: Vector3) -> Fighter:
 	var pos := p.global_position + offset
 	return spawn_dummy(archetype, pos, p.global_position - pos)
@@ -28,23 +28,28 @@ func wait_for_lead(e: Fighter, lead: float, max_ticks := 600) -> bool:
 		await get_tree().physics_frame
 	return false
 
-## Real time of `e`'s next first active frame (waits for it).
+## Real time of `e`'s next first active frame (waits for it; -1 if it never comes).
 func wait_active(e: Fighter, max_ticks := 600) -> float:
 	for i in max_ticks:
 		if e.combat.is_attack_active():
 			return TimeDirector.now()
+		if not e.combat.is_attacking():
+			return -1.0
 		await get_tree().physics_frame
 	return -1.0
 
 ## Wait until the fighter can act again (and the world runs at normal speed).
-func settle(f: Fighter, max_ticks := 600) -> void:
+func settle(f: Fighter, max_ticks := 900) -> void:
 	await wait_until(func() -> bool: return (f.is_dead() or (f.can_act() and not f.combat.is_attacking())) \
 		and Engine.time_scale > 0.99, max_ticks)
 
 ## Put `f` back on its feet at `pos` facing `facing` (between scripted rounds).
 func reset_fighter(f: Fighter, pos: Vector3, facing: Vector3) -> void:
+	if f.carry != null and f.carry.is_holding():
+		f.carry.drop(&"test")
 	if f.ragdoll and f.ragdoll.is_simulating():
 		f.ragdoll.force_recover()
+	f.clear_react()
 	f.combat.cancel()
 	f.clear_forced_velocity()
 	f.teleport_to(pos, facing)
@@ -60,8 +65,8 @@ func last_hit_by(attacker: Fighter) -> HitInfo:
 	return null
 
 ## A strike HitInfo from `attacker` on `victim` with a preset tier (and the
-## matching legacy reaction), to drive Focus income and pursuit windows
-## without depending on move data.
+## matching legacy reaction), to open pursuit windows without depending on
+## move data.
 func scripted_hit(attacker: Fighter, victim: Fighter, tier: int, p := 0.0) -> HitInfo:
 	var info := HitInfo.new()
 	info.attacker = attacker
@@ -84,3 +89,28 @@ func scripted_hit(attacker: Fighter, victim: Fighter, tier: int, p := 0.0) -> Hi
 		info.energy = 0.5 * victim.get_total_mass() * info.launch_velocity.length_squared()
 	info.hitstop = Power.hitstop_for(tier)
 	return info
+
+## Wait `seconds` of real time.
+func wait_real(seconds: float) -> void:
+	var t0 := TimeDirector.now()
+	while TimeDirector.now() - t0 < seconds:
+		await get_tree().physics_frame
+
+## Hits that landed on `victim` from `attacker` since event index `from`.
+func hits_on(victim: Fighter, attacker: Fighter, from := 0) -> int:
+	var n := 0
+	for i in range(from, events.size()):
+		var e: Array = events[i]
+		if e[0] == &"hit_landed" and e[1] is HitInfo:
+			var info := e[1] as HitInfo
+			if info.victim == victim and info.attacker == attacker and info.result == HitInfo.Result.HIT:
+				n += 1
+	return n
+
+## Events named `what` since index `from` whose first argument is `a` (any when null).
+func count_since(what: StringName, from: int, a: Variant = null) -> int:
+	var n := 0
+	for i in range(from, events.size()):
+		if events[i][0] == what and (a == null or events[i][1] == a):
+			n += 1
+	return n

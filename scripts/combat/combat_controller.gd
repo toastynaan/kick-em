@@ -1,43 +1,74 @@
 class_name CombatController
 extends Node
 ## Moves, frame data, hit detection (hit registry: each attack hits each target
-## once), the hit pipeline, guard, and the routing hub to Defence (parry,
-## teleport, pursuit: agent H), Carry (grabs, holds, throws: agent G) and
-## Traversal (dash, sprint, parkour: agent M). Same component for the player
-## and for enemies; enemies start attacks via start_enemy_attack() (tell +
-## startup) instead of button presses.
+## once), the hit pipeline, guard, and the routing hub to Defence (counter:
+## agent H), Carry (grabs, holds, drive, throws: agent G) and Traversal (dodge,
+## sprint: agent M). Same component for the player and for enemies; enemies
+## start attacks via start_enemy_attack() (tell + startup) instead of buttons.
 ## OWNER: agent B (combat). CONTRACT STUB: keep every public signature.
 ##
-## Round 5 (Feel Reference: Strikes and body reactions):
-## - Target: every strike picks its target at the press (Targeting.pick_strike_target
-##   along PlayerController.get_aim_dir(); the lock-on target while locked),
-##   turns to it and lunges up to Tuning.LUNGE_MAX; a sprint strike carries its
-##   speed and stops Tuning.SPRINT_LUNGE_STOP short. No target: along the stick.
-## - Power: P = Power.score(class base, charge level, speed toward the target
-##   sampled at the commit (the press, or the charge release) BEFORE
-##   Traversal.on_strike_started(), the speed cap, Defence.counter_bonus() at
-##   contact, finisher on the third hit of a tap string). The tier comes from P
-##   (sweeps: Power.sweep_tier_of). Hits from elsewhere preset their tier.
-## - Contact frame: the reaction is applied on the contact physics frame, then
-##   hitstop on the attacker and victim only (Power.hitstop_for, the player
-##   capped at Tuning.PLAYER_HITSTOP_MAX), then hit_landed. RagdollController
-##   holds the reacting bones through the freeze (the victim keeps its contact
-##   pose and jitters) and releases them with the animation velocities it
-##   cached before the freeze plus the impulse (see its header). Block and Dash
-##   pressed during the player's own freeze fire when it ends.
+## Round 7 (docs/Round 7 — Freeflow Combat.md):
+## - One button, one move (MoveLibrary.PLAYER_MOVES, frame data and reactions
+##   from Tuning.R7_MOVES). The punch button counts jab, cross, hook (ComboGraph)
+##   while the chain is alive; the punch or a kick still held at
+##   Tuning.R7_HOLD_THRESHOLD is its heavy version (R7_HEAVY_OF), its startup
+##   counted from the press. A tap fires on its own frame data (it waits at the
+##   end of its startup, in the heavy's load pose, only while still held).
+## - Commit to every swing: presses during a move's glide and startup are
+##   dropped; from its first active frame on (hitstop and recovery included)
+##   the latest press is buffered (a press on the beat of the hit). On a hit
+##   the recovery ends after Tuning.R7_CHAIN_CUT of it (the buffered press fires
+##   then); on a whiff it runs in full and the punch string resets. The chain
+##   (GameEvents.chain_hit / chain_ended) survives Tuning.R7_CHAIN_GRACE after a
+##   recovery, a dodge or a counter; a whiff, a blocked hit or being hit ends it.
+## - Freeflow targeting: the target is picked at the press (Defence's pursuit
+##   body first, else Targeting.pick_freeflow_target along the stick, else the
+##   combat target, else camera forward). A target farther than reach +
+##   R7_GLIDE_FROM is glided to (R7_GLIDE_SPEED, at most R7_GLIDE_MAX_TIME)
+##   before the startup, stopping at reach x LUNGE_GAP; closer ones get the
+##   short lunge. On the first active frame the target connects when within
+##   reach + R7_CONNECT_MARGIN (auto-connect), unless invulnerable, dodging or
+##   down. A hit that pushes up to R7_FOLLOW_MAX_PUSH is followed during
+##   recovery (R7_FOLLOW_SHARE of it).
+## - Hits: R7_MOVES, or the R7_PAYOFFS entry for the victim's react state;
+##   heavy enemies scale push, stun and lift; guards and tell armor stop tapped
+##   punches only; the victim's Fighter.react / knockdown / launch applies it.
+##   Hitstop per move on the attacker and victim only (the player's capped at
+##   R7_PLAYER_HITSTOP_MAX). Enemy hits on the player keep their Round 5 tiers.
+## - The god path (the user's amendment): sprint strikes (the speed toward the
+##   target, sampled at the press before Traversal.on_strike_started; wall-run
+##   strikes and vault drops count as the cap) push harder or launch; dropping
+##   strikes (any strike in the air or late in a vault) hit with the button's
+##   move; the pursuit hit on Defence's pursuit body relaunches along camera
+##   forward, or spikes it into the floor with the stick pulled back (its floor
+##   impact a shockwave); Dash goes to Defence first (pursuit, teleport);
+##   Defence.intercepts() on an attack's first active frame; vanished bodies are
+##   not hit; the Duelist's teleport counter (start_counter). Every launch the
+##   player causes is a launch tier on hit_landed (Defence's pursuit window).
+## - Counter: Defence (H) calls play_counter(attacker) on a caught window. Every
+##   enemy attack emits GameEvents.counter_window(attacker, target, true,
+##   counterable) R7_COUNTER_WINDOW before its first active frame, and false
+##   when it ends, is cancelled or the attacker is hit. An attack whose first
+##   active frame finds its target invulnerable (counter, dodge) misses it.
 ## - Effects, camera shake and slow time listen to GameEvents; this file never
 ##   spawns contact effects or shakes the screen for hits.
 ##
-## Timing: move phases and stun run in the fighter's own time (the player's in
-## player time, full speed in any slow motion) and stop during its hitstop.
-## Input windows and charge levels use TimeDirector.now() (real time).
+## Timing: move phases run in the fighter's own time (the player's in player
+## time, full speed in any slow motion) and stop during its hitstop. Input
+## windows (the hold, the chain grace) use TimeDirector.now() (real time).
 
-enum Action { LIGHT, HEAVY, KICK, SWEEP, GRAB, BLOCK, DASH }
-enum Phase { IDLE, CHARGING, STARTUP, ACTIVE, RECOVERY, HOLDING }
+## Round 7: LIGHT is the punch button (string + hold for heavy); the specials
+## and COUNTER are appended so older ints stay stable. Legacy entries: HEAVY =
+## the heavy version of the next string punch, KICK = FRONT_KICK, SWEEP =
+## LEG_KICK (bots and old tests); BLOCK stays the AI's guard.
+enum Action { LIGHT, HEAVY, KICK, SWEEP, GRAB, BLOCK, DASH, LEG_KICK, GUT_PUNCH, UPPERCUT,
+	FRONT_KICK, ROUNDHOUSE, COUNTER }
+## GLIDE: a strike closing on its target before its startup.
+enum Phase { IDLE, GLIDE, STARTUP, ACTIVE, RECOVERY }
 enum Stun { NONE, HIT, BLOCK, STUMBLE, DAZE }
 
 signal attack_started(move_id: StringName)
-## Real seconds until the first active frame, sent when an attack starts (AI dodge timing).
+## Real seconds until the first active frame, sent when an attack's startup starts (AI dodge timing).
 signal attack_incoming(move_id: StringName, time_to_active: float)
 signal attack_active(move_id: StringName)
 signal attack_ended(move_id: StringName)
@@ -45,63 +76,79 @@ signal hit_dealt(info: HitInfo)
 signal hit_received(info: HitInfo)
 
 # --- Local tuning (candidates for Tuning) -----------------------------------
-const STAGGER_TIME := 0.7          ## s: Fighter.stagger's fallback stun (H); Round 5 uses Tuning.REACT_STAGGER.act
-const STAGGER_STRENGTH := 0.75     ## stagger strength: < 1 stays on its feet (a stagger never tips into a launch)
-const BUFFER_MAX_AGE := 0.8        ## s: presses older than this are dropped (no surprise moves)
+const STAGGER_STRENGTH := 0.75     ## Round 5 stagger strength: < 1 stays on its feet
 const STRIKE_BREAK_HITSTOP_MULT := 2.0  ## wall strike hitstop x on &"break"
 const STRIKE_RECOIL_TIME := 0.15   ## s of the recoil slide off a wall that holds
 const STRIKE_FIGHTER_MARGIN := 0.6 ## m beyond reach in which an opponent takes priority over a wall
 const FLOOR_NORMAL_Y := 0.7        ## contacts with a more upward normal are floors, never struck
-const RISING_WINDOW := 0.25        ## s after releasing crouch in which Light / Heavy is a rising uppercut
-const GROUND_HOLD := 0.6           ## s the first ground strike of a knockdown keeps the body down
-const BACKFIST_RANGE := 3.0        ## m: backfist turns to an opponent behind within this
-const BLOCK_WALK_MULT := 0.35      ## walking while guarding
+const BLOCK_WALK_MULT := 0.35      ## walking while guarding (the AI's guard)
 const BLOCK_PUSH_TIME := 0.15      ## s the guard push-back slide lasts
 const ESCAPE_PUSH_TIME := 0.2      ## s of the break-away slide
 const ESCAPE_VICTIM_SHARE := 0.8   ## of Tuning.COMBO_ESCAPE_PUSH covered by the victim
 const LYING_HEIGHT := 0.45         ## m: a launched body with its COM this low...
 const LYING_SPEED := 2.0           ## ...and slower than this is lying, not airborne
 const GRAB_CONE_DOT := 0.4         ## grab only catches fighters roughly in front
-const DODGE_CHECK_EXTRA := 2.0     ## m beyond the move's reach in which defenders may parry / dodge
-const INTERCEPT_FRONT_DOT := 0.0   ## an attack is "aimed at" a fighter roughly in front of the attacker
 const ENEMY_REACH_MARGIN := 0.5    ## m beyond an enemy move's reach + lunge in which the player is still its target
 const ENEMY_REACH_FRONT_DOT := 0.5 ## ...when within 60 degrees of the enemy's facing
-const PURSUIT_REACH := 2.8         ## m: the follow-up connects with the locked body inside this
 const PROJECTILE_SPEED := 15.0     ## m/s debris chunk
-const LOCKED_TARGET_REACH := 0.9   ## m beyond reach in which a locked target (counter, ground strike) still connects
-const AI_COUNTER_INVULN := 0.1     ## real s of invulnerability on the AI teleport (the tell is hittable)
+const LOCKED_TARGET_REACH := 0.9   ## m beyond reach in which a locked target (a free swing at a downed player) connects
 const CARRY_OFFSET := Vector3(0.0, -0.16, -0.05)  ## chunk position in the right-hand attachment
 const GUARD_FRONT_DOT := 0.3       ## guards and archetype blocks cover this front cone
 const DEBRIS_KICK_RADIUS := 0.7    ## m from the kicking foot
 const DEBRIS_KICK_SPEED := 14.0    ## m/s
-const DEBRIS_KICK_DAMAGE := 8.0    ## Round 5: a kicked chunk hits like a thrown prop (Tuning.PROP_DAMAGE)
-const ARMOR_HITSTOP := 0.05
-# Round 5 (local; candidates for Tuning)
-## Wall strikes keep Round 3's scale: power = this x P, so a tapped kick (P 2.5)
-## strikes a wall with 60, the old kick, and D's STRIKE_CELL_HP feel targets hold.
-const WALL_POWER_PER_P := 24.0
-## A normal lunge stops when the target is this share of the move's reach away
-## (the fist lands with the arm still bending, not fully extended).
+const DEBRIS_KICK_DAMAGE := 8.0    ## a kicked chunk hits like a thrown prop (Tuning.PROP_DAMAGE)
+const DEBRIS_KICK_RANGE := 10.0    ## m: a kicked chunk flies at an enemy this far (Tuning.SPRINT_TARGET_RANGE's reach)
+const ARMOR_HITSTOP := 0.05        ## Round 5 armor (non-strike hits on ignore_flinch fighters)
+## A normal lunge (and a glide) stops when the target is this share of the
+## move's reach away (the fist lands with the arm still bending).
 const LUNGE_GAP := 0.7
-## m/s cap of a normal (walking) lunge: 1 m in a jab's 5 frames would be 12 m/s,
-## which reads as a teleport; 8 m/s keeps it a step (a jab covers ~0.7 m).
+## m/s cap of the short lunge to a close target (a step, not a teleport).
 const LUNGE_SPEED_MAX := 8.0
+## Body speed (m/s) used for HitInfo.energy on hits that do not launch (old listeners scale on it).
+const NOMINAL_SPEED := {HitInfo.Tier.FLINCH: 2.0, HitInfo.Tier.STUMBLE: 2.5, HitInfo.Tier.STAGGER: 3.0,
+	HitInfo.Tier.KNOCKDOWN: 4.0}
+# Round 7 (local; candidates for Tuning)
+## Wall strike power = this x the move's R7 weight: a front kick (0.65) strikes
+## with 62, about Round 3's tapped kick (60), so D's STRIKE_CELL_HP targets hold.
+const WALL_POWER_PER_WEIGHT := 96.0
+## Strength of the small snap tell armor shows (RagdollController.flinch; it keeps attacking).
+const ARMOR_SNAP := 0.5
+## m: the follow step never closes the gap to its victim below this (two capsules + a little).
+const FOLLOW_MIN_GAP := 0.65
+## Reactions that slide the victim on its feet: the follow step goes after them.
+const FOLLOW_REACTS: Array[StringName] = [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop"]
+## HitInfo.tier listeners see for a Round 7 reaction (doc: Reactions).
+const REACT_TIER := {&"snap": HitInfo.Tier.FLINCH, &"spin": HitInfo.Tier.STAGGER,
+	&"push": HitInfo.Tier.STAGGER, &"fold": HitInfo.Tier.STAGGER, &"buckle": HitInfo.Tier.STAGGER,
+	&"lift": HitInfo.Tier.STAGGER, &"repop": HitInfo.Tier.STAGGER, &"knockdown": HitInfo.Tier.KNOCKDOWN,
+	&"launch": HitInfo.Tier.LAUNCH, &"spike": HitInfo.Tier.LAUNCH}
+## s: phase ends compare with this slack, so float sums of 1/120 s ticks end a
+## 7-frame startup on its 14th tick, not the 15th.
+const PHASE_EPS := 1e-5
+## Degrees of camera-forward drift in the spike's straight-down velocity (doc: God path).
+const SPIKE_DRIFT := 5.0
+## The stick pulled back (toward the camera) when Fighter has no get_input_intent:
+## at least this long (0..1) and within 60 degrees of straight back (Round 5's numbers).
+const INTENT_DEADZONE := 0.3
+const INTENT_DOT := 0.5
+## m above the Head bone's origin (the neck) a head strike aims at (agent P).
+const HEAD_AIM_UP := 0.15
+## s a spiked body is watched for its floor impact (the shockwave).
+const SPIKE_WATCH := 3.0
+## Sprint strikes (doc: God path): these moves launch at speed, the rest push.
+const SPRINT_LAUNCHERS: Array[StringName] = [&"front_kick", &"roundhouse", &"uppercut"]
+const PURSUIT_REACH := 2.8         ## m: the pursuit follow-up connects with the flying body inside this
+const INTERCEPT_EXTRA := 2.0       ## m beyond the move's reach in which a defender's Defence is asked
+const AI_COUNTER_INVULN := 0.1     ## real s of invulnerability on the AI teleport (the tell is hittable)
+## A sprint lunge runs at the sprint speed, and up to this x it when that is
+## needed to reach the stop point by the end of the active frames.
+const SPRINT_LUNGE_BOOST := 1.5
 ## s: a dropping strike stays active while Traversal still falls, at most this long.
 const DROP_ACTIVE_LIMIT := 3.0
 ## s an attack pressed early in a vault waits for the landing before it is dropped.
 const VAULT_PRESS_KEEP := 1.0
-## A sprint lunge runs at the sprint speed, and up to this x it when that is
-## needed to reach the stop point by the end of the active frames: a sprint jab
-## pressed 2.5 m out (8 frames to cover 1.6 m) still lands on the marked target.
-const SPRINT_LUNGE_BOOST := 1.5
-## Nudge strength on a body already down (flying past the juggle cap, lying,
-## ground strikes): 0.5 + this x P, at most NUDGE_MAX (Fighter.flinch strength).
-const NUDGE_PER_P := 0.2
-const NUDGE_MAX := 1.6
-## Contact-frame jitter in m by tier (Tuning.HITSTOP_JITTER_RANGE from flinch to sever).
-## Body speed (m/s) used for HitInfo.energy on hits that do not launch (old listeners scale on it).
-const NOMINAL_SPEED := {HitInfo.Tier.FLINCH: 2.0, HitInfo.Tier.STUMBLE: 2.5, HitInfo.Tier.STAGGER: 3.0,
-	HitInfo.Tier.KNOCKDOWN: 4.0}
+## Pose played while gliding (agent P's), else the closest existing one.
+const GLIDE_ANIMS: Array[StringName] = [&"glide", &"dash"]
 
 var fighter: Fighter
 var blocking := false
@@ -114,6 +161,13 @@ var last_received: HitInfo
 var last_dealt: HitInfo
 ## Last wall strike {target, position, normal, power, result} (tests, debug HUD).
 var last_wall_strike: Dictionary = {}
+## Tests and the lab: read press/release like the player's buttons (a held
+## punch becomes the heavy) even without a PlayerController.
+var force_hold_charge := false
+## Chance a killing launch takes a limb (Tuning.R7_SEVER_ON_KILL; tests set 0 or 1).
+var sever_on_kill_chance := Tuning.R7_SEVER_ON_KILL
+## The punch string (jab, cross, hook and their heavies).
+var graph: ComboGraph = ComboGraph.default_graph()
 
 var _phase: int = Phase.IDLE
 var _move: MoveData
@@ -122,77 +176,70 @@ var _t := 0.0                   ## own-time s in the current phase
 var _startup := 0.0
 var _active := 0.0
 var _recovery := 0.0
-# Press model, charge, strings
-## Tests and the lab: read press/release like the player's buttons (tap vs hold)
-## even without a PlayerController.
-var force_hold_charge := false
-var graph: ComboGraph = ComboGraph.default_graph()
-var _btn_down := {}             ## Action -> held
-var _btn_time := {}             ## Action -> real press time
-var _press_action := -1         ## button that started the current move (-1: tap / scripted)
-var _press_t := 0.0             ## its press time (real)
-var _press_released := true
-var _charge_level := 0          ## level reached while charging
-var _move_charge := 0           ## level the current move fires with
-var _waited := false            ## the strike reached the end of its startup before the release
-var _last_move_id: StringName = &""
-var _last_move_end := -INF
-var _crouch_was := false
-var _crouch_released_at := -INF
-var _string_pos := 0            ## 1-based position of the current / last string move (0 = none)
-var _string_tap := true         ## every move of the string so far was a tap
-## Victim side: ground strikes taken this time down (reset on getting up).
-var downed_hits := 0
-var _combo_count := 0           ## attacker: hits in the current combo
-var _combo_last := -INF         ## real time of its last hit
-var _taken := 0                 ## victim: hits taken in the current combo (from anyone)
-var _taken_last := -INF
-var _taken_stun := 0.0          ## victim: stun taken in the current combo (break-away at COMBO_ESCAPE_STUN)
-var _escape_guard_until := 0.0  ## victim: break-away auto-guard
-var juggle_relaunches := 0      ## victim: relaunches this flight (cap Tuning.JUGGLE_MAX_RELAUNCH)
-var getup_extended := false     ## victim: a ground strike already delayed this get-up
-var _hit_any := false
-var _hit_confirmed := false     ## this attack landed a clean HIT (cancels)
+var _registry := {}             ## victim instance id -> true
+var _prev_limbs := {}           ## bone -> last tick's position (limb sweep)
+var _hit_any := false           ## struck anything (a fighter, a wall, debris): not a whiff
+var _landed := false            ## landed a clean HIT on a fighter: the chain cut
+var _blocked := false           ## a guard stopped it
+var _first_active := false      ## the first active frame (auto-connect, invulnerable targets)
+var _locked_target: Fighter     ## always connects when close (a free swing at a downed player)
+var _target: Fighter            ## the attack's target, picked at the press
 var _aim_set := false
 var _debris_kicked := false
 var _wall_struck := false       ## this move already struck a wall (once per move)
-var _registry := {}             ## victim instance id -> true
-var _prev_limb := Vector3.INF
-var _prev_limbs := {}           ## bone -> last tick's position (limb sweep)
-var _locked_target: Fighter     ## always connects when close (pursuit, ground strike, counter)
-var _active_start_real := 0.0
+var _committed := false         ## strike_started sent for this move
+# Buttons, the punch hold and the buffer
+var _btn_down := {}             ## Action -> held
+var _press_action := -1         ## button that started the current move
+var _press_t := 0.0             ## its press time (real)
+var _hold_pending := false      ## a punch press still held: heavy at R7_HOLD_THRESHOLD
+var _waited := false            ## a held tap reached the end of its startup and waits
+var _carry_took := {}           ## Action -> the Carry action that took its press
+# Sprint strikes, dropping strikes, the teleport counter
+var _p_speed := 0.0             ## m/s toward the target at the press
+var _p_cap := 8.0               ## speed cap at the press
+var _p_sprint := false          ## a sprint strike (sprint, wall run, vault drop)
+var _sprint_excepted: Fighter   ## capsule collision exception of a sprint strike
+var _drop_t := 0.0              ## own s in the current dropping strike's active frames
+var _drop_from_vault := false
+var _vault_action := -1         ## attack pressed early in a vault: a normal strike once landed
+var _vault_press_t := 0.0
+var _teleport_invuln_until := 0.0
+var _drop_as: StringName = &""  ## the move whose R7 entry a dropping strike hits with (the button's)
+var _pursuit_spike := false     ## the pursuit hit of this move is a spike (stick pulled back at the press)
+var _spiked := {}               ## victim instance id -> [victim, real time]: watched for the spike's floor impact
+var _buffer_action := -1
+var _buffer_time := 0.0
+# Glide, lunge, follow step
+var _glide_t := 0.0             ## own s gliding
+var _glide_velocity := Vector3.ZERO
+var _lunge_left := 0.0          ## m of short lunge left (Tuning.LUNGE_MAX)
+var _lunge_velocity := Vector3.ZERO
+var _has_lunge := false
+var _follow_left := 0.0         ## m of follow step left
+var _follow_speed := 0.0
+var _follow_dir := Vector3.ZERO
+var _follow_victim: Fighter
+# Chains and the punch string
+var _chain_count := 0
+var _chain_until := -INF        ## real time the idle chain drops
+var _string_next := 0           ## punch string position of the next punch (0 jab, 1 cross, 2 hook)
+var _cur_string := -1           ## string position of the punch in progress (-1: not a string punch)
+var _combat_target: Fighter
+# Counter window (enemy attacks)
+var _window_open := false
+var _window_target: Fighter
+var _window_counterable := true
+# Victim side
 var _freeze_until := 0.0
 var _stun_left := 0.0
 var _stun_kind: int = Stun.NONE
 var _guard_stun := false        ## blockstun came from a real guard (stays blocking)
-# Round 5: targeting, lunge, power, contact frame
-var _target: Fighter            ## the strike's target, picked at the press
-var _lunge_left := 0.0          ## m of normal lunge left (Tuning.LUNGE_MAX)
-var _lunge_sprint := false      ## sprint strike: the lunge carries the run and stops SPRINT_LUNGE_STOP short
-var _lunge_speed := 0.0         ## m/s of a sprint lunge
-var _lunge_velocity := Vector3.ZERO
-var _has_lunge := false
-var _strike_class: StringName = &""  ## class of the current strike (the drop strike's comes from its button)
-var _committed := false         ## speed sampled and Traversal told for this strike
-var _p_speed := 0.0             ## m/s toward the target at the commit
-var _p_cap := 8.0               ## speed cap at the commit
-var _p_sprint := false          ## thrown at sprint speed (sprint, wall run, vault drop)
-var _p_finisher := false        ## third hit of a tap string
-var _press_sample: Array = []   ## [speed toward the target, cap, sprinting] taken at the press
-var _resample := false          ## a charge release samples its own speed
-var _sprint_excepted: Fighter   ## capsule collision exception of a sprint strike
-var _drop_from_vault := false
-var _drop_t := 0.0              ## own-time s in the current dropping strike's active frames
-var _vault_action := -1         ## attack pressed early in a vault: a normal strike once landed
-var _vault_press_t := 0.0
-var _freeze_inputs: Array = []  ## [action, pressed] Block / Dash during the player's freeze
-
+var _taken := 0                 ## hits taken in the current combo (from anyone)
+var _taken_last := -INF
+var _taken_stun := 0.0          ## Round 5: stun taken in the current combo (break-away at COMBO_ESCAPE_STUN)
+var _escape_guard_until := 0.0  ## break-away auto-guard
 var _block_held := false
-var _block_since := 0.0
-var _teleport_invuln_until := 0.0
-var _buffer_action := -1
-var _buffer_time := 0.0
-
 var _slide_left := 0.0          ## guard push-back slide (own time s)
 var _slide_velocity := Vector3.ZERO
 var _slide_plant := false       ## feet planted for the rest of the blockstun after the slide
@@ -202,48 +249,42 @@ var _dash_cooldown_until := 0.0
 
 var _carried: RigidBody3D       ## debris chunk in the right hand (Thrower)
 
-
 var _q_sphere := SphereShape3D.new()
 var _q_capsule := CapsuleShape3D.new()
 var _q_params := PhysicsShapeQueryParameters3D.new()
 
 func setup(p_fighter: Fighter) -> void:
 	fighter = p_fighter
+	if not GameEvents.body_impact.is_connected(_on_body_impact):
+		GameEvents.body_impact.connect(_on_body_impact)
+
+## A fighter freed mid-attack still closes its counter window (HUD prompts).
+func _exit_tree() -> void:
+	_close_window()
 
 # =============================================================================
 # Input
 # =============================================================================
 
-## Button input (player, or AI using player-style actions such as BLOCK/DASH).
-## An attack press starts its wind-up at once; released before
-## Tuning.HOLD_THRESHOLD it fires the normal move (waiting for the release if
-## the startup is shorter); still held, it freezes in the move's charge pose and
-## charges through Tuning.CHARGE_LEVELS (real time) until released (or
-## Tuning.CHARGE_AUTO_RELEASE). Which move a press means: a dropping strike in
-## the air or late in a vault, a ground strike next to a body on the ground,
-## else the ComboGraph string for the button and the fighter's stance.
+## Button input (the player, or the AI's guard). Routing (Round 7): while
+## holding a body, the punch and the leg kick go to Carry (throw, knee), Dash
+## drives, Grab releases; otherwise Counter goes to Defence, Dash to Traversal
+## (tap dodge, hold sprint), Grab to Carry and the rest are strikes.
 func press(action: int) -> void:
 	if fighter == null or fighter.is_dead():
 		return
 	var now := TimeDirector.now()
-	# Contact frame: Block and Dash pressed during the player's own freeze fire when it ends.
-	if (action == Action.BLOCK or action == Action.DASH) and _in_own_freeze(now):
-		_freeze_inputs.append([action, true])
-		return
 	match action:
 		Action.BLOCK:
-			# Round 5: Defence sees every Block press first (parry / anti-mash lockout).
-			if fighter.defence != null:
-				fighter.defence.on_block_pressed(now)
-			if not _block_held:
-				_block_since = now
-			_block_held = true
-			_guard_cancels_windup()
+			_block_held = true  # the AI's guard
 			_update_block_state()
 		Action.DASH:
-			# Round 5 Dash routing: Defence (teleport, sidestep, pursuit), then
-			# Traversal (short dash, sprint), then the fallback dash.
-			if fighter.defence != null and fighter.defence.on_dash_pressed(now):
+			# Holding: Carry's drive (a body; false with a prop). Then Defence
+			# (teleport, pursuit), then Traversal (tap dodge, hold sprint).
+			if _new_carry() and fighter.carry.is_holding() and fighter.carry.on_drive_pressed(now):
+				return
+			if fighter.defence != null and fighter.defence.has_method(&"on_dash_pressed") \
+					and bool(fighter.defence.call(&"on_dash_pressed", now)):
 				return
 			if fighter.traversal != null and fighter.traversal.on_dash_pressed():
 				return
@@ -252,65 +293,108 @@ func press(action: int) -> void:
 			# Grabs, holds, throws and grab breaks are Carry's (agent G).
 			if _new_carry():
 				fighter.carry.on_grab_pressed(now)
-		Action.LIGHT, Action.KICK, Action.HEAVY, Action.SWEEP:
+		Action.COUNTER:
+			# Defence (H) finds the open window, cancels that attack and calls play_counter().
+			if fighter.defence != null:
+				fighter.defence.on_counter_pressed(now)
+		_:
 			_btn_down[action] = true
-			_btn_time[action] = now
-			if _new_carry() and fighter.carry.is_holding() and fighter.carry.on_attack_pressed(action, now):
+			if _carry_press(action, now):
 				return
-			_attack_press(action, now)
+			_strike_press(action, now)
 
 func release(action: int) -> void:
-	if (action == Action.BLOCK or action == Action.DASH) and _has_frozen_press(action):
-		_freeze_inputs.append([action, false])
+	if fighter == null:
 		return
+	var now := TimeDirector.now()
 	match action:
 		Action.BLOCK:
 			_block_held = false
 			_update_block_state()
 		Action.DASH:
-			if fighter != null and fighter.traversal != null:
+			# Both hear the release (each ignores one it did not take).
+			if _new_carry():
+				fighter.carry.on_drive_released(now)
+			if fighter.traversal != null:
 				fighter.traversal.on_dash_released()
 		Action.GRAB:
 			if _new_carry():
-				fighter.carry.on_grab_released(TimeDirector.now())
-		Action.LIGHT, Action.KICK, Action.HEAVY, Action.SWEEP:
-			if _new_carry() and fighter.carry.is_holding():
-				fighter.carry.on_attack_released(action, TimeDirector.now())
+				fighter.carry.on_grab_released(now)
+		Action.COUNTER:
+			pass
+		_:
 			_btn_down[action] = false
-			if _vault_action == action:
-				return  # a vault press fires as a tap later
-			if action == _press_action and not _press_released:
-				_press_released = true
-				if _phase == Phase.CHARGING:
-					_release_charge()
-				elif _phase == Phase.STARTUP:
-					_commit()  # a tap: the strike commits on the release
+			if _carry_took.has(action):
+				var ca: int = _carry_took[action]
+				_carry_took.erase(action)
+				if fighter.carry != null:
+					fighter.carry.on_attack_released(ca, now)
+				return
+			if action == _press_action and _hold_pending:
+				_release_hold()
 
-## The player is inside its own hitstop freeze.
-func _in_own_freeze(now: float) -> bool:
-	return fighter.is_player and (now < _freeze_until or fighter.is_frozen())
+## While holding: the punch throws (hold to wind up) and the leg kick knees
+## (Carry). A body in hand takes every strike press (no strikes while holding
+## a body); with a prop in hand the other buttons strike. True = consumed.
+func _carry_press(action: int, now: float) -> bool:
+	_carry_took.erase(action)
+	if not _new_carry() or not fighter.carry.is_holding():
+		return false
+	var ca := _carry_action(action)
+	if ca >= 0 and fighter.carry.on_attack_pressed(ca, now):
+		_carry_took[action] = ca
+		return true
+	return _holding_body()
 
-func _has_frozen_press(action: int) -> bool:
-	for e: Array in _freeze_inputs:
-		if e[0] == action and e[1]:
-			return true
-	return false
+## The Carry action a strike button means while holding (-1: none). Legacy
+## Heavy is the punch, legacy Sweep the leg kick.
+static func _carry_action(action: int) -> int:
+	match action:
+		Action.LIGHT, Action.HEAVY:
+			return Action.LIGHT
+		Action.LEG_KICK, Action.SWEEP:
+			return Action.LEG_KICK
+	return -1
 
-## Replay Block / Dash presses and releases buffered during the freeze, in order.
-func _flush_freeze_inputs() -> void:
-	var q := _freeze_inputs
-	_freeze_inputs = []
-	for e: Array in q:
-		if e[1]:
-			press(e[0])
-		else:
-			release(e[0])
+## A strike button: starts at once when free; dropped during a glide or a
+## startup (no mashing through a wind-up); from the first active frame on
+## (hitstop and recovery included) buffered, the latest press winning: players
+## press the next attack on the beat of the hit. The buffered press starts when
+## the move ends (the chain cut on a hit, the full recovery on a whiff).
+func _strike_press(action: int, now: float) -> void:
+	if _held() or _move_for(action) == &"":
+		return
+	match _phase:
+		Phase.IDLE:
+			# A vault: in its last 40% the press ends it in a dropping strike that
+			# keeps the vault speed; earlier it waits for the landing.
+			if _vaulting():
+				if _vault_progress() >= Tuning.VAULT_ATTACK_FROM and _traversal_call(&"begin_drop_strike"):
+					_drop_from_vault = true
+					_start_drop(action, now)
+				else:
+					_vault_action = action
+					_vault_press_t = now
+				return
+			if _can_start():
+				_start_from_idle(action, now)
+		Phase.ACTIVE, Phase.RECOVERY:
+			_buffer_action = action
+			_buffer_time = now
+
+## A strike starting from idle: a dropping strike in the air, else the move.
+func _start_from_idle(action: int, press_t: float) -> void:
+	if _drop_ok():
+		_start_drop(action, press_t)
+	else:
+		_start_strike(action, press_t)
 
 ## Enemy attack entry point. `move_id` is an enemy move (MoveLibrary.ENEMY_MOVES).
 ## Startup: AttackDirector.enemy_startup_frames(move_id) (frames of the enemy's
 ## own time), or `tell_time` when that is longer (AttackDirector spaces the
 ## token holders' active frames). The tell (pose + glow, GameEvents.attack_tell)
-## covers the whole startup. Returns false if the fighter cannot attack now.
+## covers the whole startup; the counter window opens R7_COUNTER_WINDOW before
+## its first active frame. Returns false if the fighter cannot attack now.
 func start_enemy_attack(move_id: StringName, tell_time: float) -> bool:
 	var m := MoveLibrary.get_move(move_id)
 	if m == null:
@@ -323,8 +407,8 @@ func start_enemy_attack(move_id: StringName, tell_time: float) -> bool:
 		frames = float(AttackDirector.call(&"enemy_startup_frames", move_id))
 	var startup := maxf(maxf(tell_time, Tuning.frames(frames)), Tuning.frames(Tuning.ENEMY_STARTUP_MIN))
 	_press_action = -1
-	_move_charge = 0
-	_string_pos = 0
+	_hold_pending = false
+	_cur_string = -1
 	_target = Targeting.pick_strike_target(fighter, fighter.get_forward(), false)
 	if _target == null:
 		_target = _enemy_reach_target(m, startup)
@@ -333,8 +417,7 @@ func start_enemy_attack(move_id: StringName, tell_time: float) -> bool:
 	var lock: Fighter = null
 	if _target == null and m.kind == &"strike" and AttackDirector.has_method(&"is_player_knocked_down") \
 			and bool(AttackDirector.call(&"is_player_knocked_down")):
-		var pl: Fighter = AttackDirector.call(&"get_player") if AttackDirector.has_method(&"get_player") \
-			else Targeting.player(fighter.get_tree())
+		var pl := _player_of_ai()
 		if pl != null and pl.team != fighter.team:
 			var to := pl.get_center_of_mass() - fighter.global_position
 			to.y = 0.0
@@ -342,16 +425,25 @@ func start_enemy_attack(move_id: StringName, tell_time: float) -> bool:
 				_target = pl
 				lock = pl
 	GameEvents.attack_tell.emit(fighter, m.tell_kind, startup)
-	_begin(m, startup, true, lock)
-	_commit()
+	_setup_move(m)
+	_locked_target = lock
+	_seq_id = m.id
+	attack_started.emit(m.id)
+	_enter_startup(startup)
+	_update_window()
 	return true
 
+## The player as the AI sees it (AttackDirector), else the "player" group.
+func _player_of_ai() -> Fighter:
+	if AttackDirector.has_method(&"get_player"):
+		return AttackDirector.call(&"get_player") as Fighter
+	return Targeting.player(fighter.get_tree())
+
 ## A ranged enemy move (the heavy's shoulder charge from 5 m) still has a
-## target: the player in front within the move's reach plus its lunge, so
-## Defence sees it coming.
+## target: the player in front within the move's reach plus its lunge, so its
+## counter window and Defence see it coming.
 func _enemy_reach_target(m: MoveData, startup: float) -> Fighter:
-	var pl: Fighter = AttackDirector.call(&"get_player") if AttackDirector.has_method(&"get_player") \
-		else Targeting.player(fighter.get_tree())
+	var pl := _player_of_ai()
 	if pl == null or not is_instance_valid(pl) or pl.team == fighter.team or pl.is_dead() or pl.is_down():
 		return null
 	var hs := fighter.get_height_scale()
@@ -369,7 +461,6 @@ func _enemy_reach_target(m: MoveData, startup: float) -> Fighter:
 # Queries
 # =============================================================================
 
-# --- Round 5 contract (agent B implements) -------------------------------------
 ## The new Carry (G) owns grabs once it is enabled.
 func _new_carry() -> bool:
 	return fighter != null and fighter.carry != null and fighter.carry.is_enabled()
@@ -379,17 +470,16 @@ func _new_carry() -> bool:
 func get_attack_target() -> Fighter:
 	if not is_attacking():
 		return null
-	if _target != null and is_instance_valid(_target) and not _target.is_dead():
+	if _alive(_target):
 		return _target
-	if _locked_target != null and is_instance_valid(_locked_target):
+	if is_instance_valid(_locked_target):
 		return _locked_target
 	return null
 
-## Sprint strike rule: from the press to the end of its active frames this
-## fighter's body ignores the target, and Traversal skips the Battering Ram
-## collision with anyone (a strike never doubles as a ram).
+## A strike never doubles as a run into its target: from the press to the end
+## of its active frames Traversal skips body collisions with anyone.
 func suppresses_ram_with(_other: Fighter) -> bool:
-	return _phase == Phase.CHARGING or _phase == Phase.STARTUP or _phase == Phase.ACTIVE
+	return _phase == Phase.GLIDE or _phase == Phase.STARTUP or _phase == Phase.ACTIVE
 
 func is_attacking() -> bool:
 	return _phase != Phase.IDLE
@@ -400,12 +490,14 @@ func is_attack_active() -> bool:
 func is_in_recovery() -> bool:
 	return _phase == Phase.RECOVERY
 
+## Round 7: no charge levels. Kept for callers (always false).
 func is_charging() -> bool:
-	return _phase == Phase.CHARGING
+	return false
 
-## Holding a body or a prop (Carry).
-func is_holding_grab() -> bool:
-	return fighter != null and fighter.carry != null and fighter.carry.is_holding()
+## The player's own glide, startup or recovery (or nothing) is running: a
+## dodge (M) or a counter (H) may cancel() it. Never during active frames.
+func can_cancel() -> bool:
+	return _phase != Phase.ACTIVE
 
 ## Current move id, or &"" when idle.
 func current_move_id() -> StringName:
@@ -414,35 +506,52 @@ func current_move_id() -> StringName:
 	return _move.id
 
 ## Real seconds until the current attack's first active frame (INF if none).
+## A glide counts its estimated remaining time.
 func time_to_active() -> float:
+	var own := TimeDirector.player_time_factor() if fighter.is_player else 1.0
+	var scale := maxf(Engine.time_scale * own, 0.05)
+	var frozen := maxf(_freeze_until - TimeDirector.now(), 0.0)
 	match _phase:
+		Phase.GLIDE:
+			return (_glide_left() + _startup) / scale + frozen
 		Phase.STARTUP:
-			# Own time per real second: the player keeps real time in slow motion.
-			var own := TimeDirector.player_time_factor() if fighter.is_player else 1.0
-			var scale := maxf(Engine.time_scale * own, 0.05)
-			var frozen := maxf(_freeze_until - TimeDirector.now(), 0.0)
 			return maxf(_startup - _t, 0.0) / scale + frozen
 		Phase.ACTIVE:
 			return 0.0
 	return INF
 
-## Power score parts of the strike in progress (debug overlay): {class, base,
-## charge, speed, cap, sprint, finisher}. Empty when not striking.
+## Debug overlay (F3): the current move, phase (&"idle", &"startup" (a glide
+## included: see "gliding"), &"active", &"recovery"), string position, chain,
+## the buffered press (its Action name, "" when none), glide and the target's
+## reaction state.
 func get_strike_debug() -> Dictionary:
-	if _move == null or _phase == Phase.IDLE or _strike_class == &"":
-		return {}
-	return {"class": _strike_class, "charge": _move_charge, "speed": _p_speed, "cap": _p_cap,
-		"sprint": _p_sprint, "finisher": _p_finisher, "string_pos": _string_pos}
+	var tgt := get_attack_target()
+	var phase: StringName = &"idle"
+	match _phase:
+		Phase.GLIDE, Phase.STARTUP:
+			phase = &"startup"
+		Phase.ACTIVE:
+			phase = &"active"
+		Phase.RECOVERY:
+			phase = &"recovery"
+	return {"move": current_move_id(), "phase": phase, "string_index": get_string_index(),
+		"chain": get_chain_count(), "chain_alive": _chain_alive(TimeDirector.now()),
+		"buffered": String(Action.keys()[_buffer_action]).to_lower() if _buffer_action >= 0 else "",
+		"hold_pending": _hold_pending, "gliding": is_gliding(), "sprint": _p_sprint, "speed": _p_speed,
+		"pursuit": _pursuit_victim() != null,
+		"target": tgt, "target_state": tgt.get_react_state() if tgt != null else &""}
 
-## The Duelist's teleport counter is briefly untouchable (Defence owns the player's).
+## The Duelist's teleport counter is briefly untouchable (Fighter.is_invulnerable
+## adds the player's dodge and counter).
 func is_invulnerable() -> bool:
 	return TimeDirector.now() < _teleport_invuln_until
 
 ## Vanished mid-teleport (Defence): hits miss, the body is hidden.
 func is_vanished() -> bool:
-	return fighter != null and fighter.defence != null and fighter.defence.is_vanished()
+	var d: Defence = fighter.defence if fighter != null else null
+	return d != null and d.has_method(&"is_vanished") and bool(d.call(&"is_vanished"))
 
-## Kept for callers of the Upgrade 2 vanish (Defence shows the body itself now).
+## Kept for callers of the Upgrade 2 vanish.
 func force_reappear() -> void:
 	pass
 
@@ -462,10 +571,11 @@ func is_stunned() -> bool:
 func is_hit_stunned() -> bool:
 	return _stun_left > 0.0 and _stun_kind in [Stun.HIT, Stun.STUMBLE, Stun.DAZE]
 
+## The AI's guard (Block held), not while acting, reacting or off balance.
 func is_blocking() -> bool:
 	if fighter == null or fighter.is_dead() or _held() or _holding_body():
 		return false
-	if _phase != Phase.IDLE or fighter.is_down():
+	if _phase != Phase.IDLE or fighter.is_down() or fighter.is_reacting():
 		return false
 	if is_hit_stunned():
 		return false
@@ -473,35 +583,13 @@ func is_blocking() -> bool:
 		return true
 	return _block_held
 
-## Real seconds block has been held (Brawler AI grabs long blockers).
-func get_block_time() -> float:
-	return TimeDirector.now() - _block_since if is_blocking() and _block_held else 0.0
-
-## Parry locked out after a mashed Block (Defence).
-func is_dodge_locked_out() -> bool:
-	return fighter != null and fighter.defence != null and fighter.defence.is_parry_locked()
-
 func is_dashing() -> bool:
 	return _dash_left > 0.0
 
-## Charge 0..1 toward level 3 while charging (HUD), else the last move's level / 3.
-func get_charge() -> float:
-	if _phase == Phase.CHARGING:
-		var held := TimeDirector.now() - _press_t
-		return clampf((held - Tuning.HOLD_THRESHOLD) / (Tuning.CHARGE_LEVELS[2] - Tuning.HOLD_THRESHOLD), 0.0, 1.0)
-	return _move_charge / 3.0
-
 # --- Movement hooks for Fighter / Traversal --------------------------------------
-## Charging while walking moves at Tuning.CHARGE_WALK_MULT; charging at a
-## sprint keeps its speed (Traversal steers it, Tuning.CHARGE_SPRINT_STEER).
 func get_move_speed_mult() -> float:
 	if _held():
 		return 0.0
-	if _phase == Phase.CHARGING and _stun_left <= 0.0:
-		var t := fighter.traversal
-		if t != null and (t.is_charge_steering() or t.is_sprinting()):
-			return 1.0
-		return Tuning.CHARGE_WALK_MULT
 	if _phase != Phase.IDLE or _stun_left > 0.0:
 		return 0.0
 	if is_blocking():
@@ -522,11 +610,19 @@ func _forced_velocity_or_inf() -> Vector3:
 		return Vector3.ZERO  # the guard slid exactly GUARD_PUSH; no drift after it
 	if _dash_left > 0.0:
 		return _dash_velocity
-	if _has_lunge and (_phase == Phase.STARTUP or _phase == Phase.ACTIVE or _phase == Phase.RECOVERY):
-		return _lunge_velocity
-	# Enemy moves keep their own telegraphed step; a player strike with no
-	# target strikes along the stick where it stands (Round 5).
-	if _move != null and _move.enemy and _move.lunge_speed > 0.0:
+	if _move == null:
+		return Vector3.INF
+	if _move.r7 and not _move.drop:  # a dropping strike keeps Traversal's fall
+		match _phase:
+			Phase.GLIDE:
+				return _glide_velocity
+			Phase.STARTUP, Phase.ACTIVE, Phase.RECOVERY:
+				# The lunge, the follow step, else the feet stay planted (no slide).
+				return _lunge_velocity if _has_lunge else Vector3.ZERO
+	if _move.r7:
+		return Vector3.INF
+	# Enemy moves keep their own telegraphed step.
+	if _move.enemy and _move.lunge_speed > 0.0:
 		var e_lunging := (_phase == Phase.STARTUP and _t >= _startup * _move.lunge_start) \
 			or (_phase == Phase.ACTIVE and _move.lunge_through_active and not _hit_any)
 		if e_lunging:
@@ -536,8 +632,6 @@ func _forced_velocity_or_inf() -> Vector3:
 func can_turn() -> bool:
 	if _held():
 		return false
-	if _phase == Phase.CHARGING:
-		return true
 	if _phase == Phase.ACTIVE or _phase == Phase.RECOVERY:
 		return false
 	return not is_hit_stunned()
@@ -558,13 +652,10 @@ func physics_tick(delta: float) -> void:
 	# The player's combat timers run in player time (full speed in any slow motion).
 	if fighter.is_player:
 		delta = TimeDirector.player_delta(delta)
-	_tick_upgrade2(delta, now)
+	_tick_victim(now)
+	_tick_chain(now)
 	if now < _freeze_until or fighter.is_frozen():
 		return
-	if not _freeze_inputs.is_empty():
-		_flush_freeze_inputs()
-		if fighter.is_dead():
-			return
 	if _slide_left > 0.0:
 		_slide_left -= delta
 	if _stun_left > 0.0:
@@ -577,48 +668,15 @@ func physics_tick(delta: float) -> void:
 		if _dash_left <= 0.0:
 			_dash_left = 0.0
 	if _vault_action >= 0:
-		_tick_vault_press()
-	_update_lunge(delta)
-
-	match _phase:
-		Phase.CHARGING:
-			_tick_charge(now)
-		Phase.STARTUP, Phase.ACTIVE, Phase.RECOVERY:
-			_advance(delta)
-
+		_tick_vault_press(now)
+	if _phase != Phase.IDLE:
+		_advance(delta)
+	_update_motion(delta)
+	_update_window()
 	_update_block_state()
 
-	# Buffered press: it waits while the fighter is busy (blockstun, hitstop,
-	# recovery) and fires the first tick it can; only very old presses expire.
-	if _buffer_action >= 0:
-		if now - _buffer_time > BUFFER_MAX_AGE:
-			_buffer_action = -1
-		else:
-			_fire_buffer(now)
-
-## A stored press fires as a hit cancel during recovery, or the moment the
-## fighter is free.
-func _fire_buffer(now: float) -> void:
-	var a := _buffer_action
-	if _phase == Phase.RECOVERY:
-		if _hit_cancel_ok(&""):
-			var id := _resolve_move(a)
-			if id != &"":
-				_buffer_action = -1
-				_cancel_into(a, id, _buffer_time)
-		return
-	if _can_start():
-		_buffer_action = -1
-		var id2 := _resolve_move(a)
-		if id2 != &"":
-			_start_press(a, id2, _buffer_time)
-
 func freeze_until(real_time: float) -> void:
-	var now := TimeDirector.now()
 	if real_time > _freeze_until:
-		var extra := real_time - maxf(_freeze_until, now)
-		if _buffer_action >= 0:
-			_buffer_time += extra
 		_freeze_until = real_time
 
 # =============================================================================
@@ -628,476 +686,443 @@ func freeze_until(real_time: float) -> void:
 func _can_start() -> bool:
 	return _phase == Phase.IDLE and fighter.can_act()
 
-## Tap vs hold applies to the real player's buttons and to tests and the lab
-## (force_hold_charge). Other scripted presses (bots, AI) are taps.
-func _hold_enabled(_action: int) -> bool:
-	return force_hold_charge or (fighter.brain != null and fighter.brain is PlayerController)
+## A held punch or kick becomes its heavy for the player's buttons (through
+## PlayerController or press()/release() directly) and for tests and the lab
+## (force_hold_charge). Other scripted presses (enemy bots) are taps.
+func _hold_enabled() -> bool:
+	return force_hold_charge or fighter.is_player
 
-func _attack_press(action: int, now: float) -> void:
-	if _phase == Phase.CHARGING or _held():
-		return
-	# Vault (Feel Reference: attack out of a vault): in its last 40% the vault
-	# ends in a dropping strike that inherits the vault speed; earlier (or in a
-	# mantle / kick-off, which Traversal refuses) the press waits.
-	if _vaulting() and _phase == Phase.IDLE:
-		if _vault_progress() >= Tuning.VAULT_ATTACK_FROM and fighter.traversal.begin_drop_strike():
-			_drop_from_vault = true
-			_start_press(action, &"drop_strike", now, true)
-		else:
-			_vault_action = action  # earlier (or a mantle): a normal strike once landed
-			_vault_press_t = now
-		return
-	var id := _resolve_move(action)
-	if id == &"":
-		return
-	# A press continuing the string during a move's startup is remembered (L, L, L mashed).
-	if _phase == Phase.STARTUP and _move != null and _string_can_continue():
-		_buffer_action = action
-		_buffer_time = now
-		return
-	if _can_start():
-		_start_press(action, id, now)
-		return
-	if _phase == Phase.RECOVERY and _hit_cancel_ok(id):
-		_cancel_into(action, id, now)
-		return
-	if id == &"backfist" and _can_backfist():
-		_cancel_into(action, id, now)
-		return
-	if _buffer_window_open():
-		_buffer_action = action
-		_buffer_time = now
-
-## Presses are stored during the active frames, the last Tuning.BUFFER_FRAMES
-## of recovery, and while stunned or frozen (they fire the moment the fighter
-## is free). Earlier presses during a move are dropped: whiffs stay punishable.
-func _buffer_window_open() -> bool:
-	match _phase:
-		Phase.ACTIVE:
-			return true
-		Phase.RECOVERY:
-			return _recovery - _t <= Tuning.frames(Tuning.BUFFER_FRAMES) or _hit_confirmed
-		Phase.IDLE:
-			return true  # stunned, frozen, held: wait for free
-	return false
-
-## Input token for a press (ComboGraph): button + crouch / back / rising.
-func _token(action: int) -> StringName:
-	var crouch := fighter.is_crouching()
-	var intent := fighter.get_input_intent()
-	match action:
-		Action.KICK:
-			if crouch:
-				return ComboGraph.CK
-			if intent == &"back":
-				return ComboGraph.BK
-			return ComboGraph.K
-		Action.SWEEP:
-			return ComboGraph.BK
-		Action.HEAVY:
-			if crouch:
-				return ComboGraph.CP
-			if TimeDirector.now() - _crouch_released_at <= RISING_WINDOW:
-				return ComboGraph.RP
-			return ComboGraph.H
-		_:
-			if crouch:
-				return ComboGraph.CP
-			if intent == &"back":
-				return ComboGraph.BP
-			if TimeDirector.now() - _crouch_released_at <= RISING_WINDOW:
-				return ComboGraph.RP
-			return ComboGraph.P
-
-## Strike class of a button for strikes whose class follows the button (the
-## dropping strike): Light jab, Heavy cross, Kick kick.
-static func class_of_action(action: int) -> StringName:
+## The move a strike button means now: the punch string's next punch (Heavy:
+## its heavy version), else the button's own move. &"" for non-strikes.
+func _move_for(action: int) -> StringName:
 	match action:
 		Action.LIGHT:
-			return &"jab"
+			return graph.punch_at(_string_index_now())
 		Action.HEAVY:
-			return &"cross"
-	return &"kick"
-
-## The move a press means right now: a dropping strike in the air (or late in a
-## vault), a ground strike next to a body on the ground, else the next move of
-## the running string (ComboGraph).
-func _resolve_move(action: int) -> StringName:
-	if _drop_ok():
-		return &"drop_strike"
-	if fighter.is_player and _pursuit_victim() == null and _ground_target() != null:
-		return &"ground_stomp" if action == Action.KICK or action == Action.SWEEP else &"knee_drop"
-	return graph.next_move(_string_prev(), _token(action), _next_pos())
-
-## The string move a press follows: the current move, or the last one if it
-## ended less than Tuning.STRING_RESET ago. &"" when the string is over.
-func _string_prev() -> StringName:
-	if _string_pos <= 0:
-		return &""
-	if _phase != Phase.IDLE and _move != null:
-		return _move.id
-	if TimeDirector.now() - _last_move_end <= Tuning.STRING_RESET:
-		return _last_move_id
+			return graph.heavy_of(graph.punch_at(_string_index_now()))
+		Action.LEG_KICK, Action.SWEEP:
+			return &"leg_kick"
+		Action.GUT_PUNCH:
+			return &"gut_punch"
+		Action.UPPERCUT:
+			return &"uppercut"
+		Action.FRONT_KICK, Action.KICK:
+			return &"front_kick"
+		Action.ROUNDHOUSE:
+			return &"roundhouse"
 	return &""
 
-## The string can take another hit (1st or 2nd hit, all taps so far).
-func _string_can_continue() -> bool:
-	return _string_prev() != &"" and _string_pos < ComboGraph.MAX_HITS and _string_tap \
-		and _move_charge == 0
+## The punch string position a punch started now plays: it continues while the
+## chain is alive, else the jab.
+func _string_index_now() -> int:
+	if _phase == Phase.IDLE and not _chain_alive(TimeDirector.now()):
+		return 0
+	return _string_next
 
-## 1-based position the next string press plays.
-func _next_pos() -> int:
-	return _string_pos + 1 if _string_can_continue() else 1
-
-func _start_press(action: int, id: StringName, press_t: float, drop_begun := false) -> void:
+## A strike press that can start now: the move (the punch string and the
+## hold), the freeflow target, the glide or the startup.
+func _start_strike(action: int, press_t: float) -> void:
+	var now := TimeDirector.now()
+	_tick_chain(now)  # a chain past its grace drops first (the punch string back to the jab)
+	var punch := action == Action.LIGHT or action == Action.HEAVY
+	var idx := _string_index_now()
+	var id := _move_for(action)
+	# The punch and the kicks have heavy versions (R7_HEAVY_OF): a held press becomes one.
+	var hold := action != Action.HEAVY and graph.heavy_of(id) != &"" and _hold_enabled() \
+		and bool(_btn_down.get(action, false))
+	if hold and now - press_t >= Tuning.R7_HOLD_THRESHOLD:
+		id = graph.heavy_of(id)  # held past the threshold before it could start
+		hold = false
 	var m := MoveLibrary.get_move(id)
 	if m == null:
 		return
-	# String bookkeeping (ground and dropping strikes stand outside strings).
-	if m.ground_strike:
-		_string_pos = 0
-	elif m.drop:
-		_string_pos = 0
-	else:
-		var pos := _next_pos()
-		if pos == 1:
-			_string_tap = true
-		_string_pos = pos
-	_strike_class = class_of_action(action) if m.drop else m.strike_class
-	# Target (Feel Reference: Picking the target): turn to it; no target, strike along the stick.
-	# A sweep is pull back + Kick: the stick points back at the camera, so the
-	# sweep picks its target along the current facing and never turns round.
-	var tgt: Fighter = _ground_target() if m.ground_strike else _pick_target(m.sweep)
-	_target = tgt
-	_drop_from_vault = drop_begun
-	if tgt != null:
-		fighter.snap_facing(tgt.get_ground_position() - fighter.global_position)
-	elif m.hits_behind:
-		_turn_to_back()
-	elif not m.sweep:
-		var stick := _stick()
-		if stick.length() > 0.2:
-			fighter.snap_facing(stick)
-	var hold := _hold_enabled(action) and m.chargeable
-	_press_action = action if hold else -1
+	_press_action = action
 	_press_t = press_t
-	_press_released = not (hold and bool(_btn_down.get(action, false)))
-	_charge_level = 0
-	_move_charge = 0
-	if m.drop and not drop_begun and fighter.traversal != null:
-		fighter.traversal.begin_drop_strike()
-	_begin(m, -1.0, true, tgt if (m.ground_strike or _is_pursuit_target(tgt)) else null)
-	# The speed a tap strikes with is the speed at the press, before any lunge
-	# moves the fighter (Feel Reference: sampled at the press, or the charge release).
-	_press_sample = _sample_speed()
-	if _press_sample[2]:
-		_lunge_sprint = true  # a sprint press carries the run from the press
-		_lunge_speed = maxf(float(_press_sample[0]), Tuning.WALK_SPEED)
-	if _press_released:
-		_commit()
-
-## Cancel the current move into a new press (hit cancel or backfist).
-func _cancel_into(action: int, id: StringName, now: float) -> void:
-	if _move != null:
-		_last_move_id = _move.id
-		_last_move_end = TimeDirector.now()
-	_end_sprint_exception()
-	_end_sequence()
-	_phase = Phase.IDLE
-	_clear_aim()
-	_start_press(action, id, float(_btn_time.get(action, now)))
-
-## Cancel rule 1: on HIT, from the end of the active frames for
-## MoveData.cancel_window frames, into the string's next hit. Rule 2: no
-## cancels on whiff. Rule 4: charged strikes never hit-cancel. Round 5: the
-## third hit ends the string (no cancel out of it).
-func _hit_cancel_ok(next_id: StringName) -> bool:
-	if _move == null or not _hit_confirmed or _move_charge > 0 or _move.enemy:
-		return false
-	if _phase != Phase.RECOVERY or _t > Tuning.frames(_move.cancel_window):
-		return false
-	return _string_can_continue()
-
-## Back + Light works at any point of a basic (uncharged) move.
-func _can_backfist() -> bool:
-	if _move_charge > 0 or _phase == Phase.CHARGING:
-		return false
-	if fighter.is_down() or is_hit_stunned() or _held():
-		return false
-	return _phase == Phase.STARTUP or _phase == Phase.ACTIVE or _phase == Phase.RECOVERY
-
-## Cancel rule 3: Block cancels a basic strike's wind-up; it drops a charge.
-func _guard_cancels_windup() -> void:
-	if _phase == Phase.CHARGING:
-		cancel()
-		return
-	if _phase == Phase.STARTUP and _move != null and _move_charge == 0 and _press_action >= 0 \
-			and _move.kind == &"strike":
-		cancel()
-
-func _turn_to_back() -> void:
-	var fwd := fighter.get_forward()
-	var best: Fighter = null
-	var best_d := BACKFIST_RANGE
-	for opp in Targeting.opponents_of(fighter):
-		if opp.is_down():
-			continue
-		var to := opp.get_ground_position() - fighter.get_ground_position()
-		to.y = 0.0
-		var d := to.length()
-		if d < best_d and (d < 0.05 or fwd.dot(to / d) < 0.2):
-			best_d = d
-			best = opp
-	if best != null:
-		fighter.snap_facing(best.get_ground_position() - fighter.global_position)
-		_target = best
+	_hold_pending = hold
+	if punch:
+		_cur_string = idx
+		_string_next = graph.next_index(idx)
 	else:
-		fighter.snap_facing(-fwd)
+		_cur_string = -1
+	_launch_move(m, _pick_freeflow_target())
 
-# --- Round 5 targeting (Feel Reference: Picking the target) -------------------------
-## Strike aim: the player's stick (camera forward when neutral), else facing.
-func _aim_dir() -> Vector3:
-	if fighter.brain != null and fighter.brain.has_method(&"get_aim_dir"):
-		var d: Vector3 = fighter.brain.call(&"get_aim_dir")
-		if d.length_squared() > 1e-4:
-			return d
-	var s := _stick()
-	if s.length() > 0.2:
-		return s
-	return fighter.get_forward()
-
-## The player's lock-on target (Round 4), or null.
-func _lock_target() -> Fighter:
-	var t: Fighter = null
-	if fighter.brain != null and fighter.brain.has_method(&"get_lock_target"):
-		t = fighter.brain.call(&"get_lock_target") as Fighter
-	elif fighter.is_inside_tree():
-		var rig := fighter.get_tree().get_first_node_in_group(&"camera_rig")
-		if rig != null and rig.has_method(&"get_lock_target"):
-			t = rig.call(&"get_lock_target") as Fighter
-	if t == null or not is_instance_valid(t) or t.is_dead() or t.team == fighter.team:
-		return null
-	return t
-
-## The strike's target: the pursuit body, the lock-on target, else the best
-## scored opponent in the aim cone (Targeting.pick_strike_target).
-## along_facing: pick along the current facing instead of the stick (sweeps).
-func _pick_target(along_facing := false) -> Fighter:
-	var pt := _pursuit_victim()
-	if pt != null:
-		return pt
-	if fighter.is_player:
-		var lock := _lock_target()
-		if lock != null and not lock.is_down():
-			return lock
-	var aim := fighter.get_forward() if along_facing else _aim_dir()
-	return Targeting.pick_strike_target(fighter, aim, _sprinting_now())
-
-## A body on the ground near enough for a ground strike (lying, or a fleeing
-## enemy crawling: Targeting.pick_ground_target), unless a standing opponent is
-## closer (you strike him). A body still flying is struck, never stomped.
-func _ground_target() -> Fighter:
-	if fighter.is_airborne() or (fighter.traversal != null and fighter.traversal.is_airborne()):
-		return null
-	var aim := _aim_dir()
-	var g := Targeting.pick_ground_target(fighter, aim)
-	if g == null:
-		return null
-	if not Targeting.is_crawling(g) and g.combat != null and not g.combat.is_lying():
-		return null  # still flying: a strike, not a stomp
-	var origin := fighter.get_ground_position()
-	var to_g := g.get_center_of_mass() - origin
-	to_g.y = 0.0
-	var s := Targeting.pick_strike_target(fighter, aim, false)
-	if s != null:
-		var to_s := s.get_ground_position() - origin
-		to_s.y = 0.0
-		if to_s.length() < to_g.length():
-			return null
-	return g
-
-## Sprinting right now (sprint, wall run, sprint charge).
-func _sprinting_now() -> bool:
-	var t := fighter.traversal
-	return t != null and (t.is_sprinting() or t.is_wall_running() or t.is_charge_steering())
+## Any strike in the air (a jump, a fall, a kick-off) or late in a vault is a
+## dropping strike at the freeflow target (no glide, no lunge): active until
+## the fighter lands. Traversal is told (begin_drop_strike) unless the vault
+## already began it.
+func _start_drop(action: int, press_t: float) -> void:
+	var m := MoveLibrary.get_move(&"drop_strike")
+	if m == null:
+		return
+	_tick_chain(TimeDirector.now())
+	_press_action = action
+	_press_t = press_t
+	_hold_pending = false
+	_cur_string = -1
+	_drop_as = _move_for(action)  # it hits with the button's move entry (doc: God path)
+	if not _drop_from_vault:
+		_traversal_call(&"begin_drop_strike")
+	_launch_move(m, _pick_freeflow_target())
 
 func _vaulting() -> bool:
-	return fighter.traversal != null and fighter.traversal.is_vaulting()
+	return _traversal_bool(&"is_vaulting")
 
 func _vault_progress() -> float:
-	return fighter.traversal.get_vault_progress() if fighter.traversal != null else 0.0
+	var t := fighter.traversal
+	return float(t.call(&"get_vault_progress")) if t != null and t.has_method(&"get_vault_progress") else 0.0
 
-## In the air (a jump, a fall, a kick-off), not wall running, not in parkour
-## and not hanging for a pursuit: an attack here is a dropping strike.
+## In the air (a jump, a fall, a kick-off), not wall running, not in a vault
+## and not hanging for a pursuit: a strike here is a dropping strike.
 func _drop_ok() -> bool:
 	if not fighter.is_player or _pursuit_victim() != null:
 		return false
-	var t := fighter.traversal
-	if t != null and (t.is_wall_running() or t.is_vaulting()):
+	if _traversal_bool(&"is_wall_running") or _vaulting():
 		return false
-	return fighter.is_airborne() or (t != null and t.is_airborne())
+	return _fighter_bool(&"is_airborne") or _traversal_bool(&"is_airborne")
 
 ## Still falling in a dropping strike: Traversal's drop (timed on the real
 ## landing), else the jump / air state.
 func _drop_falling() -> bool:
-	var t := fighter.traversal
-	if t != null and t.has_method(&"is_drop_striking") and bool(t.call(&"is_drop_striking")):
-		return true
-	return _in_air()
+	return _traversal_bool(&"is_drop_striking") or _traversal_bool(&"is_airborne") or _vaulting() \
+		or _fighter_bool(&"is_airborne")
 
-func _in_air() -> bool:
-	var t := fighter.traversal
-	if t != null and (t.is_airborne() or t.is_vaulting()):
-		return true
-	return fighter.is_airborne()
-
-## An attack pressed in the first 60% of a vault (or in a mantle or kick-off)
-## is not a dropping strike: it fires as a normal strike once the fighter is
-## back on the ground (dropped if that takes longer than VAULT_PRESS_KEEP).
-func _tick_vault_press() -> void:
-	var a := _vault_action
-	var now := TimeDirector.now()
+## A strike pressed in the first 60% of a vault fires as a normal strike once
+## the fighter is back on the ground (dropped after VAULT_PRESS_KEEP).
+func _tick_vault_press(now: float) -> void:
 	if now - _vault_press_t > VAULT_PRESS_KEEP:
 		_vault_action = -1
 		return
-	if _vaulting() or _in_air():
+	if _vaulting() or _traversal_bool(&"is_airborne") or _fighter_bool(&"is_airborne"):
 		return
+	var a := _vault_action
 	_vault_action = -1
-	if _phase == Phase.IDLE:
-		_attack_press(a, now)
+	if _can_start():
+		_start_strike(a, now)
 
-# --- Commit: the strike's speed sample (Feel Reference: power score) ----------------
-## The press for a tap, the release for a charge. Samples the speed toward the
-## target BEFORE Traversal.on_strike_started() drops a sprinting player to walk,
-## emits strike_started (the AI's sidestep and guard, the whoosh) and decides
-## the finisher bonus.
-func _commit() -> void:
-	if _committed or _move == null:
-		return
-	_committed = true
-	# A tap strikes with the speed of its press; a charge with the speed at its release.
-	var sample := _press_sample if (_press_sample.size() == 3 and not _resample) else _sample_speed()
-	_resample = false
-	_p_speed = sample[0]
-	_p_cap = sample[1]
-	_p_sprint = sample[2]
+## Sprinting right now (sprint, wall run, sprint charge).
+func _sprinting_now() -> bool:
+	return _traversal_bool(&"is_sprinting") or _traversal_bool(&"is_wall_running") \
+		or _traversal_bool(&"is_charge_steering")
+
+## Traversal / Fighter queries that other modules may rename or drop: false when absent.
+func _traversal_bool(method: StringName) -> bool:
 	var t := fighter.traversal
-	if t != null and not _move.enemy:
-		if _p_sprint:
-			_lunge_sprint = true
-			_lunge_speed = maxf(maxf(_p_speed, _lunge_speed), Tuning.WALK_SPEED)
-		else:
-			_lunge_sprint = false
-		if _move.kind == &"strike" or _move.kind == &"counter":
-			t.on_strike_started(_p_sprint)
-	if _move_charge > 0:
-		_string_tap = false  # charging ends the string after this hit
-	# Feel Reference: +1 on the third hit of a tap string.
-	_p_finisher = _string_pos == ComboGraph.MAX_HITS and _string_tap and _move_charge == 0
-	if _move.kind == &"strike" or _move.kind == &"counter":
-		GameEvents.strike_started.emit(fighter, get_attack_target(), _move.id, _p_sprint, _move_charge)
+	return t != null and t.has_method(method) and bool(t.call(method))
 
-## [speed toward the target, speed cap, sprinting] right now (zeros without Traversal).
-func _sample_speed() -> Array:
+func _traversal_call(method: StringName) -> bool:
+	return _traversal_bool(method)
+
+func _fighter_bool(method: StringName) -> bool:
+	return fighter.has_method(method) and bool(fighter.call(method))
+
+## The flying body a pursuit is chasing (Defence), or null.
+func _pursuit_victim() -> Fighter:
+	var d: Defence = fighter.defence if fighter != null else null
+	if d == null or not d.has_method(&"get_pursuit_target"):
+		return null
+	var v: Variant = d.call(&"get_pursuit_target")
+	return v as Fighter if _alive(v) else null
+
+func _is_pursuit_target(f: Variant) -> bool:
+	return _alive(f) and f == _pursuit_victim()
+
+## Scripted move (tests, the lab, bots): start the Round 7 move `id` now, at
+## `target` (null: the freeflow pick), exactly as its button would (glide,
+## lunge, auto-connect; a string punch moves the string on). False when the
+## fighter is not free to start it.
+func play_move(id: StringName, target: Fighter = null) -> bool:
+	var m := MoveLibrary.get_move(id)
+	if m == null or not m.r7 or not _can_start() or _held() or _holding_body():
+		return false
+	_tick_chain(TimeDirector.now())
+	_press_action = -1
+	_press_t = TimeDirector.now()
+	_hold_pending = false
+	_cur_string = graph.index_of(id)
+	if _cur_string >= 0:
+		_string_next = graph.next_index(_cur_string)
+	var tgt: Fighter = target if _alive(target) else _pick_freeflow_target()
+	_launch_move(m, tgt, Tuning.R7_COUNTER_GLIDE if id == &"counter" else INF)
+	return true
+
+## Start a Round 7 move at `tgt` (null: along the stick, else facing). A target
+## farther than reach + R7_GLIDE_FROM (and within `max_glide` m) is glided to
+## first; closer ones get the short lunge in the startup.
+func _launch_move(m: MoveData, tgt: Fighter, max_glide := INF) -> void:
+	_setup_move(m)
+	_target = tgt
+	_seq_id = m.id
+	# Sprint strike: the speed toward the target, sampled before Traversal drops
+	# a sprinting player to walk; the strike carries the run.
+	_sample_speed()
 	var t := fighter.traversal
-	if t == null or _move == null or _move.enemy:
-		return [0.0, Power.speed_cap(), false]
-	return [maxf(t.speed_toward(_speed_dir()), 0.0), t.get_speed_cap(), _sprinting_now() or _drop_from_vault]
+	if t != null and t.has_method(&"on_strike_started"):
+		t.on_strike_started(_p_sprint)
+	if _p_sprint and tgt != null and not m.drop:
+		_sprint_excepted = tgt
+		fighter.add_collision_exception_with(tgt)
+		tgt.add_collision_exception_with(fighter)
+	attack_started.emit(m.id)
+	_pursuit_spike = false
+	if _is_pursuit_target(tgt):
+		_locked_target = tgt  # the pursuit body: struck wherever it flies
+		_pursuit_spike = _intent_back()  # the stick pulled back at the press: a spike
+	if tgt != null:
+		fighter.snap_facing(tgt.get_ground_position() - fighter.global_position)
+		var d := _flat_dist(tgt)
+		if not m.drop and _locked_target == null and d > m.reach * fighter.get_height_scale() + Tuning.R7_GLIDE_FROM \
+				and d <= max_glide:
+			_start_glide(tgt, d)
+			return
+	else:
+		var stick := _stick_dir()
+		if stick.length() > 0.2:
+			fighter.snap_facing(stick)
+	_enter_startup()
 
-## Direction of the speed bonus: toward the target, else facing.
-func _speed_dir() -> Vector3:
-	if _target != null and is_instance_valid(_target):
-		var to := _target.get_ground_position() - fighter.get_ground_position()
-		to.y = 0.0
-		if to.length_squared() > 1e-4:
-			return to.normalized()
-	return fighter.get_forward()
-
-## Start a move's startup. startup_override < 0 uses the move's frame data.
-func _begin(m: MoveData, startup_override := -1.0, emit_start := true, lock: Fighter = null) -> void:
-	if m == null:
-		return
-	_end_sprint_exception()
+## Fresh per-move state.
+func _setup_move(m: MoveData) -> void:
 	_move = m
-	_phase = Phase.STARTUP
 	_t = 0.0
-	_startup = startup_override if startup_override >= 0.0 else m.startup_s()
+	_startup = m.startup_s()
 	_active = m.active_s()
-	_recovery = m.recovery_s(true)
+	_recovery = m.recovery_s(false)
 	_registry.clear()
+	_prev_limbs.clear()
 	_hit_any = false
-	_hit_confirmed = false
+	_landed = false
+	_blocked = false
+	_first_active = false
 	_waited = false
 	_debris_kicked = false
 	_wall_struck = false
 	_committed = false
-	_press_sample = []
-	_resample = false
+	_locked_target = null
+	_glide_t = 0.0
+	_glide_velocity = Vector3.ZERO
+	_lunge_left = Tuning.LUNGE_MAX
+	_lunge_velocity = Vector3.ZERO
+	_has_lunge = false
+	_follow_left = 0.0
+	_follow_victim = null
+	_buffer_action = -1
+	_dash_left = 0.0
+	_drop_t = 0.0
+	if not m.drop:
+		_drop_as = &""
 	_p_speed = 0.0
 	_p_sprint = false
-	_p_finisher = false
-	_lunge_sprint = false
-	_lunge_speed = 0.0
-	_lunge_left = Tuning.LUNGE_MAX
-	_has_lunge = false
-	_prev_limb = Vector3.INF
-	_prev_limbs.clear()
-	_buffer_action = -1
-	if m.kind != &"strike" and m.kind != &"counter":
-		_strike_class = m.strike_class
-	if _dash_left > 0.0:
-		_dash_left = 0.0
-	# The pursuit follow-up, ground strikes and the counter lock onto their body.
-	_locked_target = lock
-	if blocking:
-		blocking = false
-	# Sprint strike: from the press to the end of the active frames the capsule ignores the target.
-	if fighter.is_player and _sprinting_now() and _target != null and is_instance_valid(_target):
-		_sprint_excepted = _target
-		fighter.add_collision_exception_with(_target)
-		_target.add_collision_exception_with(fighter)
-	if emit_start:
-		_seq_id = m.id
-	if fighter.animator:
-		fighter.animator.play_move(m.anim, _startup, _active, m.recovery_s(m.kind != &"grab"))
-	if emit_start:
-		attack_started.emit(m.id)
-	attack_incoming.emit(m.id, time_to_active())
-	_update_aim()
+	_end_sprint_exception()
+	_close_window()
+	blocking = false
+
+## Sprint strike sample: the speed toward the target (else facing), the cap,
+## and whether this is a sprint (sprint, wall run, sprint charge, vault drop).
+func _sample_speed() -> void:
+	var t := fighter.traversal
+	_p_cap = Power.speed_cap()
+	if t == null or _move == null or _move.enemy:
+		return
+	var dir := fighter.get_forward()
+	if _alive(_target):
+		var to := _target.get_ground_position() - fighter.get_ground_position()
+		to.y = 0.0
+		if to.length_squared() > 1e-4:
+			dir = to.normalized()
+	if t.has_method(&"speed_toward"):
+		_p_speed = maxf(float(t.call(&"speed_toward", dir)), 0.0)
+	if t.has_method(&"get_speed_cap"):
+		_p_cap = float(t.call(&"get_speed_cap"))
+	_p_sprint = _sprinting_now() or _drop_from_vault
+	# Wall-run strikes and vault drops count as the speed cap (doc: God path).
+	if _drop_from_vault or _traversal_bool(&"is_wall_running"):
+		_p_speed = maxf(_p_speed, _p_cap)
 
 func _end_sprint_exception() -> void:
-	var t := _sprint_excepted
+	var t: Variant = _sprint_excepted
 	_sprint_excepted = null
-	if t == null or not is_instance_valid(t) or fighter == null:
+	if not is_instance_valid(t) or fighter == null:
 		return
 	fighter.remove_collision_exception_with(t)
-	t.remove_collision_exception_with(fighter)
+	(t as Fighter).remove_collision_exception_with(fighter)
 
-# --- Lunge: strikes step toward their target ----------------------------------------
-## Per tick: the player's strike turns to its target and lunges toward it, up
-## to Tuning.LUNGE_MAX over the startup, stopping when the target is LUNGE_GAP
-## of the move's reach away. A sprint strike carries its run speed instead and
-## stops Tuning.SPRINT_LUNGE_STOP short, through the active frames. Once the
-## gap is closed (or the hit lands) the feet are planted: the forced velocity
-## is zero, so a run never carries the striker into its target.
-func _update_lunge(delta: float) -> void:
+func _start_glide(tgt: Fighter, d: float) -> void:
+	_phase = Phase.GLIDE
+	_glide_t = 0.0
+	GameEvents.glide_started.emit(fighter, tgt, d)
+	if fighter.animator and _move.id == &"counter" and PoseLibrary.HOLDS.has(&"counter_catch"):
+		fighter.animator.hold_pose(&"counter_catch")  # the lead hand catches through the glide
+	elif fighter.animator:
+		for a: StringName in GLIDE_ANIMS:
+			if PoseLibrary.has_move(a):
+				fighter.animator.play_timed(a, maxf(_glide_left(), Tuning.frames(4)))
+				break
+
+## The startup begins (after any glide). `startup` < 0 uses the move's frames.
+func _enter_startup(startup := -1.0) -> void:
+	_phase = Phase.STARTUP
+	_t = 0.0
+	_glide_velocity = Vector3.ZERO
+	if startup >= 0.0:
+		_startup = startup
+	if fighter.animator:
+		fighter.animator.play_move(_move.anim, _startup, _active, _move.recovery_s(false))
+	attack_incoming.emit(_move.id, time_to_active())
+	if not _hold_pending:
+		_commit()
+	_update_aim()
+
+## The move is decided (a tap released, a heavy reached, a special): tell
+## Traversal's fallback, the AI (guards) and the whoosh (GameEvents.strike_started).
+func _commit() -> void:
+	if _committed or _move == null:
+		return
+	_committed = true
+	if _move.kind == &"strike":
+		var heavy := 1 if graph.is_heavy(_move.id) else 0
+		GameEvents.strike_started.emit(fighter, get_attack_target(), _move.id, _p_sprint, heavy)
+
+## The punch button came up before the hold threshold: a tap. A tap that waited
+## at the end of its startup goes active now (its pose snaps to the hit).
+func _release_hold() -> void:
+	_hold_pending = false
+	if _phase == Phase.STARTUP:
+		if _t >= _startup:
+			_t = _startup
+		if _waited and fighter.animator:
+			fighter.animator.play_move(_move.anim, Tuning.frames(1), _active, _move.recovery_s(false))
+		_waited = false
+	_commit()
+
+## Still held at R7_HOLD_THRESHOLD: the heavy version of the string punch. Its
+## startup counts from the start of the move (the press, unless it glided).
+func _to_heavy() -> void:
+	_hold_pending = false
+	var m := MoveLibrary.get_move(graph.heavy_of(_move.id))
+	if m == null:
+		_commit()
+		return
+	_move = m
+	_startup = m.startup_s()
+	_active = m.active_s()
+	_recovery = m.recovery_s(false)
+	_waited = false
+	if _phase == Phase.STARTUP:
+		if fighter.animator:
+			fighter.animator.play_move(m.anim, maxf(_startup - _t, Tuning.frames(1)), _active, _recovery)
+		attack_incoming.emit(m.id, time_to_active())
+	_commit()
+
+# --- Freeflow targeting --------------------------------------------------------
+## The target of a press: Targeting.pick_freeflow_target along the stick, else
+## the combat target, else camera forward.
+## A pursuit body (Defence) comes first.
+func _pick_freeflow_target() -> Fighter:
+	var pt := _pursuit_victim()
+	if pt != null:
+		return pt
+	return Targeting.pick_freeflow_target(fighter, _stick_dir(), get_combat_target(), _camera_forward())
+
+## The camera-relative stick (PlayerController.get_aim_dir; zero when neutral).
+func _stick_dir() -> Vector3:
+	if fighter.brain != null and fighter.brain.has_method(&"get_aim_dir"):
+		var d: Vector3 = fighter.brain.call(&"get_aim_dir")
+		return Vector3(d.x, 0.0, d.z)
+	return Vector3.ZERO
+
+## Flat camera forward: PlayerController.get_camera_forward() (the camera
+## rig's), else the viewport camera's, else the fighter's facing.
+func _camera_forward() -> Vector3:
+	if fighter.brain != null and fighter.brain.has_method(&"get_camera_forward"):
+		var cf: Vector3 = fighter.brain.call(&"get_camera_forward")
+		cf.y = 0.0
+		if cf.length_squared() > 1e-4:
+			return cf.normalized()
+	var vp: Viewport = fighter.get_viewport() if fighter.is_inside_tree() else null
+	var cam: Camera3D = vp.get_camera_3d() if vp != null else null
+	if cam != null:
+		var f := -cam.global_basis.z
+		f.y = 0.0
+		if f.length_squared() > 1e-4:
+			return f.normalized()
+	return fighter.get_forward()
+
+func _flat_dist(f: Fighter) -> float:
+	var to := f.get_ground_position() - fighter.global_position
+	to.y = 0.0
+	return to.length()
+
+## A live fighter (`f` may hold a freed body, hence Variant).
+static func _alive(f: Variant) -> bool:
+	return is_instance_valid(f) and f is Fighter and not (f as Fighter).is_dead()
+
+## The HitInfo.Tier named `n` (R7_MOVES "tier").
+static func _tier_named(n: StringName) -> int:
+	for t: int in HitInfo.TIER_NAMES:
+		if HitInfo.TIER_NAMES[t] == n:
+			return t
+	return HitInfo.Tier.STAGGER
+
+# --- Glide, lunge, follow step ---------------------------------------------------
+## Estimated own-time seconds of glide left (0 when not gliding).
+func _glide_left() -> float:
+	if _phase != Phase.GLIDE or _move == null or not _alive(_target):
+		return 0.0
+	var gap := _flat_dist(_target) - _move.reach * fighter.get_height_scale() * LUNGE_GAP
+	return clampf(gap / Tuning.R7_GLIDE_SPEED, 0.0, maxf(Tuning.R7_GLIDE_MAX_TIME - _glide_t, 0.0))
+
+## Glide tick: close on the target at R7_GLIDE_SPEED, facing it; the startup
+## begins at reach x LUNGE_GAP or after R7_GLIDE_MAX_TIME.
+func _tick_glide(delta: float) -> void:
+	_glide_t += delta
+	_glide_velocity = Vector3.ZERO
+	if not _alive(_target) or _target.is_down():
+		_enter_startup()
+		return
+	var to := _target.get_ground_position() - fighter.global_position
+	to.y = 0.0
+	var d := to.length()
+	var gap := d - _move.reach * fighter.get_height_scale() * LUNGE_GAP
+	if gap <= 0.01 or _glide_t > Tuning.R7_GLIDE_MAX_TIME:
+		_enter_startup()
+		return
+	var dir := to / d
+	fighter.snap_facing(dir)
+	var speed := maxf(Tuning.R7_GLIDE_SPEED, _p_speed) if _p_sprint else Tuning.R7_GLIDE_SPEED
+	_glide_velocity = dir * minf(speed, gap / maxf(delta, 1e-4))
+
+## Per tick: the startup lunge toward the target (up to Tuning.LUNGE_MAX,
+## stopping at reach x LUNGE_GAP) and the follow step during recovery. Once
+## the gap is closed (or the hit lands) the feet are planted.
+func _update_motion(delta: float) -> void:
 	_has_lunge = false
-	var tgt := _target
-	if tgt == null or _move == null or not is_instance_valid(tgt) or tgt.is_dead():
-		if tgt != null and (not is_instance_valid(tgt) or tgt.is_dead()):
-			_target = null
-			_clear_aim()
-		return
-	if _phase != Phase.STARTUP and _phase != Phase.ACTIVE and _phase != Phase.RECOVERY:
-		return
-	if _phase != Phase.RECOVERY:
-		_update_aim()
-	if not fighter.is_player or _move.drop:
-		return
 	_lunge_velocity = Vector3.ZERO
+	if _target != null and not _alive(_target):
+		_target = null
+		_clear_aim()
+	var tgt: Fighter = _target
+	if _move == null or not _move.r7:
+		if tgt != null and (_phase == Phase.STARTUP or _phase == Phase.ACTIVE):
+			_update_aim()
+		return
+	match _phase:
+		Phase.STARTUP, Phase.ACTIVE:
+			if tgt != null:
+				_update_aim()
+				_update_lunge(tgt, delta)
+		Phase.RECOVERY:
+			_update_follow(delta)
+
+## A sprint strike carries its run speed instead, through the active frames,
+## and stops Tuning.SPRINT_LUNGE_STOP short. A dropping strike falls as it is.
+func _update_lunge(tgt: Fighter, delta: float) -> void:
+	if _move.drop:
+		return
 	_has_lunge = true
-	if _phase == Phase.RECOVERY or (_phase == Phase.ACTIVE and _hit_any):
-		return  # connected, or the lunge is over: the feet stay planted (no slide)
+	if _phase == Phase.ACTIVE and (_hit_any or not _p_sprint):
+		return
+	if (tgt.is_down() and not _is_pursuit_target(tgt)) or (_lunge_left <= 0.0 and not _p_sprint):
+		return
 	var to := tgt.get_ground_position() - fighter.global_position
 	to.y = 0.0
 	var d := to.length()
@@ -1105,32 +1130,48 @@ func _update_lunge(delta: float) -> void:
 		return
 	var dir := to / d
 	fighter.face_dir = dir
-	var stop := Tuning.SPRINT_LUNGE_STOP if _lunge_sprint else _move.reach * fighter.get_height_scale() * LUNGE_GAP
+	var stop := Tuning.SPRINT_LUNGE_STOP if _p_sprint else _move.reach * fighter.get_height_scale() * LUNGE_GAP
 	var gap := d - stop
 	if gap <= 0.0:
 		return
 	var speed := 0.0
-	if _lunge_sprint:
+	if _p_sprint:
+		var run := maxf(_p_speed, Tuning.WALK_SPEED)
 		var left_s := maxf((_startup - _t) + _active if _phase == Phase.STARTUP else _active - _t, 1.0 / 60.0)
-		var want := clampf(gap / left_s, _lunge_speed, _lunge_speed * SPRINT_LUNGE_BOOST)
-		speed = minf(want, gap / maxf(delta, 1e-4))
+		speed = minf(clampf(gap / left_s, run, run * SPRINT_LUNGE_BOOST), gap / maxf(delta, 1e-4))
 	else:
-		if _lunge_left <= 0.0 or _phase != Phase.STARTUP:
-			return
 		var left := maxf(_startup - _t, 1.0 / 60.0)
 		speed = minf(minf(gap, _lunge_left) / left, LUNGE_SPEED_MAX)
 		_lunge_left -= speed * delta
 	_lunge_velocity = dir * speed
 
+## Follow step: the attacker steps after a victim it pushed (R7_FOLLOW_SHARE of
+## the push over the recovery), never closer than FOLLOW_MIN_GAP.
+func _update_follow(delta: float) -> void:
+	_has_lunge = true
+	if _follow_left <= 0.0:
+		return
+	if not _alive(_follow_victim):
+		_follow_left = 0.0
+		return
+	var to := _follow_victim.get_ground_position() - fighter.global_position
+	to.y = 0.0
+	if to.length() <= FOLLOW_MIN_GAP:
+		return
+	var step := minf(_follow_speed * delta, _follow_left)
+	_follow_left -= step
+	_lunge_velocity = _follow_dir * step / maxf(delta, 1e-4)
+
+## The animator aims the strike at its target bone: a head strike at the head
+## itself (the Head bone + HEAD_AIM_UP), the gut punch at the waist, kicks at
+## their bone (P's AIM_YAW_ONLY moves only turn).
 func _update_aim() -> void:
-	var tgt := _target
-	if tgt == null or not is_instance_valid(tgt) or fighter.animator == null:
+	if not _alive(_target) or fighter.animator == null or not fighter.animator.has_method(&"set_aim_target"):
 		return
-	if not fighter.animator.has_method(&"set_aim_target"):
-		return
-	var p := tgt.get_aim_point()
-	if _move != null and _move.height < 0.6:
-		p = tgt.get_center_of_mass()  # low strikes aim at the hips
+	var bone := _move.target_bone if _move else Bones.CHEST
+	var p := _bone_pos(_target, bone)
+	if bone == Bones.HEAD and _target.rig != null:
+		p += Vector3.UP * HEAD_AIM_UP
 	fighter.animator.call(&"set_aim_target", p)
 	_aim_set = true
 
@@ -1141,111 +1182,35 @@ func _clear_aim() -> void:
 	if fighter and fighter.animator and fighter.animator.has_method(&"clear_aim_target"):
 		fighter.animator.call(&"clear_aim_target")
 
-# --- Charging (hold to charge; levels in real time) ---------------------------------
-static func level_for(held: float) -> int:
-	var lvl := 0
-	for i in Tuning.CHARGE_LEVELS.size():
-		if held >= Tuning.CHARGE_LEVELS[i]:
-			lvl = i + 1
-	return lvl
-
-func _enter_charge(now: float) -> void:
-	_phase = Phase.CHARGING
-	_has_lunge = false
-	_charge_level = level_for(now - _press_t)
-	if fighter.animator:
-		fighter.animator.hold_pose(_move.charge_hold if _move.charge_hold != &"" else &"power_charge")
-		fighter.animator.set_charge_level(_charge_level)  # tremble grows with the level
-	GameEvents.charge_started.emit(fighter, _move.id)
-	if _charge_level > 0:
-		GameEvents.charge_level_changed.emit(fighter, _charge_level)
-
-func _tick_charge(now: float) -> void:
-	var held := now - _press_t
-	var lvl := level_for(held)
-	if lvl != _charge_level:
-		_charge_level = lvl
-		if fighter.animator:
-			fighter.animator.set_charge_level(lvl)
-		GameEvents.charge_level_changed.emit(fighter, lvl)
-	_face_target()
-	if held >= Tuning.CHARGE_AUTO_RELEASE and _dash_left <= 0.0:
-		_press_released = true
-		_release_charge()
-
-## Fire the charged move: its full startup plays after the release ("charging
-## adds hold time on top"). Released in the air it becomes a dropping strike.
-func _release_charge() -> void:
-	if _phase != Phase.CHARGING:
-		return
-	var lvl := _charge_level
-	var m := _move
-	# Released in the air, or in the last 40% of a vault: a dropping strike.
-	var vault_drop := not m.drop and _vaulting() and _vault_progress() >= Tuning.VAULT_ATTACK_FROM \
-		and fighter.traversal.begin_drop_strike()
-	if vault_drop or (_drop_ok() and not m.drop):
-		m = MoveLibrary.get_move(&"drop_strike")
-		_strike_class = class_of_action(_press_action) if _press_action >= 0 else _strike_class
-		_string_pos = 0
-		_drop_from_vault = vault_drop
-		if not vault_drop and fighter.traversal != null:
-			fighter.traversal.begin_drop_strike()
-	_move_charge = lvl
-	_press_released = true
-	GameEvents.charge_released.emit(fighter, m.id, lvl)
-	_move = m
-	_phase = Phase.STARTUP
-	_t = 0.0
-	_startup = m.startup_s()
-	_active = m.active_s()
-	_recovery = m.recovery_s(true)
-	_registry.clear()
-	_lunge_left = Tuning.LUNGE_MAX
-	if _target != null and is_instance_valid(_target) and not _target.is_dead():
-		fighter.snap_facing(_target.get_ground_position() - fighter.global_position)
-	if fighter.animator:
-		fighter.animator.play_move(m.anim, _startup, _active, _recovery)
-	_resample = true
-	_commit()
-	attack_incoming.emit(m.id, time_to_active())
-
-## While charging, keep facing the target (or re-pick one along the stick).
-func _face_target() -> void:
-	var t := _target
-	if t == null or not is_instance_valid(t) or t.is_dead() or t.is_down():
-		t = _pick_target()
-		_target = t
-	if t == null:
-		return
-	var to := t.get_ground_position() - fighter.global_position
-	to.y = 0.0
-	if to.length_squared() > 1e-4:
-		fighter.face_dir = to.normalized()
+## World position of `bone` on `f` (its aim point without a rig).
+static func _bone_pos(f: Fighter, bone: StringName) -> Vector3:
+	if f.rig != null and f.rig.skeleton != null:
+		return f.rig.get_bone_global_position(bone)
+	return f.get_aim_point()
 
 # =============================================================================
 # Phase machine
 # =============================================================================
 
 func _advance(delta: float) -> void:
+	if _hold_pending and _phase in [Phase.GLIDE, Phase.STARTUP] \
+			and TimeDirector.now() - _press_t >= Tuning.R7_HOLD_THRESHOLD:
+		_to_heavy()
+	if _phase == Phase.GLIDE:
+		_tick_glide(delta)
+		return
 	_t += delta
 	if _phase == Phase.STARTUP:
-		# Still held: past Tuning.HOLD_THRESHOLD it charges; before that the
-		# strike waits at the end of its startup for the release.
-		if _press_action >= 0 and not _press_released:
-			if TimeDirector.now() - _press_t >= Tuning.HOLD_THRESHOLD:
-				_enter_charge(TimeDirector.now())
-				return
-			if _t >= _startup:
-				_t = _startup
-				_waited = true
-				return
-		if _t < _startup:
+		if _t < _startup - PHASE_EPS:
 			return
-		_commit()
-		if _waited and fighter.animator:
-			# The strike waited for the release: snap the pose to it now.
-			fighter.animator.play_move(_move.anim, Tuning.frames(1), _active, _move.recovery_s(_move.kind != &"grab"))
-		_waited = false
+		if _hold_pending:
+			if not _waited and fighter.animator:
+				# Held past its startup: the heavy's load pose while the hold is decided.
+				var load := StringName(String(graph.heavy_of(_move.id)) + "_load")
+				if PoseLibrary.HOLDS.has(load):
+					fighter.animator.hold_pose(load)
+			_waited = true
+			return  # a held tap waits for the hold decision (its time keeps counting)
 		_t -= _startup
 		_enter_active()
 		if _phase != Phase.ACTIVE:
@@ -1253,36 +1218,35 @@ func _advance(delta: float) -> void:
 	if _phase == Phase.ACTIVE:
 		if _move.kind == &"grab":
 			_detect_grab()
-			if _phase != Phase.ACTIVE:
-				return
 		elif _move.kind == &"strike" or _move.kind == &"counter":
 			_detect_hits()
-			if _phase != Phase.ACTIVE:
-				return
+		_first_active = false
+		if _phase != Phase.ACTIVE:
+			return
 		if _move.drop:
+			# A dropping strike ends on landing; a high drop stays active until it lands.
 			var dropping := _drop_falling()
 			_drop_t += delta
 			if _t >= Tuning.frames(2.0) and not dropping:
-				_t = _active  # the dropping strike ends on landing
+				_t = _active
 			elif dropping and _t >= _active and _drop_t < DROP_ACTIVE_LIMIT:
-				_t = _active - 1e-4  # a high drop stays active until it lands
-		if _t < _active:
+				_t = _active - 1e-3
+		if _t < _active - PHASE_EPS:
 			return
 		_t -= _active
 		_enter_recovery()
 		if _phase != Phase.RECOVERY:
 			return
 	if _phase == Phase.RECOVERY:
-		if _t >= _recovery:
+		if _t >= _recovery - PHASE_EPS:
 			_finish()
 
 func _enter_active() -> void:
 	_phase = Phase.ACTIVE
-	_drop_t = 0.0
-	_active_start_real = TimeDirector.now()
-	_prev_limb = _limb_point()
+	_first_active = true
 	_prev_limbs.clear()
-	if _move.kind in [&"strike", &"counter", &"grab"]:
+	if _move.kind in [&"strike", &"grab", &"counter"]:
+		_skip_invulnerable()
 		_check_interceptions()
 		if _phase != Phase.ACTIVE:
 			return  # parried: the parry stagger cancelled this attack
@@ -1292,32 +1256,54 @@ func _enter_active() -> void:
 		_spawn_projectile()
 		_hit_any = true
 
+## Recovery: the chain cut on a hit (the move ends after R7_CHAIN_CUT of it);
+## a whiff or a blocked hit plays it in full, resets the punch string and ends
+## the chain. The follow step spreads over it.
 func _enter_recovery() -> void:
+	_close_window()
+	_end_sprint_exception()
 	if not _hit_any and _move.kind in [&"strike", &"grab", &"counter"]:
 		GameEvents.attack_whiff.emit(fighter, _move.id)
 	_phase = Phase.RECOVERY
-	_recovery = _move.recovery_s(_hit_any)
-	if not _hit_any and _p_sprint:
-		_recovery += Tuning.frames(Tuning.SPRINT_WHIFF_FRAMES)  # a missed sprint strike
-	_end_sprint_exception()
 	_clear_aim()
-	if _buffer_action >= 0:
-		_fire_buffer(TimeDirector.now())
+	if _move.r7:
+		_recovery = _move.recovery_s(_landed)
+		if not _hit_any and _p_sprint:
+			_recovery += Tuning.frames(Tuning.SPRINT_WHIFF_FRAMES)  # a missed sprint strike
+		if not _landed and (_blocked or not _hit_any):
+			_end_chain()
+		_follow_speed = _follow_left / maxf(_recovery, Tuning.frames(2))
+	else:
+		_recovery = _move.recovery_s(_hit_any)
 
 func _finish() -> void:
-	if _move != null:
-		_last_move_id = _move.id
-		_last_move_end = TimeDirector.now()
+	var was_r7 := _move != null and _move.r7
 	_phase = Phase.IDLE
+	_drop_from_vault = false
+	_end_sprint_exception()
 	_press_action = -1
-	_move_charge = 0
+	_hold_pending = false
+	_cur_string = -1
 	_locked_target = null
 	_target = null
 	_has_lunge = false
-	_end_sprint_exception()
+	_follow_left = 0.0
+	_close_window()
 	_clear_aim()
 	_end_sequence()
 	_update_block_state()
+	if was_r7 and _chain_count > 0:
+		_chain_until = TimeDirector.now() + Tuning.R7_CHAIN_GRACE
+	_fire_buffer()
+
+## The press buffered during the active frames or the recovery starts the
+## moment the move ends; still held, it is already its heavy version (the hold
+## counts from the press).
+func _fire_buffer() -> void:
+	var a := _buffer_action
+	_buffer_action = -1
+	if a >= 0 and _can_start() and not _held():
+		_start_from_idle(a, _buffer_time)
 
 func _end_sequence() -> void:
 	if _seq_id != &"":
@@ -1325,59 +1311,46 @@ func _end_sequence() -> void:
 		_seq_id = &""
 		attack_ended.emit(id)
 
-## A charge that ends without firing (hit, grab, guard, death): the charge
-## glow and sound stop (GameEvents.charge_released at level 0).
-func _end_charge_unfired() -> void:
-	if _phase == Phase.CHARGING and _move != null and fighter != null:
-		GameEvents.charge_released.emit(fighter, _move.id, 0)
-
-## Abort the current move (got hit, launched, died).
+## Abort the current move: got hit, launched, died, or a dodge (M) / counter
+## (H) cancelling the player's own glide, startup or recovery (call only when
+## can_cancel()). The chain survives a cancel (being hit ends it:
+## on_reaction); a punch cancelled before its active frames gives its string
+## position back.
 func cancel() -> void:
-	_end_charge_unfired()
 	var was_busy := _phase != Phase.IDLE
+	var was_r7 := was_busy and _move != null and _move.r7
+	if was_busy and _cur_string >= 0 and (_phase == Phase.GLIDE or _phase == Phase.STARTUP):
+		_string_next = _cur_string
+	_close_window()
 	_phase = Phase.IDLE
 	_registry.clear()
 	_locked_target = null
 	_target = null
 	_dash_left = 0.0
 	_has_lunge = false
-	_vault_action = -1
-	_end_sprint_exception()
+	_glide_velocity = Vector3.ZERO
+	_follow_left = 0.0
 	_clear_aim()
+	_end_sprint_exception()
 	_press_action = -1
-	_press_released = true
-	_move_charge = 0
-	_string_pos = 0
+	_hold_pending = false
+	_waited = false
+	_buffer_action = -1
+	_vault_action = -1
+	_drop_from_vault = false
+	_cur_string = -1
+	if was_r7 and _chain_count > 0:
+		_chain_until = maxf(_chain_until, TimeDirector.now() + Tuning.R7_CHAIN_GRACE)
 	if was_busy:
 		_end_sequence()
 		if fighter and fighter.animator:
 			fighter.animator.cancel()
 	blocking = false
 
-func _cancel_quiet() -> void:
-	_end_charge_unfired()
-	var was_busy := _phase != Phase.IDLE
-	_phase = Phase.IDLE
-	_press_action = -1
-	_press_released = true
-	_move_charge = 0
-	_registry.clear()
-	_target = null
-	_has_lunge = false
-	_end_sprint_exception()
-	_clear_aim()
-	if was_busy:
-		_end_sequence()
-
-## Kept for callers of the Upgrade 2 grab: let go of a held body (Carry's).
-func drop_hold() -> void:
-	if fighter != null and fighter.carry != null and fighter.carry.is_holding():
-		fighter.carry.drop(&"hit")
-
 # --- Reactions (called by Fighter.flinch / stagger / stumble / knockdown / launch) ---
 func on_reaction(reaction: int, stun: float) -> void:
 	cancel()
-	_buffer_action = -1
+	_end_chain()
 	drop_debris()
 	match reaction:
 		HitInfo.Reaction.FLINCH, HitInfo.Reaction.STAGGER:
@@ -1389,12 +1362,12 @@ func on_reaction(reaction: int, stun: float) -> void:
 
 func on_death() -> void:
 	cancel()
+	_end_chain()
 	drop_debris()
 	_clear_aim()
 	_stun_left = 0.0
 	_block_held = false
 	blocking = false
-	_freeze_inputs.clear()
 
 func _on_stun_end() -> void:
 	var was := _stun_kind
@@ -1418,17 +1391,155 @@ func _update_block_state() -> void:
 	if want:
 		fighter.animator.hold_pose(&"block")
 	elif _phase == Phase.IDLE and _stun_left <= 0.0 and not _held() \
-			and not (fighter.carry != null and fighter.carry.is_holding()):
+			and not (fighter.carry != null and fighter.carry.is_holding()) and not fighter.is_reacting():
 		fighter.animator.release_pose()
+
+# =============================================================================
+# Chains (Round 7)
+# =============================================================================
+
+## Hits in the current chain (0 = no chain). HUD combo counter.
+func get_chain_count() -> int:
+	return _chain_count if _chain_alive(TimeDirector.now()) else 0
+
+## Punch string position the next punch press will use: 0 jab, 1 cross, 2 hook.
+func get_string_index() -> int:
+	return _string_index_now()
+
+## Kept for older callers: the chain count.
+func get_combo_count() -> int:
+	return get_chain_count()
+
+## The chain is alive: a hit landed and a move is still going, or the last
+## one ended less than R7_CHAIN_GRACE ago.
+func _chain_alive(now: float) -> bool:
+	return _chain_count > 0 and (_phase != Phase.IDLE or now <= _chain_until)
+
+## Per tick: the idle chain drops after its grace; the combat target clears
+## when it goes down, dies or leaves R7_TARGET_RANGE + R7_TARGET_KEEP_EXTRA.
+func _tick_chain(now: float) -> void:
+	if _chain_count > 0 and _phase == Phase.IDLE and now > _chain_until:
+		_end_chain()
+	get_combat_target()
+
+## The chain is over (grace ran out, a whiff, a blocked hit, or this fighter
+## was hit): chain_ended, the punch string back to the jab.
+func _end_chain() -> void:
+	_string_next = 0
+	if _chain_count <= 0:
+		return
+	var n := _chain_count
+	_chain_count = 0
+	_chain_until = -INF
+	GameEvents.chain_ended.emit(fighter, n)
+	GameEvents.combo_ended.emit(fighter, n)
+
+## A Round 7 move landed on `victim`: the chain grows, the combat target is
+## set, and a short push is followed during recovery.
+func _on_r7_landed(victim: Fighter, info: HitInfo) -> void:
+	_landed = true
+	_chain_count += 1
+	info.chain_index = _chain_count
+	info.combo_index = _chain_count
+	if victim == _target or not _alive(_target):
+		_combat_target = victim  # the target struck (not a bystander the swing also caught)
+	GameEvents.chain_hit.emit(fighter, victim, info.move_id, _chain_count)
+	GameEvents.combo_progress.emit(fighter, _chain_count, info.damage_scale)
+	if info.react in FOLLOW_REACTS and info.push > 0.0 and info.push <= Tuning.R7_FOLLOW_MAX_PUSH \
+			and not info.has_meta(&"escaped"):
+		_follow_left = info.push * Tuning.R7_FOLLOW_SHARE
+		_follow_dir = info.hit_direction
+		_follow_victim = victim
+
+## The last target struck while it is still a valid freeflow target within
+## Tuning.R7_TARGET_RANGE + R7_TARGET_KEEP_EXTRA; null otherwise. Once it went
+## down or out of range it stays cleared until struck again.
+func get_combat_target() -> Fighter:
+	if _combat_target == null:
+		return null
+	if not is_instance_valid(_combat_target) or not Targeting.is_freeflow_target(fighter, _combat_target,
+			Tuning.R7_TARGET_RANGE + Tuning.R7_TARGET_KEEP_EXTRA):
+		_combat_target = null
+	return _combat_target
+
+## True while a strike, a grab (Carry's glide) or a counter glides to its
+## target before its startup.
+func is_gliding() -> bool:
+	if _phase == Phase.GLIDE:
+		return true
+	var c := fighter.carry if fighter != null else null
+	return c != null and c.has_method(&"is_gliding") and bool(c.call(&"is_gliding"))
+
+# =============================================================================
+# Counter (Round 7)
+# =============================================================================
+
+## Defence calls this on a successful Counter press: cancel the player's own
+## glide, startup or recovery, glide to `target` (up to Tuning.R7_COUNTER_GLIDE)
+## and play the counter move, which connects on its first active frame
+## (auto-connect). False if it could not start (active frames, reacting, down,
+## held or holding).
+func play_counter(target: Fighter) -> bool:
+	if fighter == null or fighter.is_dead() or fighter.is_down() or _held() or _holding_body():
+		return false
+	if _phase == Phase.ACTIVE or fighter.is_reacting() or is_hit_stunned():
+		return false
+	var m := MoveLibrary.get_move(&"counter")
+	if m == null:
+		return false
+	cancel()
+	var tgt: Fighter = target if _alive(target) and target.team != fighter.team and not target.is_down() else null
+	_press_action = Action.COUNTER
+	_press_t = TimeDirector.now()
+	_hold_pending = false
+	_cur_string = -1
+	_launch_move(m, tgt, Tuning.R7_COUNTER_GLIDE)
+	return true
+
+## Attacker side: this fighter's current enemy attack has its counter window
+## open on `on` (Tuning.R7_COUNTER_WINDOW before the first active frame, through
+## the active frames).
+func is_counter_window_open(on: Fighter) -> bool:
+	return _window_open and on != null and on == _window_target
+
+## Attacker side: the current attack can be countered (false for grabs and the
+## shoulder charge: blue tell, dodge only).
+func is_attack_counterable() -> bool:
+	return _move != null and _move.enemy and _move.counterable \
+		and (_phase == Phase.STARTUP or _phase == Phase.ACTIVE)
+
+## Per tick: an enemy attack's window opens when its time to active reaches
+## R7_COUNTER_WINDOW (on its target, else the player in its reach).
+func _update_window() -> void:
+	if _window_open:
+		if not _alive(_window_target):
+			_close_window()
+		return
+	if _move == null or not _move.enemy or not (_phase == Phase.STARTUP or _phase == Phase.ACTIVE):
+		return
+	if time_to_active() > Tuning.R7_COUNTER_WINDOW:
+		return
+	var tgt: Fighter = _target if _alive(_target) and _target.team != fighter.team else null
+	if tgt == null:
+		tgt = _enemy_reach_target(_move, maxf(_startup - _t, 0.0))
+	if tgt == null:
+		return
+	_window_open = true
+	_window_target = tgt
+	_window_counterable = _move.counterable
+	GameEvents.counter_window.emit(fighter, tgt, true, _window_counterable)
+
+func _close_window() -> void:
+	if not _window_open:
+		return
+	_window_open = false
+	var t: Variant = _window_target
+	_window_target = null
+	GameEvents.counter_window.emit(fighter, t if is_instance_valid(t) else null, false, _window_counterable)
 
 # =============================================================================
 # Hit detection (attacker side)
 # =============================================================================
-
-func _limb_point() -> Vector3:
-	if _move == null:
-		return Vector3.INF
-	return _bone_point(_move.limb)
 
 ## Striking point of a bone: the fist for hands, else the bone origin.
 func _bone_point(bone: StringName) -> Vector3:
@@ -1441,24 +1552,37 @@ func _bone_point(bone: StringName) -> Vector3:
 func _rig_ready() -> bool:
 	return fighter.rig != null and fighter.rig.skeleton != null
 
-## Round 5: on the first active frame of every attack, each fighter it is aimed
-## at gets the first say: Defence.intercepts() (parry, teleport, sidestep). An
-## intercepted attack cannot hit that fighter; with no other hit it whiffs
-## (unless the parry already staggered this attacker, which cancels the attack).
+## First active frame: an opponent that is invulnerable now (a counter or a
+## dodge) cannot be hit by this attack at all (doc: Counter, "every other
+## attack whose first active frame falls inside the invulnerable time misses").
+func _skip_invulnerable() -> void:
+	for opp in Targeting.opponents_of(fighter):
+		if opp.is_invulnerable():
+			_registry[opp.get_instance_id()] = true
+
+## The first active frame of every attack: each fighter it is aimed at gets
+## the first say through its Defence (Defence.intercepts: the teleport, the
+## parry, the sidestep while H keeps them). An intercepted attack cannot hit
+## that fighter (a parry that staggers the attacker ends the attack).
 func _check_interceptions() -> void:
-	var reach := _move.reach * fighter.get_height_scale() + DODGE_CHECK_EXTRA
+	var reach := _move.reach * fighter.get_height_scale() + INTERCEPT_EXTRA
 	var fwd := fighter.get_forward()
 	for opp in Targeting.opponents_of(fighter):
 		if _phase != Phase.ACTIVE:
-			return  # parried: this attack is over
+			return
+		var d := opp.defence
+		if d == null or not d.has_method(&"intercepts") or _registry.has(opp.get_instance_id()):
+			continue
+		if d.has_method(&"is_enabled") and not bool(d.call(&"is_enabled")):
+			continue
 		var to := opp.get_ground_position() - fighter.get_ground_position()
 		to.y = 0.0
-		var d := to.length()
-		if d > reach:
+		var dist := to.length()
+		if dist > reach:
 			continue
-		if opp != get_attack_target() and d > 0.05 and fwd.dot(to / d) < INTERCEPT_FRONT_DOT:
+		if opp != get_attack_target() and dist > 0.05 and fwd.dot(to / dist) < 0.0:
 			continue
-		if opp.defence != null and opp.defence.is_enabled() and opp.defence.intercepts(fighter, _move.id):
+		if bool(d.call(&"intercepts", fighter, _move.id)):
 			_registry[opp.get_instance_id()] = true
 
 func _detect_hits() -> void:
@@ -1483,30 +1607,35 @@ func _detect_hits() -> void:
 	var fwd := fighter.get_forward()
 	var base := fighter.global_position + Vector3.UP * m.height * hs
 	var a := base + fwd * 0.2
-	var reach_len := m.reach * hs
-	var b := base + fwd * reach_len
-	var mid := (a + b) * 0.5
+	var b := base + fwd * m.reach * hs
 	_q_capsule.radius = m.reach_radius
 	_q_capsule.height = maxf((b - a).length() + m.reach_radius * 2.0, m.reach_radius * 2.0 + 0.01)
 	# Capsule axis is local Y; rotate it onto the facing direction.
-	var basis := Basis(Quaternion(Vector3.UP, fwd))
-	_query(space, _q_capsule, Transform3D(basis, mid), b, found)
-	# 3. Locked target (pursuit follow-up, ground strike, teleport counter) connects if close enough.
-	var lt := _locked_target
-	if lt != null and is_instance_valid(lt) and _valid_victim(lt) and not found.has(lt):
-		var reach := (PURSUIT_REACH if _is_pursuit_target(lt) else m.reach * hs + LOCKED_TARGET_REACH)
+	_query(space, _q_capsule, Transform3D(Basis(Quaternion(Vector3.UP, fwd)), (a + b) * 0.5), b, found)
+	# 3. Locked target (a free swing at a downed player) connects if close enough.
+	var lt: Fighter = _locked_target if _alive(_locked_target) else null
+	if lt != null and _valid_victim(lt) and not found.has(lt):
 		var com := lt.get_center_of_mass()
 		var flat := Vector3(com.x - fighter.global_position.x, 0.0, com.z - fighter.global_position.z)
-		if flat.length() <= reach and absf(com.y - base.y) < 3.0:
+		var lreach := PURSUIT_REACH if _is_pursuit_target(lt) else m.reach * hs + LOCKED_TARGET_REACH
+		if flat.length() <= lreach and absf(com.y - base.y) < 3.0:
 			var bone := m.target_bone
-			if m.ground_strike or lt.is_down():
-				bone = _nearest_bone(lt, _limb_point() if _limb_point() != Vector3.INF else com)
+			if lt.is_down():
+				bone = _nearest_bone(lt, _bone_point(m.limb) if _rig_ready() else com)
 			found[lt] = [0.0, bone, com]
+	# 4. Round 7 auto-connect: the chosen target is always hit when it is within
+	# reach + R7_CONNECT_MARGIN on the first active frame (not invulnerable,
+	# dodging or down), even if the limb sweep missed.
+	var tgt: Fighter = _target if _alive(_target) else null
+	if _first_active and m.r7 and tgt != null and not found.has(tgt) and _valid_victim(tgt) \
+			and not tgt.is_invulnerable() and not _is_dodging(tgt) \
+			and _flat_dist(tgt) <= m.reach * hs + Tuning.R7_CONNECT_MARGIN:
+		found[tgt] = [0.0, m.target_bone, _bone_pos(tgt, m.target_bone), true]
 	for victim: Fighter in found:
 		if not is_instance_valid(victim) or _registry.has(victim.get_instance_id()):
 			continue
 		var rec: Array = found[victim]
-		_deliver(victim, rec[1], rec[2])
+		_deliver(victim, rec[1], rec[2], rec.size() > 3)
 		if _phase != Phase.ACTIVE:
 			return
 	if found.is_empty() and not _hit_any:
@@ -1514,7 +1643,10 @@ func _detect_hits() -> void:
 	if found.is_empty() and not _hit_any:
 		_try_debris_kick()
 
-## The victim's physical bone nearest `point` (ground strikes push the nearest bone).
+static func _is_dodging(f: Fighter) -> bool:
+	return f.traversal != null and f.traversal.is_dodging()
+
+## The victim's physical bone nearest `point` (a swing at a body on the ground).
 static func _nearest_bone(victim: Fighter, point: Vector3) -> StringName:
 	if victim.rig == null:
 		return Bones.CHEST
@@ -1533,9 +1665,7 @@ static func _nearest_bone(victim: Fighter, point: Vector3) -> StringName:
 ## (Destructible panels, pillars, props, outer walls) strikes it once per move.
 ## Fighters win: nothing is struck while an opponent is in the move's reach.
 func _try_wall_strike(space: PhysicsDirectSpaceState3D) -> void:
-	if _wall_struck or not fighter.is_player or _move == null:
-		return
-	if _move.kind != &"strike" or _move.ground_hit:
+	if _wall_struck or not fighter.is_player or _move == null or not _move.r7:
 		return
 	if _opponent_in_reach():
 		return
@@ -1554,19 +1684,11 @@ func _try_wall_strike(space: PhysicsDirectSpaceState3D) -> void:
 	last_wall_strike = {"target": target, "position": pos, "normal": normal, "power": power, "result": res}
 	_wall_feel(res, normal)
 
-## Round 5: strike power on a wall follows the power score, so charge and speed
-## count exactly as on a body: WALL_POWER_PER_P x P (counter bonus included).
+## Strike power on a wall: WALL_POWER_PER_WEIGHT x the move's Round 7 weight.
 func strike_power() -> float:
 	if _move == null:
 		return 0.0
-	return WALL_POWER_PER_P * current_power()
-
-## P the current strike would deal now (0 when not striking).
-func current_power() -> float:
-	if _move == null or _strike_class == &"":
-		return 0.0
-	return Power.score(Power.base_of(_strike_class), clampi(_move_charge, 0, 3), _p_speed, _p_cap,
-		_counter_bonus_now(), _p_finisher)
+	return WALL_POWER_PER_WEIGHT * float(_move.r7_entry().get("weight", 0.0))
 
 func _wall_feel(result: StringName, normal: Vector3) -> void:
 	var broke := result == &"break" or result == &"hole"
@@ -1585,7 +1707,7 @@ func _opponent_in_reach() -> bool:
 	var reach := _move.reach * fighter.get_height_scale() + STRIKE_FIGHTER_MARGIN
 	var fwd := fighter.get_forward()
 	for opp in Targeting.opponents_of(fighter):
-		if _registry.has(opp.get_instance_id()) or not _height_connects(opp):
+		if _registry.has(opp.get_instance_id()) or opp.is_down():
 			continue
 		var to := opp.get_ground_position() - fighter.get_ground_position()
 		to.y = 0.0
@@ -1669,12 +1791,12 @@ static func _strike_target(n: Node) -> Node:
 		n = n.get_parent()
 	return null
 
-## The player's kick sweeping through a large debris chunk kicks it at the
-## target (or straight ahead) as a projectile.
+## The player's front kick or roundhouse sweeping through a large debris chunk
+## kicks it at the target (or straight ahead) as a projectile.
 func _try_debris_kick() -> void:
 	if _debris_kicked or not fighter.is_player or _move == null:
 		return
-	if not (_move.id == &"sparta_kick" or _move.id == &"roundhouse"):
+	if not (_move.id == &"front_kick" or _move.id == &"roundhouse"):
 		return
 	var foot := _bone_point(&"RightFoot")
 	if foot == Vector3.INF:
@@ -1688,13 +1810,12 @@ func _try_debris_kick() -> void:
 	_debris_kicked = true
 	_hit_any = true
 	DebrisManager.release(body)
-	var aim := Vector3.INF
-	var t := Targeting.pick_strike_target(fighter, _aim_dir(), true)
-	if t != null:
-		aim = t.get_aim_point() - Vector3.UP * 0.2
+	var t: Fighter = _target if _alive(_target) else Targeting.pick_freeflow_target(fighter, _stick_dir(), null,
+		_camera_forward(), DEBRIS_KICK_RANGE)
 	var v: Vector3
-	if aim != Vector3.INF:
-		v = ThrownChunk.ballistic_velocity(body.global_position, aim, DEBRIS_KICK_SPEED, body.gravity_scale)
+	if t != null:
+		v = ThrownChunk.ballistic_velocity(body.global_position, t.get_aim_point() - Vector3.UP * 0.2,
+			DEBRIS_KICK_SPEED, body.gravity_scale)
 	else:
 		v = fighter.get_forward() * DEBRIS_KICK_SPEED + Vector3.UP * 3.0
 	ThrownChunk.launch_body(body, v, fighter, DEBRIS_KICK_DAMAGE, &"debris_kick")
@@ -1720,64 +1841,38 @@ func _query(space: PhysicsDirectSpaceState3D, shape: Shape3D, xform: Transform3D
 		if not found.has(f) or (found[f][0] as float) > d:
 			found[f] = [d, area.get_meta(&"bone"), p]
 
+## Downed bodies (knocked down, launched, getting up) are never struck by the
+## player's moves (doc: Freeflow targeting); a lifted body is.
 func _valid_victim(f: Fighter) -> bool:
 	if f == null or not is_instance_valid(f) or f == fighter or f.team == fighter.team \
 			or f.is_dead() or _registry.has(f.get_instance_id()):
 		return false
-	return _height_connects(f)
+	return not (_move != null and _move.r7 and f.is_down() and not _is_pursuit_target(f))
 
-## Highs pass over a crouching fighter; lows under a jumping one.
-func _height_connects(f: Fighter) -> bool:
-	if _move == null or not (_move.kind == &"strike" or _move.kind == &"counter"):
-		return true
-	var lvl := _effective_level(f)
-	if lvl == HitInfo.Level.HIGH and f.is_crouching():
-		return false
-	if lvl == HitInfo.Level.LOW and f.is_airborne():
-		return false
-	return true
-
-func _deliver(victim: Fighter, bone: StringName, pos: Vector3) -> void:
+## `auto`: the hit came from the auto-connect (HitInfo meta "auto_connect").
+func _deliver(victim: Fighter, bone: StringName, pos: Vector3, auto := false) -> void:
 	_registry[victim.get_instance_id()] = true
 	var info := _build_hit(victim, bone, pos)
+	if auto:
+		info.set_meta(&"auto_connect", true)
 	var result := victim.take_hit(info)
 	_hit_any = true
 	last_dealt = info
 	hit_dealt.emit(info)
-	if result != HitInfo.Result.HIT:
+	if result == HitInfo.Result.BLOCKED:
+		_blocked = true
+	if result != HitInfo.Result.HIT or _move == null:
 		return
-	# The counter bonus lasts until the next hit lands.
-	if fighter.defence != null:
-		fighter.defence.consume_counter_bonus()
-	if info.pursuit and fighter.defence != null:
-		fighter.defence.on_pursuit_hit(victim)
-	if info.get_meta(&"armored", false):
-		return
-	_hit_confirmed = true
-	_commit_combo(info)
-	if _move != null and _move.ground_strike and victim.combat and victim.is_down():
-		victim.combat.downed_hits += 1
-		if not victim.combat.getup_extended:
-			# Keep the body down for the finish: once per knockdown.
-			victim.combat.getup_extended = true
-			if victim.ragdoll and victim.ragdoll.has_method(&"delay_getup"):
-				victim.ragdoll.call(&"delay_getup", GROUND_HOLD)
+	if info.pursuit and fighter.defence != null and fighter.defence.has_method(&"on_pursuit_hit"):
+		fighter.defence.call(&"on_pursuit_hit", victim)
+	if info.react == &"spike":
+		_spiked[victim.get_instance_id()] = [victim, TimeDirector.now()]  # its floor impact is a shockwave
+	if _move.r7:
+		_on_r7_landed(victim, info)
 
-## A landed hit extends the combo (Tuning.COMBO_DROP) and reports it.
-func _commit_combo(info: HitInfo) -> void:
-	var now := TimeDirector.now()
-	if now - _combo_last > Tuning.COMBO_DROP:
-		if _combo_count > 0:
-			GameEvents.combo_ended.emit(fighter, _combo_count)
-		_combo_count = 0
-	_combo_count += 1
-	_combo_last = now
-	info.combo_index = _combo_count
-	GameEvents.combo_progress.emit(fighter, _combo_count, info.damage_scale)
-
-# --- Round 5: the hit an attack deals ------------------------------------------
-## Attacker side of the hit pipeline. A player strike gets its power score and
-## tier from P (_fill_power); enemy moves deal their preset tier (_fill_preset).
+# --- The hit an attack deals -------------------------------------------------------
+## Attacker side of the hit pipeline: a Round 7 move from R7_MOVES / R7_PAYOFFS
+## (_fill_r7); enemy moves deal their preset Round 5 tier (_fill_preset).
 func _build_hit(victim: Fighter, bone: StringName, pos: Vector3) -> HitInfo:
 	var m := _move
 	var info := HitInfo.new()
@@ -1786,28 +1881,22 @@ func _build_hit(victim: Fighter, bone: StringName, pos: Vector3) -> HitInfo:
 	info.move_id = m.id
 	info.kind = m.kind
 	var sdir := _strike_dir(victim)
-	var flat := Vector3(sdir.x, 0.0, sdir.z)
-	if flat.length_squared() < 1e-4:
-		flat = fighter.get_forward()
-	info.hit_direction = flat.normalized()
-	info.hit_position = pos
 	info.set_meta(&"strike_dir", sdir)
-	var zone := _strike_zone(victim)
-	info.zone = zone
-	# The hit chain comes from the hurtbox that was hit (or the aimed bone).
-	info.hit_bone = bone
-	if m.sweep:
-		if not bone in [Bones.L_LOWER_LEG, Bones.R_LOWER_LEG, Bones.L_FOOT, Bones.R_FOOT]:
-			info.hit_bone = m.target_bone
-	elif m.force_bone and not fighter.is_player:
-		info.hit_bone = m.target_bone
-	elif fighter.is_player and zone != BodyZones.Zone.TORSO and not m.ground_strike:
-		info.hit_bone = fighter.aim_bone_for(victim)
-	info.level = _effective_level(victim)
-	info.charge_level = clampi(_move_charge, 0, 3)
+	var to := victim.get_ground_position() - fighter.get_ground_position()
+	to.y = 0.0
+	info.hit_direction = to.normalized() if to.length() > 0.05 else fighter.get_forward()
+	if not m.r7:
+		# Enemy moves push along their strike (a hook turns the head across).
+		var flat := Vector3(sdir.x, 0.0, sdir.z)
+		if flat.length_squared() > 1e-4:
+			info.hit_direction = flat.normalized()
+	info.hit_position = pos
+	info.hit_bone = m.target_bone if (m.force_bone and not fighter.is_player) else bone
+	info.zone = BodyZones.of_bone(info.hit_bone)
+	info.level = m.hit_level
 	info.unblockable = m.unblockable
-	if fighter.is_player and _strike_class != &"":
-		_fill_power(info, victim)
+	if m.r7:
+		_fill_r7(info, victim)
 	else:
 		_fill_preset(info, victim)
 	return info
@@ -1821,119 +1910,196 @@ func _strike_dir(victim: Fighter) -> Vector3:
 	base = base.normalized() if base.length() > 0.05 else fighter.get_forward()
 	if _move == null:
 		return base
-	if _move.kind == &"counter":
-		base = fighter.get_forward()
 	var p := _move.push_dir
 	var right := base.cross(Vector3.UP).normalized()
 	var d := right * p.x + Vector3.UP * p.y + base * p.z
 	return d.normalized() if d.length_squared() > 1e-6 else base
 
-## Counter bonus on the next landed hit: Defence's (parry +2.5, teleport +3).
-func _counter_bonus_now() -> float:
-	return fighter.defence.counter_bonus() if fighter.defence != null else 0.0
-
-## The flying body a pursuit is chasing (Defence).
-func _pursuit_victim() -> Fighter:
-	var v: Fighter = null
-	if fighter.defence != null:
-		v = fighter.defence.get_pursuit_target()
-	if v == null or not is_instance_valid(v) or v.is_dead():
-		return null
-	return v
-
-func _is_pursuit_target(f: Fighter) -> bool:
-	return f != null and f == _pursuit_victim()
-
-## P, tier, launch, damage of a player strike (Feel Reference: One power number
-## decides the reaction). The victim's state decides what the body can do with
-## the tier: a pursuit always relaunches; a body lying on the floor (and any
-## ground strike) only takes a nudge; a flying body relaunches up to
-## Tuning.JUGGLE_MAX_RELAUNCH times per flight, then only takes nudges.
-func _fill_power(info: HitInfo, victim: Fighter) -> void:
-	var m := _move
-	var cls := _strike_class
-	var lvl := info.charge_level
-	var base := Power.base_of(cls)
-	var counter := _counter_bonus_now()
-	var p := Power.score(base, lvl, _p_speed, _p_cap, counter, _p_finisher)
-	info.power = p
-	# Raw class base (lead decision): P = power_base x Power.charge_mult(charge_level)
-	# + speed_bonus + counter_bonus + finisher_bonus.
-	info.power_base = base
-	info.speed_bonus = Power.speed_bonus(_p_speed, _p_cap)
-	info.counter_bonus = counter
-	info.finisher_bonus = Tuning.FINISHER_BONUS if _p_finisher else 0.0
-	info.sprint = _p_sprint
-	info.ground_strike = m.ground_strike
-	var tier := Power.sweep_tier_of(p) if m.sweep else Power.tier_of(p)
-	var vc := victim.combat
-	var mass := victim.get_total_mass()
+## A Round 7 player move (docs/Round 7: Moves, Payoffs, Hit feel, God path):
+## the move's R7_MOVES entry (a dropping strike: its button's move), or the
+## R7_PAYOFFS entry for the victim's react state; a sprint strike at v >=
+## SPEED_BONUS_FROM pushes harder or launches (_apply_sprint); the pursuit hit
+## relaunches or spikes (_fill_pursuit). Heavy enemies take push x
+## R7_HEAVY_PUSH_MULT, stun x R7_HEAVY_STUN_MULT, lift x R7_HEAVY_LIFT_MULT
+## (launches x HEAVY_LAUNCH_MULT). Damage keeps the combo scaling; a fleeing or
+## crawling enemy is finished; a killing launch may take a limb
+## (sever_on_kill_chance). The victim's side applies guard, tell armor and the
+## anti-infinite stun decay.
+func _fill_r7(info: HitInfo, victim: Fighter) -> void:
+	var id := _entry_id()
+	var e := _entry_of(id)
+	var state := victim.get_react_state()
+	info.victim_state = state
+	if _drop_as != &"" and _move.drop:
+		info.set_meta(&"drop_as", _drop_as)
+	var pay: Dictionary = (Tuning.R7_PAYOFFS.get(id, {}) as Dictionary).get(state, {})
+	info.payoff = not pay.is_empty()
 	var heavy := victim.is_heavy()
-	var lying := vc != null and vc.is_lying()
-	var flying := victim.is_launched() and not lying
-	var vel := Vector3.ZERO
-	var nudge := false
-	# A sweep tops out at the launch tier: it also flies like one (no hard-launch speed or angle).
-	var pl := minf(p, Tuning.TIER_BANDS[3] - 0.001) if m.sweep else p
-	if _is_pursuit_target(victim):
-		# Pursuit: relaunch at max(current speed, v(P + 3)) where the stick points.
-		info.pursuit = true
-		tier = maxi(tier, HitInfo.Tier.LAUNCH)
-		var dir := info.hit_direction
-		var stick := _stick()
-		if stick.length() > 0.2:
-			dir = Vector3(stick.x, 0.0, stick.z).normalized()
-		info.hit_direction = dir
-		var speed := Power.pursuit_speed(pl, victim.get_com_velocity().length(), mass, heavy)
-		var a := deg_to_rad(Power.launch_angle(pl + Tuning.PURSUIT_POWER_ADD))
-		vel = (dir * cos(a) + Vector3.UP * sin(a)) * speed
-	elif m.ground_strike or lying:
-		nudge = true  # never relaunches a body on the floor
-	elif flying:
-		if HitInfo.is_launch_tier(tier) and (vc == null or vc.juggle_relaunches < Tuning.JUGGLE_MAX_RELAUNCH):
-			info.juggle = true
-			vel = Power.launch_velocity(pl, info.hit_direction, mass, heavy)
-			var cur := victim.get_com_velocity()
-			if cur.length() > vel.length():
-				vel = vel.normalized() * cur.length()  # a relaunch redirects, never slows
-		else:
-			if HitInfo.is_launch_tier(tier):
-				info.set_meta(&"juggle_capped", true)
-			nudge = true
-	elif HitInfo.is_launch_tier(tier):
-		vel = Power.launch_velocity(pl, info.hit_direction, mass, heavy)
-	if nudge:
-		tier = HitInfo.Tier.FLINCH
-		info.set_meta(&"nudge", clampf(0.5 + NUDGE_PER_P * p, 0.5, NUDGE_MAX))
-	if tier == HitInfo.Tier.SEVER:
-		var cut := _sever_cut(victim, info)
-		if cut == &"":
-			tier = HitInfo.Tier.HARD_LAUNCH  # gore off, or no limb left to take
-		else:
-			info.sever_cut = cut
-	info.tier = tier
-	info.reaction = HitInfo.reaction_for_tier(tier)
-	info.launch_velocity = vel if HitInfo.is_launch_tier(tier) else Vector3.ZERO
-	info.hitstop = Power.hitstop_for(tier)
-	info.is_finisher = tier == HitInfo.Tier.SEVER
-	# Damage: strike damage (combo scaled) + launch damage + a limb.
-	var n := vc.next_taken_index() if vc != null else get_combo_count() + 1
+	info.react = pay.get("react", e["react"])
+	info.push = float(pay.get("push", e["push"]))
+	info.stun = float(pay.get("stun", e["stun"]))
+	info.weight = float(e["weight"])
+	info.hitstop = float(e["hitstop"])
+	info.counter = _move.id == &"counter"
+	info.chain_index = (_chain_count if _chain_alive(TimeDirector.now()) else 0) + 1
+	info.combo_index = info.chain_index
+	info.set_meta(&"guard_break", bool(e.get("guard_break", false)))
+	var launch_speed := float(pay.get("launch_speed", e.get("launch_speed", 9.0)))
+	var launch_angle := float(pay.get("launch_angle", e.get("launch_angle", 20.0)))
+	# Sprint strikes (kept for the god path): recorded, and at speed they push
+	# harder or launch.
+	info.speed_bonus = Power.speed_bonus(_p_speed, _p_cap)
+	info.sprint = _p_speed >= Tuning.SPEED_BONUS_FROM and not info.counter
+	if info.sprint:
+		var sprint_launch := _apply_sprint(info, id)
+		if sprint_launch > 0.0:
+			launch_speed = maxf(launch_speed if info.react == &"launch" else 0.0, sprint_launch)
+			launch_angle = Tuning.R7_SPRINT_LAUNCH_ANGLE if launch_speed == sprint_launch else launch_angle
+			info.react = &"launch"
+	info.lift_height = 0.0
+	if info.react == &"lift":
+		info.lift_height = float(pay.get("lift", Tuning.R7_LIFT_HEIGHT))
+	elif info.react == &"repop":
+		info.lift_height = Tuning.R7_REPOP_HEIGHT
+	if heavy:
+		info.push *= Tuning.R7_HEAVY_PUSH_MULT
+		info.stun *= Tuning.R7_HEAVY_STUN_MULT
+		info.lift_height *= Tuning.R7_HEAVY_LIFT_MULT
+	info.launch_velocity = Vector3.ZERO
+	if info.react == &"launch":
+		# A payoff's launch, the move's own (a heavy roundhouse), or a sprint launch.
+		var speed := minf(launch_speed * (Tuning.HEAVY_LAUNCH_MULT if heavy else 1.0), Tuning.LAUNCH_SPEED_MAX)
+		var a := deg_to_rad(launch_angle)
+		info.launch_velocity = (info.hit_direction * cos(a) + Vector3.UP * sin(a)) * speed
+	info.tier = REACT_TIER.get(info.react, HitInfo.Tier.STAGGER) if (info.payoff or info.react != e["react"]) \
+		else _tier_named(e["tier"])
+	# Damage: the move's (x the payoff's), combo scaled by the victim's hit count.
+	var vc := victim.combat
+	var n := vc.next_taken_index() if vc != null else 1
 	var scale := combo_scale(n)
-	var dmg := Power.strike_damage(cls, lvl) * scale
-	if HitInfo.is_launch_tier(tier):
-		dmg += Power.launch_damage(pl, victim.max_hp)
-	if info.sever_cut != &"":
-		dmg += Tuning.LIMB_LOST_DAMAGE
-	info.damage = dmg * _damage_mult()
-	if victim.is_fleeing():
-		info.damage = maxf(info.damage, victim.hp)  # any landed strike finishes a fleeing enemy
+	var base := float(e["dmg"]) * float(pay.get("dmg_mult", 1.0))
+	if _is_pursuit_target(victim):
+		base = _fill_pursuit(info, victim)
+	info.damage = base * scale * _damage_mult()
 	info.damage_scale = scale
-	info.combo_index = n
-	info.energy = _energy_of(info, mass)
+	if victim.is_fleeing() or Targeting.is_crawling(victim):
+		info.damage = maxf(info.damage, victim.hp)  # any hit finishes a fleeing or crawling enemy
+	if info.react in [&"launch", &"spike"] and info.damage >= victim.hp and randf() < sever_on_kill_chance:
+		var cut := _sever_cut(victim, info)
+		if cut != &"":
+			info.sever_cut = cut
+			info.tier = HitInfo.Tier.SEVER
+			info.is_finisher = true
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.energy = _energy_of(info, victim.get_total_mass())
 
-## Enemy moves (and the Duelist's counter) deal a preset tier: punches and
-## kicks flinch or stagger, the heavy's charge and grab-throws knock down.
-## Enemies never launch the player or take its limbs.
+## The move whose R7 entry this hit uses: a dropping strike hits with its
+## button's move (doc: God path), any other move with its own.
+func _entry_id() -> StringName:
+	return _drop_as if _move.drop and _drop_as != &"" else _move.id
+
+func _entry_of(id: StringName) -> Dictionary:
+	var m := MoveLibrary.get_move(id)
+	return m.r7_entry() if m != null else _move.r7_entry()
+
+## Sprint strike at v = _p_speed >= SPEED_BONUS_FROM (doc: God path): the
+## heavies, the front kick, the roundhouse and the uppercut launch (returns the
+## launch speed: R7_SPRINT_LAUNCH_BASE + R7_SPRINT_LAUNCH_PER_MS (v - 6), cap
+## LAUNCH_SPEED_MAX); punches and the leg kick push x (1 + R7_SPRINT_PUSH_PER_MS
+## (v - 6)) and are at least a push (returns 0).
+func _apply_sprint(info: HitInfo, id: StringName) -> float:
+	var over := _p_speed - Tuning.SPEED_BONUS_FROM
+	if graph.is_heavy(id) or SPRINT_LAUNCHERS.has(id):
+		return minf(Tuning.R7_SPRINT_LAUNCH_BASE + Tuning.R7_SPRINT_LAUNCH_PER_MS * over, Tuning.LAUNCH_SPEED_MAX)
+	info.push *= 1.0 + Tuning.R7_SPRINT_PUSH_PER_MS * over
+	if info.react in [&"snap", &"spin", &"fold", &"buckle"]:
+		info.react = &"push"
+	return 0.0
+
+## The pursuit hit (Defence's pursuit body; doc: God path). The stick pulled
+## back at the press: a spike (HitInfo.react &"spike", flown through
+## Fighter.launch), straight down at R7_SPIKE_SPEED (SPIKE_DRIFT degrees toward
+## camera forward), its floor impact a shockwave; Defence pursues a spiked body
+## no more. Otherwise a relaunch along camera forward at max(the body's
+## speed, R7_PURSUIT_RELAUNCH_SPEED, heavies x HEAVY_LAUNCH_MULT; cap
+## LAUNCH_SPEED_MAX), R7_PURSUIT_RELAUNCH_ANGLE up. Returns the damage before
+## scaling.
+func _fill_pursuit(info: HitInfo, victim: Fighter) -> float:
+	var cam := _camera_forward()
+	info.pursuit = true
+	info.payoff = false
+	info.react = &"launch"
+	info.push = 0.0
+	info.stun = 0.0
+	info.lift_height = 0.0
+	info.hit_direction = cam
+	if _pursuit_spike:
+		var d := deg_to_rad(SPIKE_DRIFT)
+		info.react = &"spike"
+		info.launch_velocity = (cam * sin(d) + Vector3.DOWN * cos(d)) * Tuning.R7_SPIKE_SPEED
+		info.tier = HitInfo.Tier.LAUNCH
+		return Tuning.R7_SPIKE_DAMAGE
+	var hm := Tuning.HEAVY_LAUNCH_MULT if victim.is_heavy() else 1.0
+	var speed := minf(maxf(victim.get_com_velocity().length(), Tuning.R7_PURSUIT_RELAUNCH_SPEED * hm),
+		Tuning.LAUNCH_SPEED_MAX)
+	var a := deg_to_rad(Tuning.R7_PURSUIT_RELAUNCH_ANGLE)
+	info.launch_velocity = (cam * cos(a) + Vector3.UP * sin(a)) * speed
+	info.tier = HitInfo.Tier.LAUNCH
+	return Tuning.R7_PURSUIT_DAMAGE
+
+## The stick is pulled back (toward the camera): Fighter.get_input_intent()
+## when it exists, else the stick against camera forward.
+func _intent_back() -> bool:
+	for o: Object in [fighter, fighter.brain]:
+		if o != null and o.has_method(&"get_input_intent"):
+			return StringName(o.call(&"get_input_intent")) == &"back"
+	var stick := _stick_dir()
+	return stick.length() >= INTENT_DEADZONE and stick.normalized().dot(_camera_forward()) <= -INTENT_DOT
+
+## A spiked body's floor impact: the shockwave (GameEvents.shockwave; WorldDamage
+## and FX listen) and a stagger on every enemy within R7_SPIKE_BLAST_RADIUS.
+func _on_body_impact(body: Node3D, pos: Vector3, normal: Vector3, _energy: float, _surface: StringName) -> void:
+	if _spiked.is_empty() or body == null or not is_instance_valid(body):
+		return
+	var key := body.get_instance_id()
+	if not _spiked.has(key):
+		return
+	if TimeDirector.now() - float(_spiked[key][1]) > SPIKE_WATCH:
+		_spiked.erase(key)
+		return
+	if normal.y <= FLOOR_NORMAL_Y:
+		return  # a wall on the way down: wait for the floor
+	_spiked.erase(key)
+	GameEvents.shockwave.emit(fighter, pos, Tuning.R7_SPIKE_BLAST_RADIUS, 0.0)
+	for f in Targeting.opponents_of(fighter):
+		if f == body or f.is_down():
+			continue
+		var to := f.get_ground_position() - pos
+		to.y = 0.0
+		var d := to.length()
+		if d > Tuning.R7_SPIKE_BLAST_RADIUS:
+			continue
+		f.take_hit(_shockwave_hit(f, to / d if d > 0.01 else fighter.get_forward()))
+
+## The spike shockwave's preset stagger (unblockable, no damage).
+func _shockwave_hit(victim: Fighter, dir: Vector3) -> HitInfo:
+	var info := HitInfo.new()
+	info.attacker = fighter
+	info.victim = victim
+	info.move_id = &"spike_shockwave"
+	info.kind = &"shockwave"
+	info.tier = HitInfo.Tier.STAGGER
+	info.reaction = HitInfo.reaction_for_tier(info.tier)
+	info.unblockable = true
+	info.hit_direction = Vector3(dir.x, 0.0, dir.z).normalized()
+	info.hit_bone = Bones.HIPS
+	info.hit_position = victim.get_ground_position() + Vector3.UP * 1.1
+	info.hitstop = Power.hitstop_for(info.tier)
+	return info
+
+## Enemy moves deal a preset tier: punches and kicks flinch or stagger, the
+## heavy's charge and grab-throws knock down. Enemies never launch the player
+## or take its limbs.
 func _fill_preset(info: HitInfo, victim: Fighter) -> void:
 	var m := _move
 	var tier := m.preset_tier if m.preset_tier >= 0 else HitInfo.Tier.FLINCH
@@ -1972,8 +2138,8 @@ static func _energy_of(info: HitInfo, mass: float) -> float:
 func _sever_cut(victim: Fighter, info: HitInfo) -> StringName:
 	if Tuning.gore != Tuning.Gore.DISMEMBER or victim.rig == null or victim.is_player:
 		return &""
-	if victim.has_method(&"get_lost_limbs") and victim.get_lost_limbs().size() >= Fighter.MAX_SEVERS:
-		return &""  # no more limbs come off this body: a hard launch
+	if victim.get_lost_limbs().size() >= Fighter.MAX_SEVERS:
+		return &""  # no more limbs come off this body
 	var cut := Bones.limb_cut_for(info.hit_bone)
 	if cut != &"" and not _cut_gone(victim, cut):
 		return cut
@@ -1989,61 +2155,14 @@ func _sever_cut(victim: Fighter, info: HitInfo) -> StringName:
 	return best
 
 static func _cut_gone(victim: Fighter, cut: StringName) -> bool:
-	return victim.rig.is_severed(cut) or (victim.rig.has_method(&"is_bone_severed") \
-		and victim.rig.is_bone_severed(Bones.CUTS[cut]))
-
-## Zone a strike lands in on `victim`: the player's aimed zone only on the
-## aimed target (Fighter.zone_for), else the torso.
-func _strike_zone(victim: Fighter) -> int:
-	if fighter.is_player and _move != null and (_move.kind == &"strike" or _move.kind == &"counter"):
-		return fighter.zone_for(victim)
-	return BodyZones.Zone.TORSO
-
-## Attack height of the current move on `victim`; strikes aimed at its head are high.
-func _effective_level(victim: Fighter) -> int:
-	if _move == null:
-		return HitInfo.Level.MID
-	if _move.kind == &"strike" and _strike_zone(victim) == BodyZones.Zone.HEAD:
-		return HitInfo.Level.HIGH
-	return _move.hit_level
-
-## Unit XZ direction to the nearest wall or pillar within max_dist (ZERO if
-## none): ImpactResolver.nearest_wall_dir(), with our own ray fan as a
-## fallback while it is a stub.
-func nearest_wall_dir(from: Vector3, max_dist := 10.0) -> Vector3:
-	var wd: Vector3 = ImpactResolver.nearest_wall_dir(from, max_dist)
-	if wd != Vector3.ZERO:
-		return wd
-	if fighter == null or not fighter.is_inside_tree():
-		return Vector3.ZERO
-	var space := fighter.get_world_3d().direct_space_state
-	var origin := Vector3(from.x, maxf(from.y, fighter.global_position.y + 0.9), from.z)
-	var best := Vector3.ZERO
-	var best_d := max_dist
-	for i in 16:
-		var a := TAU * float(i) / 16.0
-		var dir := Vector3(sin(a), 0.0, cos(a))
-		var q := PhysicsRayQueryParameters3D.create(origin, origin + dir * max_dist,
-			Layers.WORLD | Layers.DESTRUCTIBLE)
-		var hit := space.intersect_ray(q)
-		if hit.is_empty():
-			continue
-		var n: Vector3 = hit["normal"]
-		if absf(n.y) > 0.6:
-			continue  # floor or slope, not a wall
-		var dist := origin.distance_to(hit["position"])
-		if dist < best_d:
-			best_d = dist
-			best = dir
-	return best
+	return victim.rig.is_severed(cut) or victim.rig.is_bone_severed(Bones.CUTS[cut])
 
 # =============================================================================
 # Defender side
 # =============================================================================
 
-## Defender side of the hit pipeline: Defence / dodge, guard, armor and
-## ignore_flinch, damage, the contact frame, then the reaction by tier.
-## Returns HitInfo.Result.
+## Defender side of the hit pipeline: invulnerability, guard, tell armor,
+## damage, the contact frame, then the reaction. Returns HitInfo.Result.
 func receive_hit(info: HitInfo) -> int:
 	info.victim = fighter
 	last_received = info
@@ -2058,14 +2177,16 @@ func receive_hit(info: HitInfo) -> int:
 			if fighter.is_invulnerable():
 				return _ignored(info)
 			return _apply_hit(info)
-	if fighter.defence != null and fighter.defence.is_vanished():
-		info.result = HitInfo.Result.DODGED
+	if is_vanished():
+		info.result = HitInfo.Result.DODGED  # mid-teleport (Defence)
 		last_result = info.result
 		return info.result
 	if fighter.is_invulnerable():
 		return _ignored(info)
 	if not info.unblockable and _blocks(info):
 		return _apply_block(info)
+	if info.react != &"" and _armored(info):
+		return _apply_armor(info)
 	return _apply_hit(info)
 
 ## Hits from sources that set neither tier nor power (older callers) get a tier
@@ -2074,8 +2195,7 @@ static func _resolve_tier(info: HitInfo) -> void:
 	if info.tier != HitInfo.Tier.NONE:
 		return
 	if info.power > 0.0:
-		var m := MoveLibrary.get_move(info.move_id)
-		info.tier = Power.sweep_tier_of(info.power) if m != null and m.sweep else Power.tier_of(info.power)
+		info.tier = Power.tier_of(info.power)
 	else:
 		match info.reaction:
 			HitInfo.Reaction.FLINCH:
@@ -2092,9 +2212,10 @@ func _ignored(info: HitInfo) -> int:
 	last_result = info.result
 	return info.result
 
-## Holding Block guards strikes from the front (a crouching guard stops lows,
-## a standing one highs and mids). Round 5: a launch-tier strike (P 5 and up)
-## breaks through any guard: "launches can happen from any strike".
+## Guards (the AI holding Block, archetype blocks) cover strikes from the
+## front. Round 7 player strikes: a guard stops tapped punches; heavies, the
+## gut punch, the uppercut and every kick break it (the hit lands, the guard
+## drops; HitInfo meta "guard_broken"). Round 5 rules for other hits.
 func _blocks(info: HitInfo) -> bool:
 	if not (info.kind == &"strike" or info.kind == &"projectile"):
 		return false
@@ -2103,34 +2224,28 @@ func _blocks(info: HitInfo) -> bool:
 			and not fighter.is_down():
 		info.set_meta(&"escape_guard", true)
 		return true
-	if is_dazed() or is_stumbling():
+	if is_dazed() or is_stumbling() or fighter.is_reacting():
 		return false  # no guard off balance
+	var front := _attacker_in_front(info, GUARD_FRONT_DOT)
+	var guarding := is_blocking() and front
+	# Legacy archetypes: the Shield blocks from the front, the Brawler blocks jabs, when idle.
+	var passive := not guarding and front and _phase == Phase.IDLE and not fighter.is_down() \
+		and not _held() and not is_hit_stunned() and fighter.get_state() == RagdollController.State.ANIMATED \
+		and (bool(fighter.config.get("front_block", false)) or bool(fighter.config.get("blocks_jabs", false)))
+	if info.react != &"":
+		if not (guarding or passive):
+			return false
+		if bool(info.get_meta(&"guard_break", false)):
+			info.set_meta(&"guard_broken", true)
+			_block_held = false  # the guard is broken: the AI presses Block again to re-guard
+			return false
+		return true
 	if HitInfo.is_launch_tier(info.tier):
 		return false
-	var front := _attacker_in_front(info, GUARD_FRONT_DOT)
-	if is_blocking():
-		if not front:
-			return false
-		if fighter.is_crouching():
-			if info.level != HitInfo.Level.LOW:
-				return false
-		elif info.level == HitInfo.Level.LOW:
-			return false
-		if fighter.config.get("blocks_jabs", false):
-			return _is_jab(info) or _is_kick(info)  # legacy Brawler guard: jabs and kicks only
-		return true
-	# Legacy archetypes (out of Round 5 waves): passive blocks.
-	if fighter.is_down() or _held() or is_hit_stunned():
-		return false
-	if fighter.get_state() != RagdollController.State.ANIMATED or not front:
-		return false
-	if info.level == HitInfo.Level.LOW:
-		return false
-	if fighter.config.get("blocks_jabs", false) and _is_jab(info):
-		if _phase != Phase.ACTIVE and _phase != Phase.RECOVERY:
-			return true
-	if fighter.config.get("front_block", false):
-		return true  # Shield: every strike from the front
+	if guarding:
+		return info.level != HitInfo.Level.LOW
+	if passive and info.level != HitInfo.Level.LOW:
+		return bool(fighter.config.get("front_block", false))
 	return false
 
 func _attacker_in_front(info: HitInfo, min_dot: float) -> bool:
@@ -2143,13 +2258,6 @@ func _attacker_in_front(info: HitInfo, min_dot: float) -> bool:
 		return true
 	return fighter.get_forward().dot(to_attacker.normalized()) > min_dot
 
-static func _is_jab(info: HitInfo) -> bool:
-	return String(info.move_id).begins_with("jab") or info.move_id == &"cross"
-
-static func _is_kick(info: HitInfo) -> bool:
-	var m := MoveLibrary.get_move(info.move_id)
-	return m != null and m.is_kick and not m.sweep
-
 ## Tell armor of the move in progress (0 when not in startup/active).
 func get_armor_level() -> int:
 	if _move == null or not (_phase == Phase.STARTUP or _phase == Phase.ACTIVE):
@@ -2158,8 +2266,18 @@ func get_armor_level() -> int:
 		return _move.armor
 	return _move.armor + int(fighter.config.get("armor_bonus", 0))
 
-## Guard (Feel Reference: Holding Block): Tuning.GUARD_DAMAGE_MULT of the
-## damage; a stagger-tier or heavier hit pushes the guard back Tuning.GUARD_PUSH m.
+## Round 7 tell armor: an enemy in an armored tell (the heavy archetype, a
+## move's armor) takes tapped punches with damage and a small snap and keeps
+## attacking; heavies, specials and kicks (guard_break) break the armor.
+func _armored(info: HitInfo) -> bool:
+	if bool(info.get_meta(&"guard_break", false)) or fighter.is_player:
+		return false
+	if not (_phase == Phase.STARTUP or _phase == Phase.ACTIVE):
+		return false
+	return get_armor_level() >= 1 or bool(fighter.config.get("ignore_flinch", false))
+
+## Guard (the AI's): Tuning.GUARD_DAMAGE_MULT of the damage; a stagger-tier or
+## heavier hit pushes the guard back Tuning.GUARD_PUSH m.
 func _apply_block(info: HitInfo) -> int:
 	info.result = HitInfo.Result.BLOCKED
 	last_result = info.result
@@ -2197,17 +2315,17 @@ func _apply_block(info: HitInfo) -> int:
 	return info.result
 
 ## Contact-frame hitstop on this fighter (the victim) and the attacker only;
-## the player's own freeze never passes Tuning.PLAYER_HITSTOP_MAX.
+## the player's own freeze never passes Tuning.R7_PLAYER_HITSTOP_MAX.
 func _freeze_pair(att: Fighter, duration: float, victim_too: bool) -> void:
 	if duration <= 0.0:
 		return
 	var now := TimeDirector.now()
 	if victim_too:
-		var hv := minf(duration, Tuning.PLAYER_HITSTOP_MAX) if fighter.is_player else duration
+		var hv := minf(duration, Tuning.R7_PLAYER_HITSTOP_MAX) if fighter.is_player else duration
 		TimeDirector.hitstop([fighter], hv)
 		freeze_until(now + hv)
 	if att != null and is_instance_valid(att) and att != fighter:
-		var ha := minf(duration, Tuning.PLAYER_HITSTOP_MAX) if att.is_player else duration
+		var ha := minf(duration, Tuning.R7_PLAYER_HITSTOP_MAX) if att.is_player else duration
 		TimeDirector.hitstop([att], ha)
 		if att.combat != null:
 			att.combat.freeze_until(now + ha)
@@ -2215,6 +2333,9 @@ func _freeze_pair(att: Fighter, duration: float, victim_too: bool) -> void:
 func _apply_hit(info: HitInfo) -> int:
 	info.result = HitInfo.Result.HIT
 	last_result = info.result
+	_end_chain()  # this fighter was hit: its own chain drops
+	if info.react != &"":
+		return _apply_r7_hit(info)
 	var att := info.attacker as Fighter
 	var tier := info.tier
 	if HitInfo.is_launch_tier(tier) and info.launch_velocity.length_squared() < 1e-4 \
@@ -2223,9 +2344,8 @@ func _apply_hit(info: HitInfo) -> int:
 		var bp: float = Tuning.TIER_BANDS[clampi(tier - HitInfo.Tier.LAUNCH + 2, 2, 4)]
 		info.launch_velocity = Power.launch_velocity(bp, info.hit_direction, fighter.get_total_mass(), fighter.is_heavy())
 	# Heavies (ignore_flinch) take the damage but only a stagger or more
-	# interrupts them; Upgrade 2 tell armor (legacy archetypes, the Duelist) too.
-	if info.kind != &"throw" and info.kind != &"bowl" \
-			and not info.has_meta(&"nudge"):
+	# interrupts them; tell armor (the Duelist) too.
+	if info.kind != &"throw" and info.kind != &"bowl" and not info.has_meta(&"nudge"):
 		var light := tier == HitInfo.Tier.FLINCH or tier == HitInfo.Tier.STUMBLE
 		if light and bool(fighter.config.get("ignore_flinch", false)):
 			return _apply_armor(info)
@@ -2233,7 +2353,7 @@ func _apply_hit(info: HitInfo) -> int:
 		if (light and armor >= 1) or (tier == HitInfo.Tier.STAGGER and armor >= 2):
 			return _apply_armor(info)
 	var lethal := info.damage >= fighter.hp
-	# Anti-infinite (every fighter): hits taken from anyone, stun decay, break-away.
+	# Anti-infinite (Round 5 rules for these hits): stun decay, break-away.
 	var n := next_taken_index()
 	var decay := stun_decay(n)
 	var escape := not lethal and _breakaway_due(info, n, decay)
@@ -2241,8 +2361,6 @@ func _apply_hit(info: HitInfo) -> int:
 	info.set_meta(&"decay", decay)
 	if escape:
 		_break_away(info, att)
-	elif info.juggle:
-		juggle_relaunches += 1
 	# Contact frame: the reaction now, then the freeze holds the body in its
 	# contact pose (RagdollController) and releases it with the cached
 	# animation velocities + the impulse. A lethal hit only keeps its launch.
@@ -2260,17 +2378,63 @@ func _apply_hit(info: HitInfo) -> int:
 	hit_received.emit(info)
 	return info.result
 
+## A Round 7 player strike lands (doc: Hit feel): the anti-infinite (stun decay
+## from R7_COMBO_STUN_DECAY_FROM, the break-away at R7_COMBO_ESCAPE_HITS), the
+## reaction on the contact frame, hitstop, damage, hit_landed.
+func _apply_r7_hit(info: HitInfo) -> int:
+	var att := info.attacker as Fighter
+	var lethal := info.damage >= fighter.hp
+	var n := next_taken_index()
+	var decay := r7_stun_decay(n)
+	var downs := info.react in [&"knockdown", &"launch", &"spike"]
+	var escape := not lethal and not downs and n >= Tuning.R7_COMBO_ESCAPE_HITS and not fighter.is_down()
+	_register_taken()
+	info.stun *= decay
+	info.set_meta(&"decay", decay)
+	if escape:
+		_break_away(info, att)
+		info.stun = 0.0
+	elif not lethal or info.react == &"launch" or info.react == &"spike":
+		_react_r7(info)
+	_fighter_call(&"set_hitstop_jitter", [_jitter_for(info.tier)])
+	_freeze_pair(att, info.hitstop, true)
+	fighter.apply_damage(info.damage, info.move_id, info)
+	GameEvents.hit_landed.emit(info)
+	hit_received.emit(info)
+	return info.result
+
+## The Round 7 reaction: Fighter.react for the on-feet states (snap, spin,
+## fold, lift, buckle, push, repop), Fighter.knockdown, or a launch at the
+## payoff's velocity (a launch sets the flight).
+func _react_r7(info: HitInfo) -> void:
+	if fighter.is_dead():
+		if info.react == &"launch" or info.react == &"spike":
+			_launch_body(info)
+		return
+	cancel()
+	drop_debris()
+	match info.react:
+		&"knockdown":
+			fighter.knockdown(info.hit_direction, info.hit_bone)
+			_set_getup(Tuning.REACT_KNOCKDOWN["ground"])
+		&"launch", &"spike":
+			_launch_body(info)
+			_set_getup(Tuning.REACT_LAUNCH["ground"])
+		_:
+			var sdir: Vector3 = info.get_meta(&"strike_dir", info.hit_direction)
+			var flat := Vector3(sdir.x, 0.0, sdir.z)
+			flat = flat.normalized() if flat.length_squared() > 1e-4 else info.hit_direction
+			fighter.react(info.react, flat, info.push, info.stun, info)
+
 ## Mesh jitter for a tier (Tuning.HITSTOP_JITTER_RANGE, flinch to sever).
 static func _jitter_for(tier: int) -> float:
 	var r := Tuning.HITSTOP_JITTER_RANGE
 	var k := clampf(float(tier - HitInfo.Tier.FLINCH) / float(HitInfo.Tier.SEVER - HitInfo.Tier.FLINCH), 0.0, 1.0)
 	return lerpf(r.x, r.y, k)
 
-## The body's reaction to a hit by tier (Feel Reference: Partial ragdoll
-## reactions): flinch the hit chain, stumble the hit leg, stagger the upper
-## body (legs animated), knock down, or launch (a severing launch takes the
-## limb and still launches). Act-again times from Tuning.REACT_*; ground time
-## through RagdollController.set_getup_after().
+## Round 5 reaction by tier (enemy hits on the player, thrown bodies, props):
+## flinch the hit chain, stumble the hit leg, stagger the upper body, knock
+## down, or launch. Act-again times from Tuning.REACT_*.
 func _react(info: HitInfo) -> void:
 	if fighter == null or not is_instance_valid(fighter):
 		return
@@ -2305,19 +2469,21 @@ func _react(info: HitInfo) -> void:
 			_launch_body(info)
 			_set_getup(Tuning.REACT_LAUNCH["ground"])
 
-## Launch the body so it flies at info.launch_velocity (a relaunch sets the
-## flight, it does not add to it). A severing launch takes its limb first, in
-## the same frame, so the loose limb flies off with the launch.
+## Launch the body so it flies at info.launch_velocity: a launch sets the
+## flight (the body's current velocity is replaced: a flying body's, the
+## capsule's arc in a lift, the capsule's run on its feet; an active ragdoll's
+## bones jitter too much to read standing). A severing launch takes its limb
+## first, in the same frame, so the loose limb flies off with the launch.
 func _launch_body(info: HitInfo) -> void:
-	var change := info.launch_velocity
-	if fighter.is_body_simulating():
-		change = info.launch_velocity - fighter.get_com_velocity()
+	var cur := fighter.velocity
+	if fighter.is_down() or fighter.is_dead():
+		cur = fighter.get_com_velocity()
+	elif not fighter.is_lifted():
+		cur.y = 0.0
+	var change := info.launch_velocity - cur
 	if info.sever_cut != &"":
 		fighter.sever_limb(info.sever_cut)
 	fighter.launch(change, info.hit_position, info.hit_bone)
-	var m := MoveLibrary.get_move(info.move_id)
-	if m != null and m.sweep:
-		_sweep_legs(info.hit_direction)  # upended: the legs go first
 
 func _set_getup(ground: Vector2) -> void:
 	if fighter.ragdoll == null:
@@ -2338,15 +2504,30 @@ func _leg_bone_for(info: HitInfo) -> StringName:
 	var dr := fighter.rig.get_bone_global_position(Bones.R_LOWER_LEG).distance_to(info.hit_position)
 	return Bones.L_LOWER_LEG if dl <= dr else Bones.R_LOWER_LEG
 
-## Damage, no reaction: heavies under a stagger (ignore_flinch) and Upgrade 2
-## tell armor. The hit still lands (hit_landed: flash, sound) and the
-## attacker feels it.
+## Damage, no interruption: Round 7 tell armor (a tapped punch on an armored
+## tell: a small snap, it keeps attacking), Round 5 heavies under a stagger
+## (ignore_flinch) and tell armor. The hit still lands (hit_landed: flash,
+## sound) and the attacker feels it.
 func _apply_armor(info: HitInfo) -> int:
+	info.result = HitInfo.Result.HIT
+	last_result = info.result
 	_register_taken()
 	info.set_meta(&"armored", true)
 	info.reaction = HitInfo.Reaction.NONE
 	info.launch_velocity = Vector3.ZERO
-	_freeze_pair(info.attacker as Fighter, ARMOR_HITSTOP, true)
+	var stop := ARMOR_HITSTOP
+	if info.react != &"":
+		info.react = &"snap"
+		info.payoff = false
+		info.push = 0.0
+		info.stun = 0.0
+		info.lift_height = 0.0
+		info.tier = HitInfo.Tier.FLINCH
+		stop = info.hitstop
+		var sdir: Vector3 = info.get_meta(&"strike_dir", info.hit_direction)
+		if fighter.ragdoll != null and not fighter.is_body_simulating():
+			fighter.ragdoll.flinch(sdir, info.hit_bone, ARMOR_SNAP)
+	_freeze_pair(info.attacker as Fighter, stop, true)
 	fighter.apply_damage(info.damage, info.move_id, info)
 	GameEvents.hit_landed.emit(info)
 	GameEvents.armor_absorbed.emit(info)
@@ -2370,12 +2551,19 @@ func _register_taken() -> void:
 	_taken += 1
 	_taken_last = now
 
-## Stun multiplier of the n-th hit taken (Tuning.COMBO_STUN_*).
+## Round 5 stun multiplier of the n-th hit taken (Tuning.COMBO_STUN_*): enemy hits on the player.
 static func stun_decay(n: int) -> float:
 	if n < Tuning.COMBO_STUN_DECAY_FROM:
 		return 1.0
 	return maxf(Tuning.COMBO_STUN_MIN,
 		1.0 - Tuning.COMBO_STUN_DECAY * float(n - Tuning.COMBO_STUN_DECAY_FROM + 1))
+
+## Round 7 stun multiplier of the n-th hit taken (Tuning.R7_COMBO_STUN_*): player strikes.
+static func r7_stun_decay(n: int) -> float:
+	if n < Tuning.R7_COMBO_STUN_DECAY_FROM:
+		return 1.0
+	return maxf(Tuning.R7_COMBO_STUN_MIN,
+		1.0 - Tuning.R7_COMBO_STUN_DECAY * float(n - Tuning.R7_COMBO_STUN_DECAY_FROM + 1))
 
 ## Act-again time after a flinch, stumble or stagger: set (not extended) and
 ## summed for the break-away.
@@ -2395,9 +2583,9 @@ static func stun_of_tier(tier: int) -> float:
 			return float(Tuning.REACT_STAGGER["act"])
 	return 0.0
 
-## The hit that would be number Tuning.COMBO_ESCAPE_HITS, or that would push the
-## combo's stun past Tuning.COMBO_ESCAPE_STUN, breaks the fighter away. A
-## knockdown or launch ends a loop by itself.
+## Round 5 (enemy hits): the hit that would be number Tuning.COMBO_ESCAPE_HITS,
+## or that would push the combo's stun past Tuning.COMBO_ESCAPE_STUN, breaks
+## the fighter away. A knockdown or launch ends a loop by itself.
 func _breakaway_due(info: HitInfo, n: int, decay: float) -> bool:
 	if info.tier >= HitInfo.Tier.KNOCKDOWN or info.has_meta(&"nudge"):
 		return false
@@ -2439,7 +2627,7 @@ func _break_away(info: HitInfo, att: Fighter) -> void:
 	GameEvents.combo_escaped.emit(fighter, att)
 
 ## Lying on the floor or getting up from it (grounded, getting up, or a
-## launched body that has come to rest low): ordinary strikes never relaunch it.
+## launched body that has come to rest low).
 func is_lying() -> bool:
 	var st := fighter.get_state()
 	if st == RagdollController.State.GROUNDED or st == RagdollController.State.GETUP:
@@ -2480,68 +2668,67 @@ func _fighter_call(method: StringName, args: Array) -> void:
 	if fighter.has_method(method):
 		fighter.callv(method, args)
 
-## Upended by a launch-tier sweep: the legs go out from under the body.
-func _sweep_legs(direction: Vector3) -> void:
-	var rig := fighter.rig
-	if rig == null or fighter.ragdoll == null:
-		return
-	var d := Vector3(direction.x, 0.0, direction.z).normalized()
-	var axis := d.cross(Vector3.UP)
-	fighter.ragdoll.apply_limb_spin(d, 0.6)
-	# Next tick, so the ragdoll's own launch velocities are already in.
-	await fighter.get_tree().physics_frame
-	if not is_instance_valid(fighter):
-		return
-	for b: StringName in [&"LeftLowerLeg", &"RightLowerLeg", &"LeftFoot", &"RightFoot",
-			&"LeftUpperLeg", &"RightUpperLeg"]:
-		var pb := rig.get_physical_bone(b)
-		if pb == null:
-			continue
-		var lower := b.ends_with("Foot") or b.ends_with("LowerLeg")
-		pb.linear_velocity += d * (3.5 if lower else 1.5) + Vector3.UP * (1.5 if lower else 0.5)
-		pb.angular_velocity += axis * Tuning.SWEEP_SPIN * (1.0 if lower else 0.6)
+## Per tick: the victim's combo count expires after Tuning.COMBO_DROP.
+func _tick_victim(now: float) -> void:
+	if _taken > 0 and now - _taken_last > Tuning.COMBO_DROP:
+		_taken = 0
+		_taken_stun = 0.0
+
+## Damage multiplier of the n-th hit of a combo (1-based).
+static func combo_scale(n: int) -> float:
+	if n <= Tuning.COMBO_FULL_HITS:
+		return 1.0
+	return maxf(1.0 - Tuning.COMBO_SCALE_STEP * float(n - Tuning.COMBO_FULL_HITS), Tuning.COMBO_SCALE_MIN)
+
+func is_dazed() -> bool:
+	return _stun_left > 0.0 and _stun_kind == Stun.DAZE
+
+func is_stumbling() -> bool:
+	return _stun_left > 0.0 and _stun_kind == Stun.STUMBLE
 
 # =============================================================================
 # The Duelist's teleport counter (AI) and the fallback dash
 # =============================================================================
 
-## AI teleport counter (Duelist): costs Tuning.TELEPORT_COST Focus, teleports
-## behind `target` (the first free spot of Tuning.TELEPORT_SPOTS, as the
-## player's teleport), shows a blue tell (attack_tell kind
-## &"counter") for `tell_time`, then a back_kick (on the player: a knockdown).
-## The player can parry it or teleport away (Defence). Returns false if it
+## AI teleport counter (the Duelist; free since the amendment removed the
+## Focus meter: C paces it): teleports behind `target` (the first free spot of Tuning.TELEPORT_SPOTS),
+## shows a blue tell (attack_tell kind &"counter") for `tell_time`, then a
+## back_kick (on the player: a knockdown; uncounterable, dodge it). False if it
 ## cannot happen.
 func start_counter(target: Fighter, tell_time: float) -> bool:
 	if fighter == null or fighter.is_dead() or fighter.is_down() or _held() or _holding_body():
 		return false
-	if target == null or not is_instance_valid(target) or target.is_dead() or target.is_down():
+	if not _alive(target) or target.is_down():
 		return false
-	if not (_phase == Phase.IDLE or _phase == Phase.RECOVERY) or is_hit_stunned():
-		return false
-	if fighter.focus + 1e-4 < Tuning.TELEPORT_COST:
+	if not (_phase == Phase.IDLE or _phase == Phase.RECOVERY) or is_hit_stunned() or fighter.is_reacting():
 		return false
 	var spot := _find_counter_spot(target)
 	if spot == Vector3.INF:
 		return false
-	fighter.spend_focus(Tuning.TELEPORT_COST)
 	_teleport_invuln_until = TimeDirector.now() + AI_COUNTER_INVULN
 	_teleport_behind(target, spot)
+	var m := MoveLibrary.get_move(&"back_kick")
 	var startup := maxf(tell_time, Tuning.frames(Tuning.ENEMY_STARTUP_MIN))
-	GameEvents.attack_tell.emit(fighter, &"counter", startup)
-	_string_pos = 0
-	_strike_class = &""
+	GameEvents.attack_tell.emit(fighter, m.tell_kind, startup)
+	_press_action = -1
+	_hold_pending = false
+	_cur_string = -1
+	_setup_move(m)
 	_target = target
-	_begin(MoveLibrary.get_move(&"back_kick"), startup, true, target)
-	_commit()
+	_locked_target = target
+	_seq_id = m.id
+	attack_started.emit(m.id)
+	_enter_startup(startup)
+	_update_window()
 	return true
 
 func _teleport_behind(target: Fighter, spot: Vector3) -> void:
-	_cancel_quiet()
-	var look := target.get_ground_position() - spot
-	fighter.teleport_to(spot, look)
+	cancel()
+	fighter.teleport_to(spot, target.get_ground_position() - spot)
 	if fighter.rig:
 		CombatFX.puff(fighter.get_aim_point())
-	GameEvents.teleport_counter.emit(fighter, target)
+	if GameEvents.has_signal(&"teleport_counter"):
+		GameEvents.emit_signal(&"teleport_counter", fighter, target)
 
 func _find_counter_spot(target: Fighter) -> Vector3:
 	var tp := target.get_ground_position()
@@ -2571,11 +2758,6 @@ func _spot_clear(p: Vector3) -> bool:
 		Layers.WORLD | Layers.DESTRUCTIBLE)
 	return not space.intersect_ray(ray).is_empty()
 
-func _stick() -> Vector3:
-	if fighter.brain != null and fighter.brain.has_method(&"get_stick_world"):
-		return fighter.brain.get_stick_world()
-	return Vector3.ZERO
-
 ## The fallback dash for a fighter without Traversal (no enemy needs more):
 ## a short burst along its move input when it is free to act.
 func _on_dash_pressed(now: float) -> void:
@@ -2594,8 +2776,8 @@ func _on_dash_pressed(now: float) -> void:
 
 ## Active frames of an enemy grab move (e_grab, e_grab_slam): the first fighter
 ## in front within reach that Carry lets connect is held (Carry runs the hold,
-## the break window and the throw or slam). Defence already had its say on the
-## first active frame (_check_interceptions).
+## the break window and the throw or slam). An invulnerable target (dodge) was
+## skipped on the first active frame.
 func _detect_grab() -> void:
 	if not _move.enemy:
 		return
@@ -2606,8 +2788,6 @@ func _detect_grab() -> void:
 	for opp in Targeting.opponents_of(fighter):
 		if _registry.has(opp.get_instance_id()) or opp.carry == null or opp.is_down():
 			continue
-		if opp.is_crouching():
-			continue  # standing grabs whiff on a crouching fighter
 		var to := opp.get_ground_position() - fighter.get_ground_position()
 		to.y = 0.0
 		var d := to.length()
@@ -2753,47 +2933,3 @@ func _damage_mult() -> float:
 	if fighter.brain != null and fighter.brain.has_method(&"get_damage_mult"):
 		m *= float(fighter.brain.call(&"get_damage_mult"))
 	return m
-
-# --- Upgrade 2 contract (agent B implements) -------------------------------------
-## 0 = not charging or tapped, 1..3 = charge level reached (Tuning.CHARGE_LEVELS).
-func get_charge_level() -> int:
-	if _phase == Phase.CHARGING:
-		return _charge_level
-	return _move_charge if _phase != Phase.IDLE else 0
-
-## Hits in the current combo (0 when none).
-func get_combo_count() -> int:
-	return _combo_count if TimeDirector.now() - _combo_last <= Tuning.COMBO_DROP else 0
-
-## Damage multiplier the next combo hit gets (Tuning.COMBO_*).
-func get_damage_scale() -> float:
-	return combo_scale(get_combo_count() + 1)
-
-## Damage multiplier of the n-th hit of a combo (1-based).
-static func combo_scale(n: int) -> float:
-	if n <= Tuning.COMBO_FULL_HITS:
-		return 1.0
-	return maxf(1.0 - Tuning.COMBO_SCALE_STEP * float(n - Tuning.COMBO_FULL_HITS), Tuning.COMBO_SCALE_MIN)
-
-func is_dazed() -> bool:
-	return _stun_left > 0.0 and _stun_kind == Stun.DAZE
-
-func is_stumbling() -> bool:
-	return _stun_left > 0.0 and _stun_kind == Stun.STUMBLE
-
-## Per tick bookkeeping for Upgrade 2 (stance, combos, downed counters).
-func _tick_upgrade2(delta: float, now: float) -> void:
-	var c := fighter.is_crouching()
-	if _crouch_was and not c:
-		_crouch_released_at = now
-	_crouch_was = c
-	if not fighter.is_down():
-		downed_hits = 0
-		juggle_relaunches = 0
-		getup_extended = false
-	if _taken > 0 and now - _taken_last > Tuning.COMBO_DROP:
-		_taken = 0
-		_taken_stun = 0.0
-	if _combo_count > 0 and now - _combo_last > Tuning.COMBO_DROP:
-		GameEvents.combo_ended.emit(fighter, _combo_count)
-		_combo_count = 0

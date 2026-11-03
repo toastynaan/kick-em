@@ -144,11 +144,12 @@ func _check_callers() -> void:
 			var anim_id: StringName = m.get(&"anim")
 			if not PoseLibrary.has_move(anim_id):
 				missing.append("%s->%s" % [id, anim_id])
-			var hold: StringName = m.get(&"charge_hold")
-			if hold != &"" and not (PoseLibrary.HOLDS.has(hold) or PoseLibrary.POSES.has(hold)):
+			# Round 7 dropped charge holds from MoveData; check them only where they exist.
+			var hold = m.get(&"charge_hold")
+			if hold is StringName and hold != &"" and not (PoseLibrary.HOLDS.has(hold) or PoseLibrary.POSES.has(hold)):
 				missing.append("%s charge %s" % [id, hold])
 	var cg: Script = load("res://scripts/combat/combo_graph.gd")
-	if cg != null and cg.can_instantiate():
+	if cg != null and cg.can_instantiate() and _has_static(cg, &"default_graph"):
 		var g = cg.call(&"default_graph")
 		var st = g.get(&"starters") if g != null else null
 		var ln = g.get(&"links") if g != null else null
@@ -165,3 +166,9 @@ func _check_callers() -> void:
 					missing.append("combo %s" % id)
 	print("    MoveLibrary / ComboGraph moves checked: %d" % checked)
 	_check("every MoveLibrary anim and ComboGraph move plays", missing.is_empty(), str(missing))
+
+static func _has_static(sc: Script, method: StringName) -> bool:
+	for m in sc.get_script_method_list():
+		if StringName(m["name"]) == method:
+			return true
+	return false

@@ -17,8 +17,10 @@ extends Node
 ##    Tuning.DOWNED_FREE_SWINGS free swings at him; the rest wait.
 ## 4. An enemy must have been inside the camera view for
 ##    Tuning.ONSCREEN_BEFORE_TOKEN s before it gets a token.
-## 5. Tells: GameEvents.attack_tell spawns a TellGlint (orange limb glow on
-##    strikes, blue on both hands for grabs) from wind-up to first active frame.
+## 5. Tells: GameEvents.attack_tell spawns a TellGlint from wind-up to first
+##    active frame: orange on the striking limb when the player can Counter
+##    it, blue (both hands for grabs, the shoulder for the heavy's charge)
+##    when only a dodge answers it (MoveData.counterable).
 ## 6. Two holders' first active frames are at least Tuning.TOKEN_ACTIVE_GAP
 ##    apart by design (plus ACTIVE_GAP_MARGIN): every swing reserves its first
 ##    active frame (a string reserves each hit's), and request_swing() refuses
@@ -26,7 +28,13 @@ extends Node
 ##    enemy then waits a beat; its startup itself never changes, so each move
 ##    always has the same, learnable timing.
 ## Enemy startup: enemy_startup_frames() (Tuning.ENEMY_STARTUP, faster from
-## Tuning.ENEMY_STARTUP_SHRINK_FROM; set_wave() at each wave start).
+## Tuning.ENEMY_STARTUP_SHRINK_FROM; set_wave() at each wave start). Round 7:
+## never under tell_min_frames(), so every tell outlasts the player's counter
+## window (Tuning.R7_COUNTER_WINDOW) by Tuning.R7_TELL_MARGIN, at every wave.
+## Round 7 freeflow: an enemy in a reaction state (Fighter.is_reacting /
+## is_lifted), held, down or in hitstun gets no token, loses a held one
+## (unless its attack is still live: tell armor) and leaves the line, so the
+## enemies the player is not hitting keep coming.
 ## Clocks: world_now() (scaled game time, the enemies' own time) for token
 ## timeouts, grant gaps, pacing and swing spacing; now() = TimeDirector.now()
 ## (real time, physics ticks) for the on-screen rule. B reports time to the
@@ -134,6 +142,8 @@ var _beam_hazards: Array = []        ## [centre (flat), axis (flat unit)] under 
 ## Closest gap (world s) between first active frames of different enemies
 ## since the last reset (soak tests; INF before two).
 var min_active_gap := INF
+## Crowd-pacing slots given back by holders knocked out of their turn (tests).
+var paced_refunds := 0
 var _last_active_t := -INF
 var _last_active_by: Node3D = null
 
@@ -196,9 +206,9 @@ func unregister_enemy(enemy: Fighter) -> void:
 			enemy.tree_exiting.disconnect(unregister_enemy)
 
 ## True if `enemy` may start an attack now; it then holds a token until release_token().
-## `urgent` (Duelist counter / whiff punish) skips the crowd pacing and the
-## turn order; `cut_line` (a Brawler punishing a blocker) skips only the turn
-## order. Neither skips rules 1-6.
+## `urgent` (the Duelist's answer to a broken guard, its whiff punish) skips
+## the crowd pacing and the turn order; `cut_line` (a Brawler punishing a
+## blocker) skips only the turn order. Neither skips rules 1-6.
 func request_token(enemy: Fighter, urgent := false, cut_line := false) -> bool:
 	if enemy == null or not is_instance_valid(enemy):
 		return false
@@ -278,6 +288,10 @@ func get_last_denial(enemy: Fighter) -> String:
 ## `keep_place`: the token was taken back for a reason that is not the
 ## enemy's (the player went down or was grabbed), so it keeps its place in
 ## line. Otherwise (it attacked, gave up, was hit) it goes to the back.
+## Round 7 freeflow: a holder the player knocks out of its turn before it
+## swings (hit, reacting, held, down, dead) gives back its crowd-pacing slot
+## too, so the next enemy comes at once (after GRANT_GAP); the crowd never
+## attacks faster than the pacing, since that turn produced no attack.
 func release_token(enemy: Fighter, keep_place := false) -> void:
 	if not _holders.has(enemy):
 		return
@@ -285,6 +299,9 @@ func release_token(enemy: Fighter, keep_place := false) -> void:
 	_holders.erase(enemy)
 	if _last_turn.has(enemy) and (not keep_place or entry["attacking"]):
 		_last_turn[enemy] = world_now()
+	if not entry["attacking"] and is_instance_valid(enemy) and not _enemy_can_attack(enemy):
+		_next_paced_grant = minf(_next_paced_grant, world_now() + GRANT_GAP)
+		paced_refunds += 1
 	token_released.emit(enemy)
 
 func has_token(enemy: Fighter) -> bool:
@@ -320,13 +337,23 @@ func set_wave(index: int) -> void:
 ## a run never under Tuning.ENEMY_STARTUP_EARLY_MIN; from wave
 ## Tuning.ENEMY_STARTUP_SHRINK_FROM, Tuning.ENEMY_STARTUP_SHRINK frames faster
 ## per wave, never under Tuning.ENEMY_STARTUP_MIN. Moves the table does not
-## list (legacy archetypes) keep their old tells (LEGACY_STARTUP).
+## list (legacy archetypes) keep their old tells (LEGACY_STARTUP). Round 7:
+## never under tell_min_frames() at any wave or in Duel (wave 0).
 func enemy_startup_frames(move_id: StringName) -> float:
 	var f: float = Tuning.ENEMY_STARTUP.get(move_id, LEGACY_STARTUP.get(move_id, Tuning.ENEMY_STARTUP_EARLY_MIN))
 	if wave_index >= Tuning.ENEMY_STARTUP_SHRINK_FROM:
 		f -= Tuning.ENEMY_STARTUP_SHRINK * float(wave_index - Tuning.ENEMY_STARTUP_SHRINK_FROM + 1)
-		return maxf(f, Tuning.ENEMY_STARTUP_MIN)
-	return maxf(f, Tuning.ENEMY_STARTUP_EARLY_MIN)
+		f = maxf(f, Tuning.ENEMY_STARTUP_MIN)
+	else:
+		f = maxf(f, Tuning.ENEMY_STARTUP_EARLY_MIN)
+	return maxf(f, tell_min_frames())
+
+## Round 7: the shortest enemy tell, in frames of the enemy's own time: the
+## player's counter window plus the margin before it opens
+## (Tuning.R7_COUNTER_WINDOW + Tuning.R7_TELL_MARGIN), rounded up to a whole
+## frame.
+static func tell_min_frames() -> float:
+	return ceilf((Tuning.R7_COUNTER_WINDOW + Tuning.R7_TELL_MARGIN) * Tuning.FPS - 1e-4)
 
 ## The same in seconds of the enemy's own time.
 func enemy_startup_s(move_id: StringName) -> float:
@@ -360,6 +387,7 @@ func reset() -> void:
 	_player = null
 	wave_index = 0
 	min_active_gap = INF
+	paced_refunds = 0
 	_last_active_t = -INF
 	_last_active_by = null
 
@@ -539,10 +567,10 @@ func now() -> float:
 	return TimeDirector.now()
 
 ## World clock: scaled game time, the time enemies live in. Token timeouts,
-## grant gaps, pacing and swing spacing use it, so a long Focus (world at
-## 0.3x) neither times out a slowed enemy nor squeezes two swings together
-## when the world speeds up again (a world-time gap is never shorter in real
-## time while time_scale <= 1).
+## grant gaps, pacing and swing spacing use it, so a long slow motion (a
+## finisher, a KO) neither times out a slowed enemy nor squeezes two swings
+## together when the world speeds up again (a world-time gap is never shorter
+## in real time while time_scale <= 1).
 func world_now() -> float:
 	return _world_time
 
@@ -557,13 +585,22 @@ func _enemy_can_attack(enemy: Fighter) -> bool:
 		return false
 	return not is_enemy_impaired(enemy)
 
+## The holder's attack is still running (startup to recovery) and it is on its
+## feet: an armored tell takes a hit (Round 7: a tapped punch's small snap)
+## and keeps swinging, so it keeps its token and its reserved active frame.
+func _swing_live(enemy: Fighter) -> bool:
+	return enemy.combat != null and enemy.combat.is_attacking() and not enemy.is_down() and not enemy.is_dead()
+
 func _is_fleeing(enemy: Fighter) -> bool:
 	return enemy.has_method(&"is_fleeing") and enemy.is_fleeing()
 
-## Upgrade 2 states that keep an enemy out of the rotation: held by a grab,
-## dazed, stumbling (tripped enemies are down).
+## States that keep an enemy out of the rotation: held by a grab, a Round 7
+## reaction (snap, spin, fold, buckle, push, or popped up by a lift), and the
+## Upgrade 2 daze and stumble (tripped enemies are down).
 func is_enemy_impaired(enemy: Fighter) -> bool:
 	if enemy.carry != null and enemy.carry.is_held():
+		return true
+	if enemy.is_reacting() or enemy.is_lifted():
 		return true
 	var c := enemy.combat
 	if c == null:
@@ -635,7 +672,7 @@ func _physics_process(delta: float) -> void:
 			continue
 		var entry: Dictionary = _holders[e]
 		var attacking: bool = entry["attacking"]
-		if not _enemy_can_attack(e):
+		if not _enemy_can_attack(e) and not (attacking and _swing_live(e)):
 			release_token(e)
 		elif not attacking and player_gone and not (knocked_down and free_swings_left(e) > 0):
 			# Rule 3: an approaching holder does not keep its token while the
@@ -716,10 +753,13 @@ func _line_far(e: Fighter) -> float:
 	var b := e.brain as AIBrain
 	return b.get_line_reach() if b else LINE_FAR
 
+## In line: registered, fighting, and able to attack now. An enemy the player
+## is hitting (a reaction, hitstun, held) steps out, so another one moves up
+## and takes the next turn (freeflow: the crowd keeps coming).
 func _line_eligible(e: Fighter) -> bool:
 	if not is_instance_valid(e) or not e in _enemies or _holders.has(e):
 		return false
-	if e.is_dead() or e.is_down() or _is_fleeing(e):
+	if not _enemy_can_attack(e):
 		return false
 	var b := e.brain as AIBrain
 	return b == null or b.is_fighting()

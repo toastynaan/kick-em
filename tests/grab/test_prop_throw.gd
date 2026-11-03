@@ -1,12 +1,11 @@
 extends Node3D
-## F9 acceptance: "A thrown brick staggers and shatters." (Feel Reference:
-## Props: Grab picks a prop up when no body is in reach, with no slowdown even
-## while sprinting; Heavy throws it; a prop hit is a stagger and 8 damage; only
-## a brick to the head knocks down; it breaks on impact.)
-## - a brick on the floor, nobody in reach: Grab takes it (prop_picked_up);
-## - Heavy throws it at a grunt 5 m away: a stagger-tier hit for
+## F9 acceptance: "A thrown brick staggers and shatters." Round 7: with no body
+## in reach a loose prop is picked up as before; LMB (the throw button) throws
+## it along the camera with the throw's aim assist. Through the real input path:
+## - a brick on the floor, nobody in reach: C takes it (prop_picked_up); Dash
+##   with a prop is no drive;
+## - LMB throws it at a grunt 5 m away: a stagger-tier hit for
 ##   Tuning.PROP_DAMAGE, and the brick shatters (GameEvents.prop_broken);
-## - with the player's zone aim on the grunt's head, the brick knocks down;
 ## - sprinting past a brick: Grab picks it up with no loss of speed;
 ## - a body in reach wins over a prop.
 ## Props are agent D's ThrowableProp.
@@ -28,8 +27,7 @@ func _ready() -> void:
 			_events.append([s, a, b, c]))
 	GrabTestUtil.make_floor(self)
 	await get_tree().physics_frame
-	await _brick(false)
-	await _brick(true)
+	await _brick()
 	await _sprint_pickup()
 	await _sprint_reach()
 	await _body_first()
@@ -42,44 +40,40 @@ func _spawn_prop(kind: StringName, pos: Vector3) -> ThrowableProp:
 	var p := ThrowableProp.spawn(self, kind, Transform3D(Basis(), pos))
 	return p
 
-func _brick(head: bool) -> void:
+func _brick() -> void:
 	GrabTestUtil.reset_world()
+	GrabTestUtil.release_all_input()
 	_hits.clear()
 	_events.clear()
-	var p := GrabTestUtil.spawn(self, &"player", Vector3.ZERO, Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var g := GrabTestUtil.spawn(self, &"grunt", Vector3(0.0, 0.0, -5.0), Vector3.BACK)
+	var p := GrabTestUtil.spawn_player(self, Vector3.ZERO, Vector3.FORWARD)
+	var cam := GrabTestUtil.make_camera(self, p, Vector3.FORWARD)
+	var g := GrabTestUtil.spawn(self, &"grunt", Vector3(0.6, 0.0, -5.0), Vector3.BACK)
 	var brick := _spawn_prop(&"brick", Vector3(0.35, 0.05, -0.7))
 	await GrabTestUtil.wait(self, 0.4)
-	GrabTestUtil.press(p, CombatController.Action.GRAB)
-	GrabTestUtil.release(p, CombatController.Action.GRAB)
-	await GrabTestUtil.frames(self, 3)
+	await GrabTestUtil.key_tap(self, &"grab")
 	var picked := p.carry.is_holding_prop() and p.carry.held == brick and _count(&"prop_picked_up") == 1
 	await GrabTestUtil.wait(self, 0.2)
 	var in_hand := brick.global_position.distance_to(p.rig.get_bone_global_position(Bones.R_HAND))
-	if head:
-		# The player's zone aim on the grunt's head (ZoneAim rewrites these every
-		# tick from the camera, so set them on the frame of the press).
-		p.aim_target = g
-		p.aim_zone = BodyZones.Zone.HEAD
-		p.aim_bone = Bones.HEAD
-	await GrabTestUtil.tap(self, p, CombatController.Action.HEAVY, 0.05)
+	var drive := p.carry.on_drive_pressed(TimeDirector.now())
+	await GrabTestUtil.key_tap(self, &"punch", 1)
 	var v := p.carry.last_throw_velocity
 	await GrabTestUtil.wait_until(self, func() -> bool: return _count(&"prop_broken") > 0, 1.5)
 	await GrabTestUtil.frames(self, 2)
 	var hit := _hits.filter(func(h: HitInfo) -> bool: return h.victim == g and String(h.move_id).begins_with("prop_"))
 	var h: HitInfo = hit[0] if hit.size() > 0 else null
-	var label := "brick at the head" if head else "brick"
-	print("[%s] picked up=%s (%.2f m from the hand), thrown at %.1f m/s: hit %s on %s for %.0f dmg, grunt %s, shattered=%s" % [
-		label, picked, in_hand, v.length(), HitInfo.tier_name(h.tier) if h else &"-", h.hit_bone if h else &"-",
-		h.damage if h else 0.0, GrabTestUtil.state_name(g), _count(&"prop_broken") > 0])
-	_check(picked and in_hand < 0.3, "%s: Grab picks it up into the hand" % label)
-	_check(_count(&"prop_thrown") == 1 and v.length() > 10.0, "%s: Heavy throws it" % label)
-	var want := HitInfo.Tier.KNOCKDOWN if head else HitInfo.Tier.STAGGER
-	_check(h != null and h.tier == want and is_equal_approx(h.damage, Tuning.PROP_DAMAGE),
-		"%s: %s for %.0f damage" % [label, HitInfo.tier_name(want), Tuning.PROP_DAMAGE])
-	_check(_count(&"prop_broken") == 1 and (not is_instance_valid(brick) or brick.is_broken()), "%s: it shatters" % label)
-	p.aim_target = null
-	for n in [p, g, brick]:
+	print("[brick] picked up=%s (%.2f m from the hand), Dash drives=%s, thrown at %.1f m/s (assist %s): hit %s on %s for %.0f dmg, grunt %s, shattered=%s" % [
+		picked, in_hand, drive, v.length(), p.carry.last_throw_assist.name if p.carry.last_throw_assist else "-",
+		HitInfo.tier_name(h.tier) if h else &"-", h.hit_bone if h else &"-", h.damage if h else 0.0,
+		GrabTestUtil.state_name(g), _count(&"prop_broken") > 0])
+	_check(picked and in_hand < 0.3, "C picks it up into the hand (real input)")
+	_check(not drive, "Dash with a prop is no drive (it stays dodge / sprint)")
+	_check(_count(&"prop_thrown") == 1 and v.length() > 10.0, "LMB throws it (real input)")
+	_check(p.carry.last_throw_assist == g, "the aim assist takes the grunt 7 degrees off the camera")
+	_check(h != null and h.tier == HitInfo.Tier.STAGGER and is_equal_approx(h.damage, Tuning.PROP_DAMAGE),
+		"a stagger for %.0f damage" % Tuning.PROP_DAMAGE)
+	_check(_count(&"prop_broken") == 1 and (not is_instance_valid(brick) or brick.is_broken()), "it shatters")
+	GrabTestUtil.release_all_input()
+	for n in [p, g, brick, cam]:
 		if is_instance_valid(n):
 			n.queue_free()
 	await GrabTestUtil.frames(self, 4)

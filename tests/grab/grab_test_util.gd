@@ -1,6 +1,8 @@
 class_name GrabTestUtil
-## Shared helpers for tests/grab/*: Upgrade 2 limb grabs (LimbGrab) and the
-## Round 5 Carry tests (presses through CombatController, panels, leg spin).
+## Shared helpers for tests/grab/* (Round 7 Carry): geometry, fighters, the
+## real input path (Input.action_press -> PlayerController -> InputInterpreter
+## -> CombatController -> Carry), presses straight through CombatController's
+## routing, a camera rig to aim with, panels, and the global resets.
 ## OWNER: agent G.
 
 static func make_floor(parent: Node, size := 200.0) -> StaticBody3D:
@@ -32,74 +34,36 @@ static func make_wall(parent: Node, pos: Vector3, size: Vector3) -> StaticBody3D
 	parent.add_child(body)
 	return body
 
+## A controller-less fighter (dummies never break grabs).
 static func spawn(parent: Node, archetype: StringName, pos: Vector3, facing: Vector3,
 		team := Fighter.TEAM_ENEMY) -> Fighter:
 	var xf := Transform3D(Basis.looking_at(facing.normalized(), Vector3.UP), pos)
 	return FighterFactory.spawn_dummy(parent, archetype, xf, team)
 
-## Joints of the limbs a limb grab on `zone` holds (forearm + upper arm, or both legs).
-static func held_joints(zone: int) -> Array[StringName]:
-	match zone:
-		BodyZones.Zone.ARM_L:
-			return [Bones.L_LOWER_ARM, Bones.L_UPPER_ARM]
-		BodyZones.Zone.ARM_R:
-			return [Bones.R_LOWER_ARM, Bones.R_UPPER_ARM]
-		BodyZones.Zone.LEGS:
-			return [Bones.L_FOOT, Bones.L_LOWER_LEG, Bones.L_UPPER_LEG, Bones.R_FOOT, Bones.R_LOWER_LEG, Bones.R_UPPER_LEG]
-	return []
+## The real player (PlayerController + InputInterpreter) at `pos` facing `facing`.
+static func spawn_player(parent: Node, pos: Vector3, facing := Vector3.FORWARD) -> Fighter:
+	return FighterFactory.spawn_player(parent, Transform3D(Basis.looking_at(facing.normalized(), Vector3.UP), pos))
 
-static func yaw_dir(y: float) -> Vector3:
-	return Vector3(-sin(y), 0.0, -cos(y))
+## A CameraRig following `target`, its yaw looking along `look` (flat).
+static func make_camera(parent: Node, target: Fighter, look: Vector3) -> CameraRig:
+	var rig := CameraRig.new()
+	rig.name = "CameraRig"
+	rig.target = target
+	parent.add_child(rig)
+	set_camera_yaw(rig, look)
+	return rig
+
+## Turn the camera rig to look along `look` (flat): what the mouse would do.
+static func set_camera_yaw(rig: CameraRig, look: Vector3) -> void:
+	rig.set(&"_yaw", yaw_of(look))
 
 static func yaw_of(d: Vector3) -> float:
 	return atan2(-d.x, -d.z)
 
-## Largest gap (m) between where a ragdoll joint sits on the child body and on
-## the parent body (the ragdoll's own joints stretching), and that joint's bone.
-## `only` limits it to the joints of those child bones.
-static func joint_separation(f: Fighter, only: Array[StringName] = []) -> Array:
-	var rig := f.rig
-	var worst := 0.0
-	var worst_bone: StringName = &""
-	for b in Bones.PHYSICAL:
-		if b == Bones.HIPS or rig.is_bone_severed(b) or (not only.is_empty() and not only.has(b)):
-			continue
-		var pb := rig.get_physical_bone(b)
-		var p: StringName = Bones.PARENT[b]
-		var ppb := rig.get_physical_bone(p)
-		if ppb == null:
-			continue
-		var xc: Transform3D = PhysicsServer3D.body_get_state(pb.get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM)
-		var xp: Transform3D = PhysicsServer3D.body_get_state(ppb.get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM)
-		var on_child := (xc * rig.get_body_offset(b).affine_inverse()).origin
-		var rest := HumanoidRig.scaled(HumanoidRig.REST[b], rig.height_scale, rig.width_scale)
-		var on_parent := xp * rig.get_body_offset(p).affine_inverse() * rest
-		var d := on_child.distance_to(on_parent)
-		if d > worst or not is_finite(d):
-			worst = d if is_finite(d) else INF
-			worst_bone = b
-	return [worst, worst_bone]
+static func yaw_dir(y: float) -> Vector3:
+	return Vector3(-sin(y), 0.0, -cos(y))
 
-## [peak linear speed, peak angular speed, any NaN] over the fighter's bones.
-static func bone_speeds(f: Fighter) -> Array:
-	var lin := 0.0
-	var ang := 0.0
-	var nan := false
-	for b in Bones.PHYSICAL:
-		if f.rig.is_bone_severed(b):
-			continue
-		var rid := f.rig.get_physical_bone(b).get_rid()
-		var xf: Transform3D = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_TRANSFORM)
-		var lv: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY)
-		var av: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY)
-		if not xf.origin.is_finite() or not lv.is_finite() or not av.is_finite():
-			nan = true
-			continue
-		lin = maxf(lin, lv.length())
-		ang = maxf(ang, av.length())
-	return [lin, ang, nan]
-
-# --- Round 5 (Carry) helpers ---------------------------------------------------------------
+# --- Stepping ----------------------------------------------------------------------------
 ## Await `n` physics frames.
 static func frames(node: Node, n: int) -> void:
 	for i in n:
@@ -122,7 +86,8 @@ static func wait_until(node: Node, cond: Callable, timeout: float) -> bool:
 		t += node.get_physics_process_delta_time() * Engine.time_scale
 	return bool(cond.call())
 
-## The player's buttons, through CombatController's routing (as PlayerController does).
+# --- Buttons -------------------------------------------------------------------------------
+## Straight through CombatController's routing (no PlayerController needed).
 static func press(f: Fighter, action: int) -> void:
 	f.combat.press(action)
 
@@ -135,6 +100,26 @@ static func tap(node: Node, f: Fighter, action: int, hold := 0.05) -> void:
 	await wait(node, hold)
 	release(f, action)
 
+## The real input path: an action press / release the PlayerController polls.
+static func key_down(action: StringName) -> void:
+	Input.action_press(action)
+
+static func key_up(action: StringName) -> void:
+	Input.action_release(action)
+
+## Tap an action through the real input path: held `ticks` physics ticks.
+static func key_tap(node: Node, action: StringName, ticks := 2) -> void:
+	Input.action_press(action)
+	await frames(node, ticks)
+	Input.action_release(action)
+	await frames(node, 1)
+
+static func release_all_input() -> void:
+	for a: StringName in Controls.ACTIONS:
+		if InputMap.has_action(a):
+			Input.action_release(a)
+
+# --- World --------------------------------------------------------------------------------
 ## A Destructible panel of `surface` centred at (pos.x, 1.5, pos.z) whose face
 ## looks along `face` (the side bodies come from).
 static func make_panel(parent: Node3D, surface: StringName, pos: Vector3, face: Vector3) -> Destructible:
@@ -157,6 +142,13 @@ static func leg_spin(f: Fighter) -> float:
 		sum += av.length()
 		n += 1
 	return sum / maxf(n, 1)
+
+## Horizontal speed (m/s) of a fighter's capsule.
+static func hspeed(f: Fighter) -> float:
+	return Vector2(f.velocity.x, f.velocity.z).length()
+
+static func flat_dist(a: Vector3, b: Vector3) -> float:
+	return Vector2(a.x - b.x, a.z - b.z).length()
 
 ## Reset the global singletons between cases.
 static func reset_world() -> void:

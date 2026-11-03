@@ -6,8 +6,8 @@ extends Node
 ## return on attack end / hit / launch / grab / death / fleeing (a holder hit
 ## mid-attack through its armor keeps it), the swing-spacing rule (first
 ## active frames >= Tuning.TOKEN_ACTIVE_GAP apart, a string's follow-up
-## reserved, startups never stretched), wave startups, rings (holders + next
-## in line NEAR). OWNER: agent C (AI tests).
+## reserved, startups never stretched), wave startups (Round 7: never under
+## the tell floor), rings (holders + next in line NEAR). OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 const FakeCombat := preload("res://tests/ai/fake_combat.gd")
@@ -364,33 +364,38 @@ func _test_fleeing_and_armor() -> void:
 
 ## Enemy startup per wave (Tuning.ENEMY_STARTUP; early never under 18 frames;
 ## from wave 5, 2 frames faster per wave down to 12).
+## Round 7: no enemy startup under the tell floor (the counter window plus the
+## margin) at any wave or in Duel (wave 0); above the floor the Round 5 table
+## and its wave shrink still apply.
 func _test_waves() -> void:
-	var early_min := INF
-	for w in range(0, Tuning.ENEMY_STARTUP_SHRINK_FROM):
+	var floor_f := ceilf((Tuning.R7_COUNTER_WINDOW + Tuning.R7_TELL_MARGIN) * Tuning.FPS - 1e-4)
+	check(AttackDirector.tell_min_frames() == floor_f, "tell floor %.0f frames = counter window %.2f s + margin %.2f s" % [
+		AttackDirector.tell_min_frames(), Tuning.R7_COUNTER_WINDOW, Tuning.R7_TELL_MARGIN])
+	var low := INF
+	var mismatch: Array[String] = []
+	for w in range(0, 31):
 		AttackDirector.set_wave(w)
 		for m: StringName in Tuning.ENEMY_STARTUP:
-			early_min = minf(early_min, AttackDirector.enemy_startup_frames(m))
-	check(early_min >= Tuning.ENEMY_STARTUP_EARLY_MIN, "waves 1-4: no enemy startup under %.0f frames (min %.0f)" % [Tuning.ENEMY_STARTUP_EARLY_MIN, early_min])
-	AttackDirector.set_wave(1)
-	var jab1 := AttackDirector.enemy_startup_frames(&"e_jab")
-	var heavy1 := AttackDirector.enemy_startup_frames(&"e_heavy")
-	check(jab1 == 18.0 and AttackDirector.enemy_startup_frames(&"e_hook") == 22.0 and heavy1 == 30.0,
-		"wave 1: jab 18, cross 22, smash 30 frames (got %.0f, %.0f, %.0f)" % [jab1, AttackDirector.enemy_startup_frames(&"e_hook"), heavy1])
+			var f := AttackDirector.enemy_startup_frames(m)
+			low = minf(low, f)
+			var want: float = Tuning.ENEMY_STARTUP[m]
+			if w >= Tuning.ENEMY_STARTUP_SHRINK_FROM:
+				want = maxf(want - Tuning.ENEMY_STARTUP_SHRINK * (w - Tuning.ENEMY_STARTUP_SHRINK_FROM + 1), Tuning.ENEMY_STARTUP_MIN)
+			else:
+				want = maxf(want, Tuning.ENEMY_STARTUP_EARLY_MIN)
+			want = maxf(want, floor_f)
+			if f != want:
+				mismatch.append("w%d %s %.0f (want %.0f)" % [w, m, f, want])
+	check(low >= floor_f, "waves 0-30 (0 = Duel): no enemy startup under %.0f frames (min %.0f)" % [floor_f, low])
+	check(mismatch.is_empty(), "above the floor the Round 5 table and its wave shrink apply (%s)" % (
+		"all match" if mismatch.is_empty() else ", ".join(mismatch.slice(0, 6))))
 	var row := []
-	for w in [5, 6, 7, 8, 12]:
+	for w in [0, 1, 4, 5, 8, 12]:
 		AttackDirector.set_wave(w)
-		row.append("w%d jab %.0f smash %.0f" % [w, AttackDirector.enemy_startup_frames(&"e_jab"), AttackDirector.enemy_startup_frames(&"e_heavy")])
-	AttackDirector.set_wave(5)
-	var j5 := AttackDirector.enemy_startup_frames(&"e_jab")
-	AttackDirector.set_wave(6)
-	var j6 := AttackDirector.enemy_startup_frames(&"e_jab")
-	AttackDirector.set_wave(12)
-	var j12 := AttackDirector.enemy_startup_frames(&"e_jab")
-	var h12 := AttackDirector.enemy_startup_frames(&"e_heavy")
-	AttackDirector.set_wave(30)
-	var h30 := AttackDirector.enemy_startup_frames(&"e_heavy")
-	check(j5 == 16.0 and j6 == 14.0 and j12 == 12.0 and h12 == 14.0 and h30 == 12.0,
-		"from wave 5: 2 frames faster per wave, floor 12 (%s; wave 30 smash %.0f)" % [", ".join(row), h30])
+		row.append("w%d jab %.0f cross %.0f smash %.0f charge %.0f" % [w, AttackDirector.enemy_startup_frames(&"e_jab"),
+			AttackDirector.enemy_startup_frames(&"e_hook"), AttackDirector.enemy_startup_frames(&"e_heavy"),
+			AttackDirector.enemy_startup_frames(&"e_charge")])
+	print("[ai] info: enemy startup frames: %s" % "; ".join(row))
 	GameEvents.wave_started.emit(4, 8)
 	check(AttackDirector.wave_index == 5, "GameEvents.wave_started(index 4) sets wave 5 (got %d)" % AttackDirector.wave_index)
 	AttackDirector.set_wave(0)

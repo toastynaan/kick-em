@@ -4,11 +4,15 @@ extends Node3D
 ## measured numbers, and quits 0 / 1.
 ## OWNER: agent M (movement).
 ##
-## The player is a controller-less player-team Fighter (it gets a Traversal),
-## driven by writing move_input and calling combat.press()/release() and
-## traversal.on_jump_pressed() directly, so tests do not depend on input routing.
-## Geometry is built here (floor, low wall, platform, runnable wall), so the
-## checks do not wait on the Yard.
+## Two players: spawn_player() is controller-less (it gets a Traversal; tests
+## write move_input and call combat.press()/release() and
+## traversal.on_jump_pressed() directly, so they do not depend on input
+## routing), and spawn_real_player() has the game's PlayerController reading
+## Input actions (the real path: Input -> PlayerController -> InputInterpreter
+## -> CombatController -> Traversal). Geometry is built here (floor, low wall,
+## platform, runnable wall, stairs), so the checks do not wait on the Yard.
+
+const CarryDouble := preload("res://tests/move/carry_double.gd")
 
 var failures: Array[String] = []
 var events: Array = []  ## [name, args, real time]
@@ -62,6 +66,16 @@ func make_box(center: Vector3, size: Vector3, box_name := "Box", layer := Layers
 func make_wall_across(z: float, height: float, depth := 0.3, width := 6.0, x := 0.0) -> StaticBody3D:
 	return make_box(Vector3(x, height * 0.5, z - depth * 0.5), Vector3(width, height, depth), "Wall%.1f" % height)
 
+## A flight of `steps` stairs rising toward -Z from z = `z0` at x (rise / run
+## per step), then a `landing` m long. Returns the top's height.
+func make_stairs(x: float, z0: float, steps: int, rise := 0.25, run := 0.3, width := 1.6, landing := 2.0) -> float:
+	for k in steps:
+		var h := rise * (k + 1)
+		make_box(Vector3(x, h * 0.5, z0 - run * (k + 0.5)), Vector3(width, h, run), "Stair%d" % k)
+	var top := rise * steps
+	make_box(Vector3(x, top * 0.5, z0 - run * steps - landing * 0.5), Vector3(width, top, landing), "Landing")
+	return top
+
 ## An 8 m runnable wall along Z at x = `x` (face toward -X if side > 0, i.e. the
 ## wall is on the runner's right when running toward -Z).
 func make_runnable_wall(x: float, z0: float, z1: float, height := 4.0, thick := 0.4) -> StaticBody3D:
@@ -103,6 +117,34 @@ func tap(action: StringName, n := 2) -> void:
 	await ticks(n)
 	Input.action_release(action)
 
+## A physical key event through Input (the real binding path: Controls maps
+## physical keycodes to actions).
+func key(code: Key, pressed: bool) -> void:
+	var ev := InputEventKey.new()
+	ev.physical_keycode = code
+	ev.keycode = code
+	ev.pressed = pressed
+	Input.parse_input_event(ev)
+
+## A key held for `n` ticks, then released.
+func tap_key(code: Key, n := 3) -> void:
+	key(code, true)
+	await ticks(n)
+	key(code, false)
+
+## Hold the real stick along the flat direction `d` (camera-free axes: -Z forward, +X right).
+func stick(d: Vector3) -> void:
+	for a: StringName in [&"move_left", &"move_right", &"move_forward", &"move_back"]:
+		let_go(a)
+	if d.x > 0.01:
+		hold(&"move_right", d.x)
+	elif d.x < -0.01:
+		hold(&"move_left", -d.x)
+	if d.z > 0.01:
+		hold(&"move_back", d.z)
+	elif d.z < -0.01:
+		hold(&"move_forward", -d.z)
+
 func spawn_enemy(archetype: StringName, pos: Vector3, facing := Vector3.BACK) -> Fighter:
 	var xf := Transform3D(Basis.looking_at(facing.normalized(), Vector3.UP), pos)
 	return FighterFactory.spawn_dummy(self, archetype, xf, Fighter.TEAM_ENEMY)
@@ -123,6 +165,25 @@ func sprint_to_cap(p: Fighter, dir: Vector3, max_ticks := 240) -> bool:
 	return await wait_until(func() -> bool:
 		return p.traversal.sprint_charge >= 0.999, max_ticks)
 
+## Swap in a Carry test double (holding a body with `mult` walking share, or
+## a prop). Returns it; undo with remove_carry_double().
+func install_carry_double(p: Fighter, mult := 0.7, prop := false) -> Carry:
+	var d: Carry = CarryDouble.new()
+	d.name = "CarryDouble"
+	d.set(&"real", p.carry)
+	d.set(&"move_mult", mult)
+	d.set(&"prop", prop)
+	p.add_child(d)
+	d.setup(p)
+	p.carry = d
+	return d
+
+func remove_carry_double(p: Fighter, d: Carry) -> void:
+	var real: Carry = d.get(&"real")
+	if real != null:
+		p.carry = real
+	d.queue_free()
+
 func ticks(n: int) -> void:
 	for i in n:
 		await get_tree().physics_frame
@@ -138,11 +199,22 @@ func wait_until(cond: Callable, max_ticks := 360) -> bool:
 ## Let a fighter come to rest standing (after a test step).
 func settle(p: Fighter, n := 30) -> void:
 	p.move_input = Vector3.ZERO
+	if p.traversal != null and p.traversal.is_driving():
+		p.traversal.set_drive_speed(0.0)
+		p.traversal.end_drive()
 	if p.traversal != null and p.traversal.is_dash_held():
 		dash_up(p)
 	await ticks(n)
 	if p.is_down() or not p.can_act():
 		await wait_until(func() -> bool: return not p.is_down() and p.can_act(), 900)
+
+## Put a fighter at `pos` facing `facing`, at rest.
+func place(p: Fighter, pos: Vector3, facing := Vector3.FORWARD) -> void:
+	p.global_position = pos
+	p.snap_facing(facing)
+	p.velocity = Vector3.ZERO
+	p.reset_physics_interpolation()
+	await ticks(4)
 
 # --- Parkour speed metric -----------------------------------------------------------
 ## Speed kept by each parkour move: from its trigger (the speed on the tick
@@ -174,7 +246,9 @@ func parkour_track(f: Fighter) -> void:
 			if _pm_ground >= 0.3:
 				_parkour_close()
 	_pm_prev_kind = k
-	_pm_prev_speed = v
+	# The reference is run speed: a dodge's burst above the cap is not (Round 7;
+	# parkour starts at the cap at most, like the Round 5 dash the dodge replaces).
+	_pm_prev_speed = minf(v, f.traversal.get_speed_cap())
 
 func _parkour_close() -> void:
 	if _pm_open.is_empty():
@@ -206,10 +280,12 @@ func _capture_events() -> void:
 	for sig: StringName in [&"sprint_started", &"sprint_ended", &"footstep", &"parkour",
 			&"wall_run_started", &"wall_run_step", &"wall_run_ended", &"landing", &"shockwave",
 			&"rammed", &"jumped", &"landed", &"hit_landed", &"fighter_launched", &"stumbled",
-			&"strike_started"]:
+			&"strike_started", &"dodged", &"react_started"]:
+		if not GameEvents.has_signal(sig):
+			continue
 		var s := sig
-		GameEvents.connect(s, func(a = null, b = null, c = null, d = null, e = null) -> void:
-			events.append([s, [a, b, c, d, e], TimeDirector.now()]))
+		GameEvents.connect(s, func(a = null, b = null, c = null, d = null, e = null, f = null) -> void:
+			events.append([s, [a, b, c, d, e, f], TimeDirector.now()]))
 
 func count_events(what: StringName) -> int:
 	var n := 0
@@ -231,6 +307,13 @@ func last_event(what: StringName) -> Array:
 			return events[i][1]
 	return []
 
+## Real time of the last `what` event (-1 when none).
+func last_event_time(what: StringName) -> float:
+	for i in range(events.size() - 1, -1, -1):
+		if events[i][0] == what:
+			return events[i][2]
+	return -1.0
+
 func clear_events() -> void:
 	events.clear()
 
@@ -245,6 +328,9 @@ func check(cond: bool, msg: String) -> void:
 
 func near(a: float, b: float, tol: float) -> bool:
 	return absf(a - b) <= tol
+
+static func yaw_of(v: Vector3) -> float:
+	return atan2(-v.x, -v.z)
 
 func _restore() -> void:
 	Tuning.debug_speed_cap = _saved_cap

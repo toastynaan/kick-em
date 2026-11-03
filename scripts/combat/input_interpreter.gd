@@ -4,8 +4,9 @@ extends Node
 ## PlayerController calls poll() once per physics tick; it returns this tick's
 ## presses and releases in a fixed order, each stamped in player time: a clock
 ## that advances by TimeDirector.player_delta(), so a hold lasts as long in
-## Focus as out of it. What a press means (tap or hold, charge level, combo
-## string) is CombatController's call, not this node's.
+## slow motion as out of it. What a press means (tap or hold, the punch
+## string, the pad's kick layer) is PlayerController's and CombatController's
+## call, not this node's.
 ##
 ## Presses made while Cmd (meta) is held are dropped together with their
 ## release, so macOS shortcuts (Cmd+Ctrl+F fullscreen, Cmd+Q) never also grab
@@ -28,11 +29,12 @@ class ButtonEvent:
 	func _to_string() -> String:
 		return "%s %s t=%.3f held=%.3f" % [action, "press" if pressed else "release", time, held]
 
-## Every player button. Movement and Focus come first so a crouch or jump made
-## on the same tick as an attack press is already in effect when the attack
-## arrives (crouch + kick is the sweep, jump + kick the flying kick).
-const ACTIONS: Array[StringName] = [&"crouch", &"jump", &"focus",
-	&"punch", &"heavy", &"kick", &"grab", &"block", &"dash"]
+## Every player button (Round 7 key map, Controls). Jump and the pad's kick
+## layer come first: a jump made on the same tick as an attack press is
+## already in effect, and LT pressed on the same tick as X / A / B is already
+## held when PlayerController resolves those presses (Controls.KICK_LAYER).
+const ACTIONS: Array[StringName] = [&"jump", &"kick_layer", &"punch", &"leg_kick", &"gut_punch",
+	&"uppercut", &"front_kick", &"roundhouse", &"grab", &"counter", &"dash"]
 
 ## Player seconds since this node started (only advances while poll() runs).
 var clock := 0.0

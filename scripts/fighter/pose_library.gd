@@ -36,6 +36,14 @@ extends RefCounted
 ## The first key of segment 1 is the contact pose: it lands exactly on the
 ## first active frame (t = startup) for any startup.
 ##
+## Round 7 (docs/Round 7 — Freeflow Combat.md "Poses"): ROUND7_STRIKE_IDS take
+## Tuning.R7_MOVES frame data in play_move(); dodge, glide, throw_release and
+## the reactions react_snap / react_spin / react_push / react_fold /
+## react_buckle / react_lift are play_timed() moves (the first reaction pose
+## lands within 0.07 s for any stun). ROUND7_HOLD_IDS are hold_pose() ids
+## (react_fold / react_buckle / react_lift are both). Hold keys: "blend_max",
+## "ramp", "by_vy", "flail" (see HOLDS). AIM_YAW_ONLY strikes keep their height.
+##
 ## Joint limits (Round 5): compile() fits every pose inside the ragdoll's soft
 ## ranges (HumanoidRig.JOINT_LIMITS minus LIMIT_MARGIN): elbows / knees swivel
 ## to a legal plane, hinges keep their axis and range, a chest turn past its
@@ -81,6 +89,12 @@ const STRIKE_BONES := {
 	&"body_slam": [&"LeftHand", &"RightHand"],
 	&"e_jab": [&"LeftHand"], &"e_stick_swing": [&"RightHand"], &"e_stick_thrust": [&"RightHand"],
 	&"e_grab_slam": [&"LeftHand", &"RightHand"],
+	# Round 7 (jab, cross, hook, uppercut and roundhouse are listed above).
+	&"heavy_jab": [&"LeftHand"], &"heavy_cross": [&"RightHand"], &"heavy_hook": [&"LeftHand"],
+	&"gut_punch": [&"RightHand"], &"counter": [&"RightHand"],
+	&"leg_kick": [&"RightFoot", &"RightLowerLeg"], &"front_kick": [&"RightFoot", &"RightLowerLeg"],
+	&"heavy_leg_kick": [&"RightFoot", &"RightLowerLeg"], &"heavy_front_kick": [&"RightFoot", &"RightLowerLeg"],
+	&"heavy_roundhouse": [&"RightFoot", &"RightLowerLeg"],
 }
 
 const ALIAS := {
@@ -1058,6 +1072,315 @@ const POSES := {
 		"chest": Vector3(-12, 0, 0), "head": Vector3(24, 0, 0),
 		"lfist": Vector3(-0.18, 0.30, -0.66), "lelbow": Vector3(-1, 0, 0.3), "rfist": Vector3(0.18, 0.30, -0.66), "relbow": Vector3(1, 0, 0.3),
 		"lankle": Vector3(-0.22, 0.08, -0.20), "lknee": Vector3(-0.4, 0.2, -1), "rankle": Vector3(0.22, 0.08, 0.18), "rknee": Vector3(0.4, 0.2, -1)},
+	# =========================================================================
+	# Round 7 (docs/Round 7 — Freeflow Combat.md "Poses"). Agent P. Placeholder
+	# quality: every strike reads as wind-up, contact, follow-through; every
+	# reaction reads from a third-person camera. The jab, cross and hook reuse
+	# the Round 5 / Upgrade 2 poses above.
+	# =========================================================================
+	# --- Heavy jab: weight sinks back, the lead shoulder coils, then a long
+	# stepping jab with the hips behind it and a long reach after contact. ---
+	&"hjab_load": {"pos": Vector3(0, -0.15, 0.06), "hips": Vector3(0, 4, 0), "spine": Vector3(-4, 6, 0),
+		"chest": Vector3(-2, 16, 0), "head": Vector3(10, -24, 0),
+		"lfist": Vector3(-0.17, 1.36, -0.10), "lelbow": Vector3(-0.8, -1, 0.4), "rfist": Vector3(0.10, 1.44, -0.18), "relbow": Vector3(0.4, -1, 0.3),
+		"lankle": Vector3(-0.13, 0.08, -0.22), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.17, 0.08, 0.20), "rknee": Vector3(0.2, 0, -1)},
+	&"hjab_hit": {"pos": Vector3(0, -0.11, -0.15), "hips": Vector3(0, -30, 0), "spine": Vector3(-10, -10, 0),
+		"chest": Vector3(-6, -22, -4), "head": Vector3(10, 60, 4),
+		"lfist": Vector3(-0.02, 1.50, -0.82), "lelbow": Vector3(-0.7, -0.8, 0.1), "rfist": Vector3(0.08, 1.47, -0.16), "relbow": Vector3(0.4, -1, 0.4),
+		"lankle": Vector3(-0.13, 0.08, -0.44), "lknee": Vector3(-0.15, 0, -1), "rankle": Vector3(0.15, 0.11, 0.10), "rfp": -20.0},
+	&"hjab_follow": {"pos": Vector3(0, -0.12, -0.19), "hips": Vector3(0, -36, 0), "spine": Vector3(-12, -12, 0),
+		"chest": Vector3(-6, -26, -4), "head": Vector3(10, 66, 4),
+		"lfist": Vector3(0.02, 1.48, -0.86), "lelbow": Vector3(-0.7, -0.8, 0.1), "rfist": Vector3(0.08, 1.46, -0.18), "relbow": Vector3(0.4, -1, 0.4),
+		"lankle": Vector3(-0.13, 0.08, -0.44), "lknee": Vector3(-0.15, 0, -1), "rankle": Vector3(0.15, 0.13, 0.06), "rfp": -28.0},
+	# --- Heavy cross: hips and shoulders loaded far back, the rear fist cocked
+	# behind the shoulder, then the whole body turns through. ---
+	&"hcross_load": {"pos": Vector3(0, -0.16, 0.07), "hips": Vector3(0, -34, 0), "spine": Vector3(0, -8, 0),
+		"chest": Vector3(0, -28, 0), "head": Vector3(4, 66, 0),
+		"lfist": Vector3(-0.06, 1.44, -0.44), "lelbow": Vector3(-0.5, -1, 0.0), "rfist": Vector3(0.30, 1.40, 0.20), "relbow": Vector3(0.7, -0.5, 1),
+		"lankle": Vector3(-0.13, 0.08, -0.26), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.18, 0.08, 0.22), "rknee": Vector3(0.2, 0, -1)},
+	&"hcross_hit": {"pos": Vector3(0, -0.12, -0.15), "hips": Vector3(0, 26, 0), "spine": Vector3(-12, 6, 0),
+		"chest": Vector3(-6, 30, 0), "head": Vector3(10, -60, 0),
+		"lfist": Vector3(-0.14, 1.42, -0.12), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.02, 1.50, -0.92), "relbow": Vector3(0.8, -0.5, 0.2),
+		"lankle": Vector3(-0.13, 0.08, -0.36), "rankle": Vector3(0.15, 0.13, 0.28), "rfp": -32.0},
+	&"hcross_follow": {"pos": Vector3(0, -0.14, -0.19), "hips": Vector3(0, 34, 0), "spine": Vector3(-16, 10, 0),
+		"chest": Vector3(-8, 30, 0), "head": Vector3(12, -68, 0),
+		"lfist": Vector3(-0.16, 1.38, -0.08), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(-0.16, 1.44, -0.94), "relbow": Vector3(0.9, -0.3, 0.2),
+		"lankle": Vector3(-0.13, 0.08, -0.36), "rankle": Vector3(0.15, 0.15, 0.24), "rfp": -42.0},
+	# --- Heavy hook: chest wound far right, the lead arm cocked wide; the turn
+	# carries the fist across the target and well past it. ---
+	&"hhook_load": {"pos": Vector3(0, -0.15, 0.04), "hips": Vector3(0, 14, 0), "spine": Vector3(-4, 12, 0),
+		"chest": Vector3(-4, 28, 0), "head": Vector3(6, -52, 0),
+		"lfist": Vector3(-0.56, 1.42, 0.06), "lelbow": Vector3(-1, 0.3, 0.4), "rfist": Vector3(0.10, 1.47, -0.20), "relbow": Vector3(0.5, -1, 0.4),
+		"lankle": Vector3(-0.14, 0.08, -0.22), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.17, 0.08, 0.20), "rknee": Vector3(0.2, 0, -1)},
+	&"hhook_hit": {"pos": Vector3(0, -0.12, -0.07), "hips": Vector3(0, -30, 0), "spine": Vector3(-6, -14, 0),
+		"chest": Vector3(-4, -30, 0), "head": Vector3(6, 68, 0),
+		"lfist": Vector3(0.04, 1.50, -0.62), "lelbow": Vector3(-1, 0.25, 0.2), "rfist": Vector3(0.12, 1.47, -0.16), "relbow": Vector3(0.5, -1, 0.4),
+		"lankle": Vector3(-0.13, 0.08, -0.28), "rankle": Vector3(0.16, 0.12, 0.14), "rfp": -25.0},
+	&"hhook_follow": {"pos": Vector3(0, -0.13, -0.09), "hips": Vector3(0, -44, 0), "spine": Vector3(-6, -20, 0),
+		"chest": Vector3(-4, -30, 0), "head": Vector3(6, 70, 0),
+		"lfist": Vector3(0.42, 1.42, -0.30), "lelbow": Vector3(-1, 0.3, 0.3), "rfist": Vector3(0.12, 1.46, -0.14), "relbow": Vector3(0.5, -1, 0.4),
+		"lankle": Vector3(-0.13, 0.08, -0.28), "rankle": Vector3(0.15, 0.16, 0.10), "rfp": -35.0},
+	# --- Uppercut: the fist starts at the hip (uppercut_cock), lands under the
+	# chin on the first active frame and keeps rising (uppercut_hit, then
+	# uppercut_follow overhead). ---
+	&"upc_hit": {"pos": Vector3(0, -0.09, -0.08), "hips": Vector3(0, 12, 0), "spine": Vector3(-4, 4, 0),
+		"chest": Vector3(-2, 20, -4), "head": Vector3(4, -34, 0),
+		"lfist": Vector3(-0.14, 1.38, -0.14), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.05, 1.46, -0.48), "relbow": Vector3(0.3, -1, -0.7),
+		"lankle": Vector3(-0.14, 0.08, -0.22), "rankle": Vector3(0.16, 0.10, 0.12), "rfp": -25.0},
+	# --- Gut punch: drop the level, the rear fist cocked low at the hip, then
+	# a short dig into the stomach with the knees bent and the head behind it. ---
+	&"gut_load": {"pos": Vector3(0, -0.17, 0.04), "hips": Vector3(-4, -24, 0), "spine": Vector3(-10, -4, 0),
+		"chest": Vector3(-4, -18, 0), "head": Vector3(14, 44, 0),
+		"lfist": Vector3(-0.08, 1.36, -0.36), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.25, 1.02, 0.06), "relbow": Vector3(0.6, -0.8, 0.6),
+		"lankle": Vector3(-0.15, 0.08, -0.24), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.18, 0.08, 0.20), "rknee": Vector3(0.3, 0, -1)},
+	&"gut_hit": {"pos": Vector3(0, -0.25, -0.12), "hips": Vector3(-8, 20, 0), "spine": Vector3(-16, 6, 0),
+		"chest": Vector3(-8, 26, 0), "head": Vector3(24, -50, 0),
+		"lfist": Vector3(-0.12, 1.26, -0.22), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.02, 1.08, -0.64), "relbow": Vector3(0.8, -0.6, 0.2),
+		"lankle": Vector3(-0.15, 0.08, -0.36), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.17, 0.10, 0.22), "rknee": Vector3(0.3, 0, -1), "rfp": -20.0},
+	&"gut_follow": {"pos": Vector3(0, -0.26, -0.16), "hips": Vector3(-10, 26, 0), "spine": Vector3(-18, 8, 0),
+		"chest": Vector3(-8, 30, 0), "head": Vector3(26, -58, 0),
+		"lfist": Vector3(-0.13, 1.24, -0.20), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(-0.02, 1.10, -0.70), "relbow": Vector3(0.8, -0.6, 0.2),
+		"lankle": Vector3(-0.15, 0.08, -0.36), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.17, 0.12, 0.20), "rknee": Vector3(0.3, 0, -1), "rfp": -26.0},
+	# --- Leg kick: a low round kick. The lead foot pivots, the hips turn
+	# over, the right shin swings across into the thigh (~0.5 m). ---
+	&"lk_load": {"pos": Vector3(0, -0.09, 0.02), "hips": Vector3(0, 20, 6), "spine": Vector3(-2, 0, 4),
+		"chest": Vector3(-2, -10, 0), "head": Vector3(6, -10, -4),
+		"lfist": Vector3(-0.14, 1.42, -0.34), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.22, 1.34, -0.14), "relbow": Vector3(0.6, -1, 0.3),
+		"lankle": Vector3(-0.09, 0.08, -0.14), "lknee": Vector3(-0.2, 0, -1), "lfp": -10.0,
+		"rankle": Vector3(0.40, 0.36, 0.06), "rknee": Vector3(0.8, 0.2, -0.8), "rfp": -30.0},
+	&"lk_hit": {"pos": Vector3(0, -0.10, -0.06), "hips": Vector3(0, 52, 14), "spine": Vector3(2, 0, 8),
+		"chest": Vector3(0, -12, 4), "head": Vector3(4, -40, -8),
+		"lfist": Vector3(-0.30, 1.36, -0.22), "lelbow": Vector3(-0.8, -0.6, 0.3), "rfist": Vector3(0.06, 1.40, -0.34), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.06, 0.08, -0.06), "lknee": Vector3(-0.3, 0, -1), "lfp": -15.0,
+		"rankle": Vector3(-0.04, 0.44, -0.74), "rknee": Vector3(0.6, 0.6, -0.5), "rfp": -45.0},
+	&"lk_follow": {"pos": Vector3(0, -0.10, -0.07), "hips": Vector3(0, 70, 14), "spine": Vector3(2, 0, 8),
+		"chest": Vector3(0, -16, 4), "head": Vector3(4, -50, -8),
+		"lfist": Vector3(-0.32, 1.34, -0.18), "lelbow": Vector3(-0.8, -0.6, 0.3), "rfist": Vector3(0.04, 1.38, -0.34), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.06, 0.08, -0.06), "lknee": Vector3(-0.3, 0, -1), "lfp": -15.0,
+		"rankle": Vector3(-0.30, 0.42, -0.62), "rknee": Vector3(0.3, 0.6, -0.8), "rfp": -45.0},
+	&"lk_recoil": {"pos": Vector3(0, -0.08, 0.0), "hips": Vector3(0, 30, 6), "spine": Vector3(-2, 0, 4),
+		"chest": Vector3(-2, -12, 0), "head": Vector3(6, -14, -4),
+		"lfist": Vector3(-0.12, 1.42, -0.34), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.18, 1.38, -0.18), "relbow": Vector3(0.6, -1, 0.3),
+		"lankle": Vector3(-0.08, 0.08, -0.10), "lknee": Vector3(-0.2, 0, -1),
+		"rankle": Vector3(0.20, 0.30, -0.10), "rknee": Vector3(0.3, 0.3, -1), "rfp": -20.0},
+	# --- Front kick: a high knee chamber, then the heel driven straight out at
+	# the stomach (~1.05 m), leaning back over the standing leg. ---
+	&"fk_chamber": {"pos": Vector3(0, -0.03, 0.06), "hips": Vector3(10, -5, 0), "spine": Vector3(10, 0, 0),
+		"chest": Vector3(4, -4, 0), "head": Vector3(-16, 8, 0),
+		"lfist": Vector3(-0.11, 1.47, -0.30), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.22, 1.30, -0.06), "relbow": Vector3(0.6, -1, 0.3),
+		"lankle": Vector3(-0.10, 0.08, -0.05), "lknee": Vector3(-0.1, 0, -1),
+		"rankle": Vector3(0.11, 0.74, -0.14), "rknee": Vector3(0, 0.7, -1), "rfp": 25.0},
+	&"fk_hit": {"pos": Vector3(0, -0.04, -0.09), "hips": Vector3(16, -4, 0), "spine": Vector3(14, 0, 0),
+		"chest": Vector3(6, -4, 0), "head": Vector3(-28, 6, 0),
+		"lfist": Vector3(-0.16, 1.44, -0.26), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.32, 1.12, 0.08), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.08, -0.04), "lknee": Vector3(0, 0, -1), "lfp": -6.0,
+		"rankle": Vector3(0.10, 1.06, -0.86), "rknee": Vector3(0, 1, 0), "rfp": 70.0},
+	&"fk_ext": {"pos": Vector3(0, -0.04, -0.11), "hips": Vector3(17, -4, 0), "spine": Vector3(15, 0, 0),
+		"chest": Vector3(6, -4, 0), "head": Vector3(-28, 6, 0),
+		"lfist": Vector3(-0.17, 1.43, -0.25), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.33, 1.10, 0.10), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.08, -0.04), "lknee": Vector3(0, 0, -1), "lfp": -8.0,
+		"rankle": Vector3(0.10, 1.06, -0.88), "rknee": Vector3(0, 1, 0), "rfp": 70.0},
+	&"fk_follow": {"pos": Vector3(0, -0.05, -0.15), "hips": Vector3(18, -3, 0), "spine": Vector3(16, 0, 0),
+		"chest": Vector3(6, -4, 0), "head": Vector3(-30, 6, 0),
+		"lfist": Vector3(-0.18, 1.42, -0.24), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.34, 1.08, 0.12), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.08, -0.06), "lknee": Vector3(0, 0, -1), "lfp": -12.0,
+		"rankle": Vector3(0.10, 1.00, -0.94), "rknee": Vector3(0, 1, 0), "rfp": 60.0},
+	# --- Roundhouse: pivot on the lead foot, the hips turn over (body frame),
+	# the torso leans away and the right foot whips through at head height. ---
+	&"rh_load": {"frame": &"body", "pos": Vector3(0, -0.05, 0.02), "hips": Vector3(0, 40, 12), "spine": Vector3(4, 0, 8),
+		"chest": Vector3(2, 0, 4), "head": Vector3(-6, -40, -10),
+		"lfist": Vector3(-0.30, 1.42, -0.26), "lelbow": Vector3(-0.6, -1, 0.2), "rfist": Vector3(0.10, 1.38, -0.30), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.0), "lknee": Vector3(-0.3, 0, -1), "lfp": -15.0,
+		"rankle": Vector3(0.36, 0.86, 0.04), "rknee": Vector3(1, 0.6, -0.6), "rfp": -30.0},
+	&"rh_hit": {"pos": Vector3(0, 0.0, -0.04), "hips": Vector3(12, 60, 24), "spine": Vector3(4, 0, 18),
+		"chest": Vector3(2, -6, 8), "head": Vector3(-4, -54, -18),
+		"lfist": Vector3(-0.40, 1.30, 0.10), "lelbow": Vector3(-0.8, -0.5, 0.2), "rfist": Vector3(-0.10, 1.32, -0.30), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.02), "lknee": Vector3(-0.3, 0, -1), "lfp": -20.0,
+		"rankle": Vector3(0.0, 1.47, -0.66), "rknee": Vector3(0.3, 1, 0.3), "rfp": -40.0},
+	&"rh_follow": {"pos": Vector3(0, -0.01, -0.06), "hips": Vector3(12, 95, 28), "spine": Vector3(4, 0, 18),
+		"chest": Vector3(2, -6, 8), "head": Vector3(-4, -66, -18),
+		"lfist": Vector3(-0.30, 1.28, 0.30), "lelbow": Vector3(-0.8, -0.5, 0.2), "rfist": Vector3(-0.30, 1.30, -0.16), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.02), "lknee": Vector3(-0.3, 0, -1), "lfp": -20.0,
+		"rankle": Vector3(-0.38, 1.38, -0.50), "rknee": Vector3(0, 1, 0.3), "rfp": -40.0},
+	&"rh_recoil": {"frame": &"body", "pos": Vector3(0, -0.06, -0.02), "hips": Vector3(0, 60, 10), "spine": Vector3(2, 0, 6),
+		"chest": Vector3(0, 0, 2), "head": Vector3(-2, -50, -6),
+		"lfist": Vector3(-0.28, 1.40, -0.24), "lelbow": Vector3(-0.6, -1, 0.2), "rfist": Vector3(0.10, 1.38, -0.30), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.0), "lknee": Vector3(-0.3, 0, -1), "lfp": -10.0,
+		"rankle": Vector3(0.36, 0.50, 0.10), "rknee": Vector3(1, 0.4, -0.6), "rfp": -25.0},
+	# --- Heavy kicks (held kick buttons): a longer, deeper load and a bigger
+	# follow-through; each lands where its light kick lands. ---
+	# Heavy leg kick: the lead foot steps out, the hips wind back and sink,
+	# then the hips turn over hard (the right arm swings down for power) and
+	# the shin carries on across.
+	&"hlk_load": {"pos": Vector3(0, -0.15, 0.04), "hips": Vector3(0, -34, 0), "spine": Vector3(-4, -8, 0),
+		"chest": Vector3(-2, -12, 0), "head": Vector3(6, 50, 0),
+		"lfist": Vector3(-0.10, 1.42, -0.36), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.18, 1.40, -0.16), "relbow": Vector3(0.5, -1, 0.3),
+		"lankle": Vector3(-0.15, 0.08, -0.32), "lknee": Vector3(-0.3, 0, -1),
+		"rankle": Vector3(0.20, 0.12, 0.30), "rknee": Vector3(0.2, 0, -1), "rfp": -25.0},
+	&"hlk_hit": {"pos": Vector3(0, -0.11, -0.08), "hips": Vector3(0, 60, 16), "spine": Vector3(2, 0, 10),
+		"chest": Vector3(0, -14, 4), "head": Vector3(4, -46, -8),
+		"lfist": Vector3(-0.32, 1.38, -0.20), "lelbow": Vector3(-0.8, -0.6, 0.3), "rfist": Vector3(0.28, 1.18, 0.12), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.06, 0.08, -0.06), "lknee": Vector3(-0.3, 0, -1), "lfp": -18.0,
+		"rankle": Vector3(-0.04, 0.44, -0.74), "rknee": Vector3(0.6, 0.6, -0.5), "rfp": -45.0},
+	&"hlk_follow": {"pos": Vector3(0, -0.12, -0.10), "hips": Vector3(0, 95, 14), "spine": Vector3(2, 0, 8),
+		"chest": Vector3(0, -18, 4), "head": Vector3(4, -60, -8),
+		"lfist": Vector3(-0.30, 1.34, -0.10), "lelbow": Vector3(-0.8, -0.6, 0.3), "rfist": Vector3(0.24, 1.16, 0.18), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.06, 0.08, -0.06), "lknee": Vector3(-0.3, 0, -1), "lfp": -18.0,
+		"rankle": Vector3(-0.48, 0.42, -0.46), "rknee": Vector3(0.2, 0.6, -0.8), "rfp": -45.0},
+	# Heavy front kick: a higher, held knee chamber with the hips tucked under,
+	# the same heel strike, then the body drives through behind the foot.
+	&"hfk_chamber": {"pos": Vector3(0, -0.02, 0.08), "hips": Vector3(14, -5, 0), "spine": Vector3(12, 0, 0),
+		"chest": Vector3(4, -4, 0), "head": Vector3(-20, 8, 0),
+		"lfist": Vector3(-0.12, 1.48, -0.30), "lelbow": Vector3(-0.5, -1, 0.3), "rfist": Vector3(0.24, 1.30, -0.04), "relbow": Vector3(0.6, -1, 0.3),
+		"lankle": Vector3(-0.10, 0.08, -0.04), "lknee": Vector3(-0.1, 0, -1),
+		"rankle": Vector3(0.11, 0.84, -0.10), "rknee": Vector3(0, 0.8, -1), "rfp": 25.0},
+	&"hfk_hit": {"pos": Vector3(0, -0.04, -0.12), "hips": Vector3(18, -4, 0), "spine": Vector3(14, 0, 0),
+		"chest": Vector3(6, -4, 0), "head": Vector3(-28, 6, 0),
+		"lfist": Vector3(-0.18, 1.42, -0.22), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.34, 1.10, 0.10), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.08, -0.06), "lknee": Vector3(0, 0, -1), "lfp": -8.0,
+		"rankle": Vector3(0.10, 1.06, -0.86), "rknee": Vector3(0, 1, 0), "rfp": 70.0},
+	&"hfk_follow": {"pos": Vector3(0, -0.06, -0.26), "hips": Vector3(16, -3, 0), "spine": Vector3(8, 0, 0),
+		"chest": Vector3(2, -4, 0), "head": Vector3(-16, 6, 0),
+		"lfist": Vector3(-0.20, 1.38, -0.30), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.32, 1.12, 0.0), "relbow": Vector3(0.8, -0.6, 0.4),
+		"lankle": Vector3(-0.10, 0.08, -0.14), "lknee": Vector3(0, 0, -1), "lfp": -20.0,
+		"rankle": Vector3(0.10, 0.98, -1.04), "rknee": Vector3(0, 1, 0), "rfp": 55.0},
+	# Heavy roundhouse: a counter-turn coil (hips wound right, the lead foot
+	# steps in), the usual chamber, the same head-height contact, then the
+	# hips keep spinning through.
+	&"hrh_coil": {"pos": Vector3(0, -0.12, 0.04), "hips": Vector3(0, -38, 0), "spine": Vector3(0, -10, 0),
+		"chest": Vector3(0, -16, 0), "head": Vector3(4, 60, 0),
+		"lfist": Vector3(-0.10, 1.44, -0.38), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.22, 1.36, -0.04), "relbow": Vector3(0.6, -1, 0.4),
+		"lankle": Vector3(-0.14, 0.08, -0.30), "lknee": Vector3(-0.2, 0, -1),
+		"rankle": Vector3(0.20, 0.11, 0.28), "rknee": Vector3(0.2, 0, -1), "rfp": -20.0},
+	&"hrh_hit": {"pos": Vector3(0, 0.0, -0.05), "hips": Vector3(12, 64, 26), "spine": Vector3(4, 0, 18),
+		"chest": Vector3(2, -8, 8), "head": Vector3(-4, -56, -18),
+		"lfist": Vector3(-0.42, 1.28, 0.12), "lelbow": Vector3(-0.8, -0.5, 0.2), "rfist": Vector3(-0.12, 1.30, -0.28), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.02), "lknee": Vector3(-0.3, 0, -1), "lfp": -20.0,
+		"rankle": Vector3(0.0, 1.47, -0.66), "rknee": Vector3(0.3, 1, 0.3), "rfp": -40.0},
+	&"hrh_follow": {"pos": Vector3(0, -0.02, -0.07), "hips": Vector3(12, 140, 28), "spine": Vector3(4, 0, 18),
+		"chest": Vector3(2, -6, 8), "head": Vector3(-4, -70, -18),
+		"lfist": Vector3(-0.10, 1.28, 0.36), "lelbow": Vector3(-0.8, -0.5, 0.2), "rfist": Vector3(-0.36, 1.28, 0.02), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.02), "lknee": Vector3(-0.3, 0, -1), "lfp": -20.0,
+		"rankle": Vector3(-0.52, 1.28, -0.28), "rknee": Vector3(0, 1, 0.3), "rfp": -40.0},
+	&"hrh_recoil": {"frame": &"body", "pos": Vector3(0, -0.07, -0.02), "hips": Vector3(0, 80, 10), "spine": Vector3(2, 0, 6),
+		"chest": Vector3(0, 0, 2), "head": Vector3(-2, -60, -6),
+		"lfist": Vector3(-0.28, 1.40, -0.24), "lelbow": Vector3(-0.6, -1, 0.2), "rfist": Vector3(0.10, 1.38, -0.30), "relbow": Vector3(0.6, -1, 0.2),
+		"lankle": Vector3(-0.10, 0.08, 0.0), "lknee": Vector3(-0.3, 0, -1), "lfp": -10.0,
+		"rankle": Vector3(0.36, 0.50, 0.10), "rknee": Vector3(1, 0.4, -0.6), "rfp": -25.0},
+	# --- Counter: the lead hand snaps out and catches the incoming arm, then
+	# pulls it in while the rear hand lands. ---
+	&"counter_catch": {"pos": Vector3(0, -0.10, -0.05), "hips": Vector3(0, -22, 0), "spine": Vector3(-6, -6, 0),
+		"chest": Vector3(-4, -16, 0), "head": Vector3(6, 44, 0),
+		"lfist": Vector3(-0.12, 1.50, -0.64), "lelbow": Vector3(-0.7, -0.8, 0.1), "rfist": Vector3(0.20, 1.42, -0.04), "relbow": Vector3(0.7, -0.6, 0.8),
+		"lankle": Vector3(-0.13, 0.08, -0.30), "rankle": Vector3(0.16, 0.08, 0.18)},
+	&"counter_hit": {"pos": Vector3(0, -0.10, -0.13), "hips": Vector3(0, 22, 0), "spine": Vector3(-10, 6, 0),
+		"chest": Vector3(-4, 30, 0), "head": Vector3(8, -58, 0),
+		"lfist": Vector3(-0.22, 1.34, -0.30), "lelbow": Vector3(-0.8, -1, 0.3), "rfist": Vector3(0.02, 1.50, -0.76), "relbow": Vector3(0.8, -0.6, 0.2),
+		"lankle": Vector3(-0.13, 0.08, -0.32), "rankle": Vector3(0.15, 0.12, 0.18), "rfp": -25.0},
+	&"counter_follow": {"pos": Vector3(0, -0.11, -0.16), "hips": Vector3(0, 28, 0), "spine": Vector3(-12, 8, 0),
+		"chest": Vector3(-6, 30, 0), "head": Vector3(10, -64, 0),
+		"lfist": Vector3(-0.20, 1.30, -0.18), "lelbow": Vector3(-0.8, -1, 0.3), "rfist": Vector3(-0.08, 1.47, -0.80), "relbow": Vector3(0.9, -0.4, 0.2),
+		"lankle": Vector3(-0.13, 0.08, -0.32), "rankle": Vector3(0.15, 0.14, 0.16), "rfp": -32.0},
+	# --- Dodge: a crouched slip. The body drops and the head leaves the line of
+	# attack to the left (mirrored when moving right); the legs take quick steps
+	# from the locomotion (the move's "steps"), so it reads in any direction. ---
+	&"dodge_duck": {"pos": Vector3(-0.17, -0.26, 0.02), "hips": Vector3(-6, 6, 7), "spine": Vector3(-14, 0, 12),
+		"chest": Vector3(-6, 4, 7), "head": Vector3(18, -4, -12),
+		"lfist": Vector3(-0.36, 1.14, -0.24), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(-0.08, 1.20, -0.26), "relbow": Vector3(0.5, -1, 0.3)},
+	&"dodge_rise": {"pos": Vector3(-0.10, -0.13, 0.0), "hips": Vector3(-4, -6, 4), "spine": Vector3(-8, 0, 6),
+		"chest": Vector3(-4, -4, 4), "head": Vector3(10, 12, -6),
+		"lfist": Vector3(-0.18, 1.32, -0.34), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.02, 1.32, -0.24), "relbow": Vector3(0.5, -1, 0.3)},
+	# --- Glide: a fast run-in. Upper body only (the legs run the sprint cycle
+	# at the glide's speed): pitched forward, chin down, guard high. ---
+	&"glide_lean": {"spine": Vector3(-22, 0, 0), "chest": Vector3(-10, -4, 0), "head": Vector3(30, 6, 0),
+		"lfist": Vector3(-0.12, 1.30, -0.44), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.13, 1.26, -0.32), "relbow": Vector3(0.5, -1, 0.3)},
+	# --- Holding a body: the collar clinch (hands at the collar of a body held
+	# Carry.CLINCH_DIST = 0.72 m in front), and the drive (shoulder down,
+	# leaning hard, both arms driving the body in front). Upper body only so
+	# the legs keep the locomotion (the carry style runs at drive speed). ---
+	&"clinch": {"pos": Vector3(0, -0.08, 0.0), "hips": Vector3(0, 0, 0), "spine": Vector3(-8, 0, 0), "chest": Vector3(-4, 0, 0), "head": Vector3(8, 0, 0),
+		"lfist": Vector3(-0.09, 1.42, -0.58), "lelbow": Vector3(-1, -0.6, 0.1), "rfist": Vector3(0.09, 1.42, -0.58), "relbow": Vector3(1, -0.6, 0.1)},
+	&"drive_lean": {"spine": Vector3(-26, 0, 0), "chest": Vector3(-14, -8, -8), "head": Vector3(36, 8, 6),
+		"lfist": Vector3(-0.14, 1.26, -0.62), "lelbow": Vector3(-0.9, -0.6, 0.3), "rfist": Vector3(0.12, 1.22, -0.58), "relbow": Vector3(0.9, -0.6, 0.3)},
+	# --- Throw: a baseball wind-up with the body (turned back, the throwing
+	# arm loaded behind the head, the lead arm pointing at the target), and the
+	# release (the arm whips over and through, weight onto the lead foot). ---
+	&"throw_wu_a": {"pos": Vector3(0, -0.10, 0.04), "hips": Vector3(0, -20, 0), "spine": Vector3(0, -10, 0),
+		"chest": Vector3(2, -18, 0), "head": Vector3(2, 46, 0),
+		"lfist": Vector3(-0.18, 1.38, -0.42), "lelbow": Vector3(-0.6, -1, 0.2), "rfist": Vector3(0.32, 1.40, 0.10), "relbow": Vector3(1, -0.3, 0.6),
+		"lankle": Vector3(-0.14, 0.08, -0.24), "rankle": Vector3(0.18, 0.08, 0.22)},
+	&"throw_wu_b": {"pos": Vector3(0, -0.15, 0.10), "hips": Vector3(0, -45, 0), "spine": Vector3(4, -22, -6),
+		"chest": Vector3(4, -28, -8), "head": Vector3(0, 68, 0),
+		"lfist": Vector3(-0.08, 1.48, -0.56), "lelbow": Vector3(-0.6, -1, 0.0), "rfist": Vector3(0.40, 1.62, 0.36), "relbow": Vector3(1, 0.2, 0.4),
+		"lankle": Vector3(-0.14, 0.12, -0.36), "lfp": 10.0, "rankle": Vector3(0.20, 0.08, 0.26), "rknee": Vector3(0.3, 0, -1)},
+	&"throw_whip": {"pos": Vector3(0, -0.14, -0.04), "hips": Vector3(0, 0, 0), "spine": Vector3(-6, 0, 0),
+		"chest": Vector3(-2, 6, 0), "head": Vector3(8, -6, 0),
+		"lfist": Vector3(-0.30, 1.20, -0.20), "lelbow": Vector3(-1, -0.6, 0.3), "rfist": Vector3(0.30, 1.76, -0.10), "relbow": Vector3(1, 0.4, 0.2),
+		"lankle": Vector3(-0.15, 0.08, -0.38), "rankle": Vector3(0.18, 0.10, 0.22), "rfp": -20.0},
+	&"throw_rel": {"pos": Vector3(0, -0.15, -0.16), "hips": Vector3(0, 36, 0), "spine": Vector3(-14, 14, 0),
+		"chest": Vector3(-8, 26, 0), "head": Vector3(12, -68, 0),
+		"lfist": Vector3(-0.32, 1.10, 0.04), "lelbow": Vector3(-1, -0.6, 0.3), "rfist": Vector3(0.0, 1.40, -0.72), "relbow": Vector3(0.8, -0.6, 0.2),
+		"lankle": Vector3(-0.15, 0.08, -0.40), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.17, 0.16, 0.18), "rfp": -40.0},
+	&"throw_rel_follow": {"pos": Vector3(0, -0.18, -0.20), "hips": Vector3(0, 44, 0), "spine": Vector3(-22, 14, 0),
+		"chest": Vector3(-10, 28, 0), "head": Vector3(20, -70, 0),
+		"lfist": Vector3(-0.30, 1.02, 0.08), "lelbow": Vector3(-1, -0.6, 0.3), "rfist": Vector3(-0.30, 0.96, -0.50), "relbow": Vector3(0.8, -0.2, 0.4),
+		"lankle": Vector3(-0.15, 0.08, -0.40), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.14, 0.24, 0.12), "rfp": -50.0},
+	# --- Reactions (victim states). Readable from the camera first. ---
+	# Snap: the head snaps back, the upper body rocks back then forward.
+	&"react_snap_a": {"pos": Vector3(0, -0.05, 0.08), "hips": Vector3(6, 0, 0), "spine": Vector3(12, 0, 0),
+		"chest": Vector3(10, 4, 0), "head": Vector3(32, -6, 0),
+		"lfist": Vector3(-0.32, 1.28, -0.10), "lelbow": Vector3(-1, -0.5, 0.4), "rfist": Vector3(0.34, 1.22, -0.04), "relbow": Vector3(1, -0.5, 0.4)},
+	&"react_snap_b": {"pos": Vector3(0, -0.08, 0.04), "hips": Vector3(4, 0, 0), "spine": Vector3(4, 0, 0),
+		"chest": Vector3(2, 0, 0), "head": Vector3(-8, 4, 0),
+		"lfist": Vector3(-0.24, 1.30, -0.24), "lelbow": Vector3(-1, -0.6, 0.3), "rfist": Vector3(0.24, 1.26, -0.20), "relbow": Vector3(1, -0.6, 0.3)},
+	# Spin: the hook turns the head and shoulders away (to the victim's left),
+	# the arms swing with it, then a half-turn stumble.
+	&"react_spin_a": {"pos": Vector3(0.04, -0.07, 0.04), "hips": Vector3(4, 22, -4), "spine": Vector3(6, 14, -8),
+		"chest": Vector3(6, 26, -6), "head": Vector3(14, 50, -16),
+		"lfist": Vector3(-0.46, 1.30, 0.18), "lelbow": Vector3(-1, -0.3, 0.5), "rfist": Vector3(-0.06, 1.22, -0.30), "relbow": Vector3(0.6, -1, 0.3)},
+	&"react_spin_b": {"pos": Vector3(0.06, -0.10, 0.05), "hips": Vector3(6, 34, -6), "spine": Vector3(8, 16, -10),
+		"chest": Vector3(6, 26, -8), "head": Vector3(10, 46, -18),
+		"lfist": Vector3(-0.40, 1.10, 0.26), "lelbow": Vector3(-1, -0.4, 0.5), "rfist": Vector3(-0.14, 1.12, -0.32), "relbow": Vector3(0.6, -1, 0.3)},
+	# Push: shoved back hard, bent at the waist, arms flailing (two beats).
+	&"react_push_a": {"pos": Vector3(0, -0.10, 0.07), "hips": Vector3(-6, 0, 0), "spine": Vector3(-14, 0, 4),
+		"chest": Vector3(-6, 0, 2), "head": Vector3(22, 0, 6),
+		"lfist": Vector3(-0.38, 1.66, -0.32), "lelbow": Vector3(-1, 0.2, 0.3), "rfist": Vector3(0.44, 1.10, -0.26), "relbow": Vector3(1, -0.6, 0.3)},
+	&"react_push_b": {"pos": Vector3(0, -0.12, 0.07), "hips": Vector3(-6, 0, 0), "spine": Vector3(-14, 0, -4),
+		"chest": Vector3(-6, 0, -2), "head": Vector3(22, 0, -6),
+		"lfist": Vector3(-0.44, 1.10, -0.26), "lelbow": Vector3(-1, -0.6, 0.3), "rfist": Vector3(0.38, 1.66, -0.32), "relbow": Vector3(1, 0.2, 0.3)},
+	# Fold: doubled over, hands at the stomach, head low and forward (two
+	# poses: the hold heaves slowly between them).
+	&"react_fold_a": {"pos": Vector3(0, -0.17, 0.10), "hips": Vector3(-20, 0, 0), "spine": Vector3(-30, 0, 0),
+		"chest": Vector3(-22, 0, 0), "head": Vector3(14, 0, 0),
+		"lfist": Vector3(-0.08, 0.98, -0.34), "lelbow": Vector3(-1, -0.6, 0.2), "rfist": Vector3(0.08, 0.95, -0.32), "relbow": Vector3(1, -0.6, 0.2),
+		"lankle": Vector3(-0.14, 0.08, -0.14), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.16, 0.08, 0.16), "rknee": Vector3(0.2, 0, -1)},
+	&"react_fold_b": {"pos": Vector3(0, -0.19, 0.11), "hips": Vector3(-22, 0, 0), "spine": Vector3(-33, 0, 0),
+		"chest": Vector3(-24, 0, 0), "head": Vector3(12, 0, 0),
+		"lfist": Vector3(-0.07, 0.95, -0.34), "lelbow": Vector3(-1, -0.6, 0.2), "rfist": Vector3(0.07, 0.92, -0.32), "relbow": Vector3(1, -0.6, 0.2),
+		"lankle": Vector3(-0.14, 0.08, -0.14), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.16, 0.08, 0.16), "rknee": Vector3(0.2, 0, -1)},
+	# Buckle: the kicked (lead, left) leg gives way: down on the left knee, the
+	# right foot planted in front, a hand on the knee and one reaching down.
+	&"react_buckle_a": {"pos": Vector3(0, -0.40, 0.04), "hips": Vector3(-4, -10, 0), "spine": Vector3(-8, 0, 0),
+		"chest": Vector3(-4, 4, 0), "head": Vector3(8, 8, 0),
+		"lfist": Vector3(-0.30, 0.56, -0.20), "lelbow": Vector3(-1, -0.4, 0.3), "rfist": Vector3(0.16, 0.66, -0.36), "relbow": Vector3(1, -0.4, 0.3),
+		"lankle": Vector3(-0.12, 0.10, 0.36), "lknee": Vector3(0, -1, -0.4), "lfp": -55.0,
+		"rankle": Vector3(0.17, 0.08, -0.34), "rknee": Vector3(0.1, 0.3, -1)},
+	&"react_buckle_b": {"pos": Vector3(0, -0.42, 0.05), "hips": Vector3(-6, -10, 0), "spine": Vector3(-10, 0, 0),
+		"chest": Vector3(-5, 4, 0), "head": Vector3(10, 8, 0),
+		"lfist": Vector3(-0.30, 0.52, -0.18), "lelbow": Vector3(-1, -0.4, 0.3), "rfist": Vector3(0.16, 0.64, -0.36), "relbow": Vector3(1, -0.4, 0.3),
+		"lankle": Vector3(-0.12, 0.10, 0.36), "lknee": Vector3(0, -1, -0.4), "lfp": -55.0,
+		"rankle": Vector3(0.17, 0.08, -0.34), "rknee": Vector3(0.1, 0.3, -1)},
+	# Lift: popped off the ground, tilted back, limbs loose. Rising: the limbs
+	# trail below; at the top and falling: they float up and out. The hold
+	# blends the two by vertical speed and flails them (PoseAnimator).
+	&"react_lift_rise": {"hips": Vector3(20, 0, 0), "spine": Vector3(12, 0, 0), "chest": Vector3(8, 0, 0), "head": Vector3(28, 0, 0),
+		"lua": Vector3(20, 0, -35), "lla": Vector3(25, 0, 0), "rua": Vector3(10, 0, 40), "rla": Vector3(30, 0, 0),
+		"lul": Vector3(25, 0, -8), "lll": Vector3(-40, 0, 0), "lf": Vector3(-30, 0, 0),
+		"rul": Vector3(35, 0, 8), "rll": Vector3(-55, 0, 0), "rf": Vector3(-30, 0, 0)},
+	&"react_lift_fall": {"hips": Vector3(26, 0, 0), "spine": Vector3(16, 0, 0), "chest": Vector3(12, 0, 0), "head": Vector3(10, 0, 0),
+		"lua": Vector3(70, 0, -70), "lla": Vector3(40, 0, 0), "rua": Vector3(60, 0, 80), "rla": Vector3(45, 0, 0),
+		"lul": Vector3(55, 0, -12), "lll": Vector3(-70, 0, 0), "lf": Vector3(-20, 0, 0),
+		"rul": Vector3(40, 0, 10), "rll": Vector3(-45, 0, 0), "rf": Vector3(-25, 0, 0)},
 }
 
 const MOVES := {
@@ -1078,7 +1401,6 @@ const MOVES := {
 	&"punt": {"keys": [[0, 0.6, &"punt_cock"], [1, 0.0, &"punt_hit", &"snap"], [1, 1.0, &"punt_hit"], [2, 0.3, &"punt_follow", &"snap"], [2, 0.7, &"stance"]]},
 	&"dash": {"keys": [[0, 1.0, &"dash", &"snap"], [1, 1.0, &"dash"]]},
 	&"block_hit": {"keys": [[0, 1.0, &"block_recoil", &"snap"], [1, 1.0, &"block_recoil"], [2, 0.6, &"block"]]},
-	&"dodge": {"keys": [[1, Vector2(0.3, 0.06), &"dodge", &"snap"], [1, 1.0, &"dodge"]], "mirror_by_motion": true},
 	&"getup_face_up": {"keys": [[0, 0.0, &"lie_up"], [0, 0.55, &"getup_up_sit"], [1, 0.0, &"getup_up_crouch"], [1, 1.0, &"getup_rise"]]},
 	&"getup_face_down": {"keys": [[0, 0.0, &"lie_down"], [0, 0.6, &"getup_down_push"], [1, 0.0, &"getup_down_kneel"], [1, 1.0, &"getup_rise"]]},
 	&"grab_break_push": {"keys": [[0, 0.6, &"push_load"], [1, 0.0, &"push_hit", &"snap"], [1, 1.0, &"push_hit"]]},
@@ -1087,10 +1409,8 @@ const MOVES := {
 	# --- Upgrade 2 -------------------------------------------------------------------
 	&"cross": {"legs": &"free", "keys": [[0, 0.45, &"cross_cock"], [1, 0.0, &"cross_hit", &"snap"], [1, 1.0, &"cross_hit"], [2, 0.2, &"cross_follow", &"snap"], [2, 0.6, &"stance"]]},
 	&"hook": {"legs": &"free", "keys": [[0, 0.5, &"hook_l_cock"], [1, 0.0, &"hook_l_hit", &"snap"], [1, 1.0, &"hook_l_hit"], [2, 0.2, &"hook_l_follow", &"snap"], [2, 0.6, &"stance"]]},
-	&"uppercut": {"keys": [[0, 0.5, &"uppercut_cock"], [1, 0.0, &"uppercut_hit", &"snap"], [1, 1.0, &"uppercut_hit"], [2, 0.25, &"uppercut_follow", &"snap"], [2, 0.65, &"stance"]]},
 	&"rising_uppercut": {"keys": [[0, 0.45, &"rising_cock"], [1, 0.0, &"rising_hit", &"snap"], [1, 1.0, &"rising_hit"], [2, 0.25, &"uppercut_follow", &"snap"], [2, 0.65, &"stance"]]},
 	&"crouch_punch": {"keys": [[0, 0.5, &"crouch_punch_cock"], [1, 0.0, &"crouch_punch_hit", &"snap"], [1, 1.0, &"crouch_punch_hit"], [2, 0.5, &"crouch"]]},
-	&"roundhouse": {"keys": [[0, 0.55, &"roundhouse_cock"], [1, 0.0, &"roundhouse_hit", &"snap"], [1, 1.0, &"roundhouse_hit"], [2, 0.25, &"roundhouse_follow", &"snap"], [2, 0.65, &"kick_recoil"]]},
 	&"backfist": {"keys": [[0, Vector2(0.45, 0.10), &"backfist_cock"], [1, 0.0, &"backfist_hit", &"snap"], [1, 1.0, &"backfist_hit"], [2, 0.2, &"backfist_follow", &"snap"], [2, 0.55, &"backfist_return"]]},
 	&"flying_kick": {"keys": [[0, 0.5, &"flying_cock"], [1, 0.0, &"flying_hit", &"snap"], [1, 1.0, &"flying_hit"], [2, 0.5, &"jump_fall"]]},
 	&"hammer_fist": {"keys": [[0, 0.5, &"hammer_cock"], [1, 0.0, &"hammer_hit", &"snap"], [1, 1.0, &"hammer_hit"], [2, 0.5, &"jump_fall"]]},
@@ -1178,6 +1498,76 @@ const MOVES := {
 	&"e_slam": {"timed": Vector3(0.4, 0.15, 0.45), "keys": [[0, 1.0, &"e_gslam_lift"], [1, 0.0, &"e_gslam_down", &"snap"], [1, 1.0, &"e_gslam_down"], [2, 0.5, &"e_gslam_down"]]},
 	&"guard": {"legs": &"free", "keys": [[0, 1.0, &"guard", &"snap"], [1, 1.0, &"guard"]]},
 	&"sidestep": {"mirror_by_motion": true, "timed": Vector3(0.3, 0.4, 0.3), "keys": [[0, 1.0, &"sidestep_out", &"snap"], [1, 1.0, &"sidestep_out"]]},
+	# =========================================================================
+	# Round 7 (agent P). Strikes: play_move(id, startup, active, recovery) with
+	# Tuning.R7_MOVES frames; the contact key [1, 0.0] lands on the first active
+	# frame. A two-stage wind-up ([0, a, load, smooth, 0.7], [0, b, load]) keeps
+	# deepening through a long startup. Follow-throughs sit in the first half of
+	# the recovery (a hit chains after R7_CHAIN_CUT of it). jab, cross and hook
+	# are the Round 5 / Upgrade 2 moves above.
+	# =========================================================================
+	&"heavy_jab": {"legs": &"free", "keys": [[0, 0.35, &"hjab_load", &"smooth", 0.7], [0, 0.85, &"hjab_load"],
+		[1, 0.0, &"hjab_hit", &"snap"], [1, 1.0, &"hjab_hit"], [2, 0.25, &"hjab_follow", &"snap"], [2, 0.7, &"stance"]]},
+	&"heavy_cross": {"legs": &"free", "keys": [[0, 0.35, &"hcross_load", &"smooth", 0.7], [0, 0.85, &"hcross_load"],
+		[1, 0.0, &"hcross_hit", &"snap"], [1, 1.0, &"hcross_hit"], [2, 0.25, &"hcross_follow", &"snap"], [2, 0.7, &"stance"]]},
+	&"heavy_hook": {"legs": &"free", "keys": [[0, 0.35, &"hhook_load", &"smooth", 0.7], [0, 0.85, &"hhook_load"],
+		[1, 0.0, &"hhook_hit", &"snap"], [1, 1.0, &"hhook_hit"], [2, 0.25, &"hhook_follow", &"snap"], [2, 0.7, &"stance"]]},
+	## Uppercut: from the hip, the contact key under the chin, still rising
+	## through the active frames, overhead in the follow-through.
+	&"uppercut": {"keys": [[0, 0.5, &"uppercut_cock"], [1, 0.0, &"upc_hit", &"snap"], [1, 1.0, &"uppercut_hit", &"linear"],
+		[2, 0.25, &"uppercut_follow", &"snap"], [2, 0.65, &"stance"]]},
+	&"gut_punch": {"keys": [[0, 0.5, &"gut_load"], [1, 0.0, &"gut_hit", &"snap"], [1, 1.0, &"gut_hit"],
+		[2, 0.25, &"gut_follow", &"snap"], [2, 0.65, &"stance"]]},
+	&"leg_kick": {"keys": [[0, 0.55, &"lk_load"], [1, 0.0, &"lk_hit", &"snap"], [1, 1.0, &"lk_hit"],
+		[2, 0.22, &"lk_follow", &"snap"], [2, 0.55, &"lk_recoil"], [2, 0.85, &"stance"]]},
+	&"front_kick": {"keys": [[0, 0.45, &"fkick_chamber"], [0, 0.82, &"fk_chamber"], [1, 0.0, &"fk_hit", &"snap"], [1, 1.0, &"fk_ext"],
+		[2, 0.18, &"fk_follow", &"snap"], [2, 0.45, &"fkick_recoil"], [2, 0.8, &"stance"]]},
+	&"roundhouse": {"keys": [[0, 0.45, &"rh_load", &"smooth", 0.75], [0, 0.85, &"rh_load"], [1, 0.0, &"rh_hit", &"snap"], [1, 1.0, &"rh_hit"],
+		[2, 0.22, &"rh_follow", &"snap"], [2, 0.55, &"rh_recoil"], [2, 0.85, &"stance"]]},
+	## Heavy kicks (the held kick buttons): a longer load, the same contact
+	## point as the light kick, a bigger follow-through.
+	&"heavy_leg_kick": {"keys": [[0, 0.35, &"hlk_load", &"smooth", 0.7], [0, 0.68, &"hlk_load"], [0, 0.88, &"lk_load"],
+		[1, 0.0, &"hlk_hit", &"snap"], [1, 1.0, &"hlk_hit"], [2, 0.25, &"hlk_follow", &"snap"], [2, 0.55, &"lk_recoil"], [2, 0.85, &"stance"]]},
+	&"heavy_front_kick": {"keys": [[0, 0.3, &"fkick_chamber"], [0, 0.55, &"hfk_chamber"], [0, 0.86, &"hfk_chamber", &"linear"],
+		[1, 0.0, &"hfk_hit", &"snap"], [1, 1.0, &"fk_ext"], [2, 0.22, &"hfk_follow", &"snap"], [2, 0.5, &"fkick_recoil"], [2, 0.82, &"stance"]]},
+	&"heavy_roundhouse": {"keys": [[0, 0.3, &"hrh_coil", &"smooth", 0.8], [0, 0.55, &"hrh_coil"], [0, 0.86, &"rh_load"],
+		[1, 0.0, &"hrh_hit", &"snap"], [1, 1.0, &"hrh_hit"], [2, 0.25, &"hrh_follow", &"snap"], [2, 0.55, &"hrh_recoil"], [2, 0.85, &"stance"]]},
+	## Counter: the lead hand catches (hold &"counter_catch" through a glide),
+	## then pulls in as the rear hand lands.
+	&"counter": {"legs": &"free", "keys": [[0, 0.6, &"counter_catch", &"snap"], [1, 0.0, &"counter_hit", &"snap"], [1, 1.0, &"counter_hit"],
+		[2, 0.25, &"counter_follow", &"snap"], [2, 0.65, &"stance"]]},
+	## Dodge (play_timed over R7_DODGE_TIME): a crouched slip, head off the line
+	## (to the left; mirrored when moving right); the legs take two quick steps
+	## along the motion.
+	&"dodge": {"steps": 2, "step_dir": Vector3(0, 0, 1), "mirror_by_motion": true, "timed": Vector3(0.2, 0.5, 0.3),
+		"keys": [[0, 1.0, &"dodge_duck", &"snap"], [1, 1.0, &"dodge_duck"], [2, 0.5, &"dodge_rise"]]},
+	## Glide (play_timed over the glide, or hold_pose(&"glide")): the upper body
+	## pitches into the run-in, the legs run the locomotion's sprint.
+	&"glide": {"legs": &"free", "timed": Vector3(0.2, 0.65, 0.15), "keys": [[0, Vector2(1.0, 0.06), &"glide_lean", &"snap"], [1, 1.0, &"glide_lean"]]},
+	## Throw release from the throw_windup hold: the arm comes over the top and
+	## whips through; the body is let go on the first active frame.
+	&"throw_release": {"timed": Vector3(0.3, 0.15, 0.55), "keys": [[0, 0.55, &"throw_whip"], [1, 0.0, &"throw_rel", &"snap"], [1, 1.0, &"throw_rel"],
+		[2, 0.3, &"throw_rel_follow", &"snap"], [2, 0.75, &"stance"]]},
+	# Reactions: play_timed(id, stun). The first pose lands within 0.05-0.07 s
+	# whatever the stun ("Vector2" keys); "steps" = stumble steps from the
+	# locomotion (along the push slide, else `step_dir`). fold / buckle / lift
+	# are also HOLDS (hold_pose); their moves are the same states, timed.
+	&"react_snap": {"steps": 2, "step_dir": Vector3(0, 0, 1), "timed": Vector3(0.1, 0.55, 0.35),
+		"keys": [[0, Vector2(1.0, 0.05), &"react_snap_a", &"snap"], [1, 0.3, &"react_snap_a"], [1, 1.0, &"react_snap_b"]]},
+	## Spin: turned to the victim's left (a left hook to the right cheek);
+	## react_spin_r is the mirror (hit from the other side).
+	&"react_spin": {"steps": 2, "step_dir": Vector3(-0.5, 0, 0.85), "timed": Vector3(0.1, 0.55, 0.35),
+		"keys": [[0, Vector2(1.0, 0.05), &"react_spin_a", &"snap"], [1, 0.45, &"react_spin_b"], [1, 1.0, &"react_spin_b"]]},
+	&"react_spin_r": {"steps": 2, "step_dir": Vector3(0.5, 0, 0.85), "timed": Vector3(0.1, 0.55, 0.35),
+		"keys": [[0, Vector2(1.0, 0.05), &"react_spin_a#m", &"snap"], [1, 0.45, &"react_spin_b#m"], [1, 1.0, &"react_spin_b#m"]]},
+	&"react_push": {"steps": 3, "step_dir": Vector3(0, 0, 1), "timed": Vector3(0.08, 0.62, 0.3),
+		"keys": [[0, Vector2(1.0, 0.05), &"react_push_a", &"snap"], [1, 0.33, &"react_push_b"], [1, 0.66, &"react_push_a"], [1, 1.0, &"react_push_b"]]},
+	&"react_fold": {"timed": Vector3(0.08, 0.77, 0.15),
+		"keys": [[0, Vector2(1.0, 0.06), &"react_fold_a", &"snap"], [1, 0.5, &"react_fold_b"], [1, 1.0, &"react_fold_a"]]},
+	&"react_buckle": {"timed": Vector3(0.08, 0.72, 0.2),
+		"keys": [[0, Vector2(1.0, 0.07), &"react_buckle_a", &"snap"], [1, 0.5, &"react_buckle_b"], [1, 1.0, &"react_buckle_a"]]},
+	&"react_lift": {"timed": Vector3(0.06, 0.84, 0.1),
+		"keys": [[0, Vector2(1.0, 0.05), &"react_lift_rise", &"snap"], [1, 0.35, &"react_lift_fall"], [1, 1.0, &"react_lift_fall"]]},
 }
 
 ## play_timed() split of a move's length into startup / active / recovery when
@@ -1227,6 +1617,30 @@ const HOLDS := {
 	&"throw_charge": {"poses": [&"throw_charge"], "charge": true, "coil": Vector3(0, -4, 0)},
 	&"carry_hold": {"poses": [&"carry_hold"]},
 	&"hold_idle": {"poses": [&"carry_hold"]},
+	# --- Round 7 ---------------------------------------------------------------------
+	# "legs": &"free" = the legs keep the locomotion while moving (a drive runs
+	# the carry style's sprint). "blend_max": s the hold blends in at most,
+	# whatever hold_pose() is given (reactions land with the hit). "ramp": s to
+	# blend poses[0] -> poses[1] once, then hold (the throw wind-up grows to
+	# full at Tuning.R7_THROW_WINDUP_FULL). "by_vy": poses[0] while rising,
+	# poses[1] at the top and falling (the rig's vertical speed). "flail":
+	# degrees of slow loose-limb wobble on the arms and legs.
+	&"throw_windup": {"poses": [&"throw_wu_a", &"throw_wu_b"], "ramp": 0.7, "legs": &"free", "tremble": 0.8},
+	&"drive_hold": {"poses": [&"drive_lean"], "legs": &"free"},
+	&"clinch_hold": {"poses": [&"clinch"], "legs": &"free"},
+	&"glide": {"poses": [&"glide_lean"], "legs": &"free"},
+	&"counter_catch": {"poses": [&"counter_catch"], "legs": &"free", "blend_max": 0.04},
+	# Heavy wind-ups held while the punch button waits for the hold decision
+	# (play_move(&"heavy_*", startup_left, ...) then carries on from here).
+	&"heavy_jab_load": {"poses": [&"hjab_load"], "legs": &"free", "tremble": 0.6},
+	&"heavy_cross_load": {"poses": [&"hcross_load"], "legs": &"free", "tremble": 0.6},
+	&"heavy_hook_load": {"poses": [&"hhook_load"], "legs": &"free", "tremble": 0.6},
+	&"heavy_leg_kick_load": {"poses": [&"hlk_load"], "tremble": 0.6},
+	&"heavy_front_kick_load": {"poses": [&"hfk_chamber"], "tremble": 0.6},
+	&"heavy_roundhouse_load": {"poses": [&"hrh_coil"], "tremble": 0.6},
+	&"react_fold": {"poses": [&"react_fold_a", &"react_fold_b"], "rate": 1.4, "blend_max": 0.06},
+	&"react_buckle": {"poses": [&"react_buckle_a", &"react_buckle_b"], "rate": 1.0, "blend_max": 0.07},
+	&"react_lift": {"poses": [&"react_lift_rise", &"react_lift_fall"], "by_vy": true, "flail": 8.0, "blend_max": 0.05},
 }
 
 const ALL_MOVE_IDS: Array[StringName] = [&"jab1", &"jab2", &"jab3", &"power_punch", &"sparta_kick",
@@ -1254,10 +1668,27 @@ const ROUND5_MOVE_IDS: Array[StringName] = [&"jab", &"cross", &"kick", &"sweep",
 const ROUND5_HOLD_IDS: Array[StringName] = [&"jab_charge", &"cross_charge", &"kick_charge", &"sweep_charge",
 	&"throw_charge", &"carry_hold", &"hold_idle", &"guard"]
 
-## Every move id (older rounds and Round 5).
+## Round 7 ids (docs/Round 7 — Freeflow Combat.md "Poses"). Strikes take
+## Tuning.R7_MOVES frame data in play_move(); the rest are play_timed() moves.
+const ROUND7_STRIKE_IDS: Array[StringName] = [&"jab", &"cross", &"hook", &"heavy_jab", &"heavy_cross",
+	&"heavy_hook", &"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse", &"counter",
+	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse"]
+const ROUND7_MOVE_IDS: Array[StringName] = [&"jab", &"cross", &"hook", &"heavy_jab", &"heavy_cross",
+	&"heavy_hook", &"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse", &"counter",
+	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse",
+	&"dodge", &"glide", &"throw_release", &"react_snap", &"react_spin", &"react_spin_r", &"react_push",
+	&"react_fold", &"react_buckle", &"react_lift"]
+## Round 7 holds (hold_pose; the throw wind-up and the body holds also work as
+## set_upper_overlay). react_fold / react_buckle / react_lift are moves too.
+const ROUND7_HOLD_IDS: Array[StringName] = [&"throw_windup", &"drive_hold", &"clinch_hold", &"glide",
+	&"counter_catch", &"heavy_jab_load", &"heavy_cross_load", &"heavy_hook_load",
+	&"heavy_leg_kick_load", &"heavy_front_kick_load", &"heavy_roundhouse_load",
+	&"react_fold", &"react_buckle", &"react_lift"]
+
+## Every move id (older rounds, Round 5 and Round 7).
 static func all_move_ids() -> Array[StringName]:
 	var out: Array[StringName] = ALL_MOVE_IDS.duplicate()
-	for id in ROUND5_MOVE_IDS:
+	for id in ROUND5_MOVE_IDS + ROUND7_MOVE_IDS:
 		if not out.has(id):
 			out.append(id)
 	return out
@@ -1276,6 +1707,12 @@ static func charge_hold_of(move_id: StringName) -> StringName:
 ## the floor; a throw flings where the grabber faces).
 const NO_AIM: Array[StringName] = [&"leg_sweep", &"throw", &"backfist", &"e_sweep", &"neck_throw",
 	&"upward_throw", &"wall_slam", &"sweep", &"slam", &"body_slam", &"e_grab_slam"]
+
+## Moves whose height is the point of the move: set_aim_target turns them
+## toward the target but never raises or lowers them (a gut punch stays at the
+## stomach, a leg kick at the thigh, a roundhouse at the head).
+const AIM_YAW_ONLY: Array[StringName] = [&"uppercut", &"gut_punch", &"leg_kick", &"front_kick", &"roundhouse",
+	&"heavy_leg_kick", &"heavy_front_kick", &"heavy_roundhouse"]
 
 ## IK target keys of each strike bone (aiming).
 const AIM_LIMB := {&"LeftHand": "lfist", &"RightHand": "rfist", &"LeftFoot": "lankle", &"RightFoot": "rankle"}

@@ -1,16 +1,29 @@
 extends Fighter
-## Test double: a Fighter whose stance queries (agent H's) are set by the test.
+## Test double: a Fighter whose Round 7 react state the test sets, and which
+## records every reaction CombatController asks of it (then applies it).
 ## OWNER: agent B (combat tests).
 
-var fake_crouch := false
-var fake_air := false
-var fake_intent: StringName = &"neutral"
+## The state get_react_state() reports (&"" = the real one, agent H's).
+var fake_react: StringName = &""
+## Every react / knockdown / launch call, in order:
+## [kind, direction or velocity change, push, stun, HitInfo or null].
+var reacts: Array = []
 
-func is_crouching() -> bool:
-	return fake_crouch
+func get_react_state() -> StringName:
+	return fake_react if fake_react != &"" else super()
 
-func is_airborne() -> bool:
-	return fake_air
+func react(kind: StringName, direction: Vector3, push: float, stun: float, info: HitInfo = null) -> void:
+	reacts.append([kind, direction, push, stun, info])
+	super(kind, direction, push, stun, info)
 
-func get_input_intent() -> StringName:
-	return fake_intent
+func knockdown(direction: Vector3, hit_bone: StringName = &"Chest") -> void:
+	reacts.append([&"knockdown", direction, 0.0, 0.0, null])
+	super(direction, hit_bone)
+
+func launch(velocity_change: Vector3, hit_point: Vector3, hit_bone: StringName = &"Chest") -> void:
+	reacts.append([&"launch", velocity_change, 0.0, 0.0, null])
+	super(velocity_change, hit_point, hit_bone)
+
+## The last recorded reaction ([] when none).
+func last_react() -> Array:
+	return reacts[-1] if not reacts.is_empty() else []

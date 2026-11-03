@@ -1,10 +1,11 @@
 extends Node
-## Tell glint (rule 5; Feel Reference: Enemies have to be readable first):
-## GameEvents.attack_tell spawns a tell: ORANGE for strikes (and the Duelist's
-## counter, a strike), BLUE for grabs (cannot be parried); the star fallback is
-## unshaded, no depth test, render layer VIS_FX, pulsing, gone shortly after
-## the tell; a closing ring meets it as the parry / teleport window opens.
-## OWNER: agent C (AI tests).
+## Tell glint (rule 5; Feel Reference: Enemies have to be readable first;
+## Round 7: Defence > Counter): GameEvents.attack_tell spawns a tell: ORANGE
+## when the player can Counter it, BLUE when only a dodge answers it (grabs,
+## the heavy's shoulder charge); the star fallback is unshaded, no depth test,
+## render layer VIS_FX, pulsing, gone shortly after the tell; a closing ring
+## meets it as the answer's window opens (Tuning.R7_COUNTER_WINDOW on orange,
+## Tuning.R7_DODGE_INVULN on blue). OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 
@@ -79,25 +80,46 @@ func _run() -> void:
 	check(_glints(enemy).is_empty() and life < 0.4 + TellGlint.FLASH_TIME + 0.1,
 		"glint fades and frees after the tell (%.2f s)" % life)
 
-	# The Duelist's teleport counter is a strike (parry it): orange, with a
-	# strong closing ring.
-	GameEvents.attack_tell.emit(enemy, &"counter", 0.3)
-	await get_tree().process_frame
-	gl = _glints(enemy)
-	check(gl.size() == 1 and gl[0].get_color() == TellGlint.STRIKE_COLOR, "counter tell glows orange (a strike)")
-	check(gl.size() == 1 and gl[0].get_ring() != null and TellGlint.RING_ALPHA[&"counter"] > TellGlint.RING_ALPHA[&"strike"],
-		"counter: stronger closing ring")
-	await _wait_glints_gone(enemy)
+	# Colour by counterability: the move decides (MoveData.counterable, B;
+	# the doc's list until B adds it), a grab tell is never counterable.
+	var blue: Array[StringName] = [&"e_grab", &"e_grab_slam", &"e_charge"]
+	var rule_ok := true
+	var rows: Array[String] = []
+	for m: StringName in [&"e_jab", &"e_hook", &"e_kick", &"e_stick_swing", &"e_stick_thrust", &"e_heavy",
+			&"e_sweep", &"e_grab", &"e_grab_slam", &"e_charge"]:
+		var want := TellGlint.GRAB_COLOR if m in blue else TellGlint.STRIKE_COLOR
+		var got := TellGlint.color_for(&"strike" if not m in AIBrain.GRAB_MOVES else &"grab", m)
+		rule_ok = rule_ok and got == want and TellGlint.is_counterable(m) == not (m in blue)
+		rows.append("%s %s" % [m, "blue" if got == TellGlint.GRAB_COLOR else "orange"])
+	check(rule_ok, "colour by counterability: %s" % ", ".join(rows))
+	check(TellGlint.color_for(&"grab") == TellGlint.GRAB_COLOR and TellGlint.color_for(&"charge") == TellGlint.GRAB_COLOR
+		and TellGlint.color_for(&"strike") == TellGlint.STRIKE_COLOR,
+		"by kind alone: grab and charge tells are blue, a strike tell orange")
+	check(TellGlint.color_for(&"charge", &"e_jab") == TellGlint.GRAB_COLOR,
+		"any kind other than strike is blue, whatever the move")
+	# The heavy's shoulder charge glows blue by its kind (B: &"charge") and by
+	# its move (the brain names it before B's tell) even under a &"strike" kind.
+	var hb := Util.spawn_fake_enemy(self, &"heavy", Vector3(4, 0.05, -3))
+	await get_tree().physics_frame
+	for k: StringName in [&"charge", &"strike"]:
+		(hb.brain as AIBrain)._tell_move = &"e_charge"
+		GameEvents.attack_tell.emit(hb, k, 0.5)
+		await get_tree().process_frame
+		var hg := _glints(hb)
+		check(hg.size() == 1 and hg[0].get_color() == TellGlint.GRAB_COLOR and not hg[0].is_counterable_tell(),
+			"a shoulder-charge tell (kind %s) glows blue (uncounterable)" % k)
+		await _wait_glints_gone(hb)
+	hb.queue_free()
 
-	# Closing ring: on strikes, counters and grabs (a grab is answered with a
-	# teleport in the same window); it meets the glow exactly when the parry
-	# window opens.
+	# Closing ring: on every tell; on a grab it meets the glow when a dodge
+	# pressed then would still be invulnerable on the active frame.
 	GameEvents.attack_tell.emit(enemy, &"grab", 0.4)
 	await get_tree().process_frame
 	gl = _glints(enemy)
-	check(gl.size() == 1 and gl[0].get_ring() != null, "a grab gets the teleport-timing ring too")
+	check(gl.size() == 1 and gl[0].get_ring() != null and absf(gl[0].get_meet_time() - (0.4 - Tuning.R7_DODGE_INVULN)) < 0.001,
+		"a grab gets a dodge-timing ring (meets %.3f s into a 0.4 s tell)" % (gl[0].get_meet_time() if gl.size() == 1 else -1.0))
 	await _wait_glints_gone(enemy)
-	var tell := 0.5
+	var tell := 0.7
 	GameEvents.attack_tell.emit(enemy, &"strike", tell)
 	await get_tree().process_frame
 	gl = _glints(enemy)
@@ -106,8 +128,8 @@ func _run() -> void:
 	if ring_ok:
 		var g2 := gl[0]
 		var meet := g2.get_meet_time()
-		check(absf(meet - (tell - Tuning.PARRY_WINDOW)) < 0.001,
-			"ring meets the glow at active - parry window (%.3f s of %.2f)" % [meet, tell])
+		check(absf(meet - (tell - Tuning.R7_COUNTER_WINDOW)) < 0.001,
+			"ring meets the glow at active - counter window (%.3f s of %.2f)" % [meet, tell])
 		var early := g2.get_ring_scale()
 		var t0g := Util.game_now()
 		var at_meet := -1.0

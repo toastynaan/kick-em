@@ -1,23 +1,21 @@
 extends Node3D
-## Shared helpers for tests/input/*. Each test extends this, overrides run(),
-## and calls done(). Prints "PASS ..."/"FAIL ..." per check and quits 0/1.
-## OWNER: agent H (body & player input).
-
-const FAKE_TD := "res://tests/input/fake_focus_time_director.gd"
+## Shared helpers for tests/input/* and tests/defence/*. Each test extends
+## this, overrides run(), and calls done(). Prints "PASS ..."/"FAIL ..." per
+## check and quits 0/1.
+## OWNER: agent H (fighter, player & defence).
 
 var failures: Array[String] = []
 var events: Array = []  ## [name, a, b, c, real time] captured from GameEvents
 var _timeout := 40.0
 var _checks := 0
 var _completed := false
-var _td_script: Script
 
 func _ready() -> void:
 	_make_floor()
 	_capture_events()
 	get_tree().create_timer(_timeout, true, false, true).timeout.connect(func() -> void:
 		print("FAIL timeout after %.0f s" % _timeout)
-		_restore_time_director()
+		Engine.time_scale = 1.0
 		get_tree().quit(1))
 	@warning_ignore("redundant_await")
 	await run()
@@ -47,8 +45,7 @@ func _make_floor() -> void:
 	add_child(body)
 
 func _capture_events() -> void:
-	for sig: StringName in [&"crouch_changed", &"jumped", &"landed", &"aim_zone_changed",
-			&"focus_started", &"focus_ended", &"focus_changed", &"fighter_died"]:
+	for sig: StringName in [&"react_started", &"countered", &"counter_whiffed", &"fighter_died"]:
 		var s := sig
 		GameEvents.connect(s, func(a = null, b = null, c = null) -> void:
 			events.append([s, a, b, c, TimeDirector.now()]))
@@ -97,7 +94,7 @@ func release(action: StringName) -> void:
 	Input.action_release(action)
 
 ## A real press-and-release input event for `action` (reaches _input /
-## _unhandled_input handlers, e.g. the camera rig's lock_on), one tick apart.
+## _unhandled_input handlers), one tick apart.
 func tap_action(action: StringName) -> void:
 	var e := InputEventAction.new()
 	e.action = action
@@ -126,23 +123,8 @@ func check(cond: bool, msg: String) -> void:
 func near(a: float, b: float, rel: float) -> bool:
 	return absf(a - b) <= absf(b) * rel
 
-## Swap TimeDirector's script for the test fake (Focus = Engine.time_scale x,
-## player_time_factor = 1 / time_scale) so player-time math is checked against
-## a known factor whatever state agent E's TimeDirector is in.
-func use_fake_time_director() -> void:
-	if _td_script == null:
-		_td_script = TimeDirector.get_script()
-	TimeDirector.set_script(load(FAKE_TD))
-
-func _restore_time_director() -> void:
-	Engine.time_scale = 1.0
-	if _td_script != null:
-		TimeDirector.set_script(_td_script)
-		_td_script = null
-
 func finish() -> void:
 	release_all_input()
-	_restore_time_director()
 	if TimeDirector.has_method(&"reset"):
 		TimeDirector.reset()
 	Engine.time_scale = 1.0

@@ -3,10 +3,18 @@ extends Node
 ## `-- --seconds=N`). It must attack repeatedly (about one attack every
 ## 1.2-2.5 s of open time), mix its moves, and never start an attack while
 ## the player is down, held or in hitstun.
-## Phase B (Round 5 defence): the player dummy jabs the Duelist whenever he is
-## in reach (Tuning read chance, no overrides). Every GameEvents.parried with
-## the Duelist as defender is followed by its counter (a hook, or B's
-## start_counter teleport) within COUNTER_LIMIT s. OWNER: agent C (AI tests).
+## Phase B (Round 7 defence): the player dummy jabs the Duelist whenever he is
+## in reach between his turns (no token, not attacking: a dummy that struck as
+## he closed in would only ever meet his wind-up) and throws a guard breaker
+## (gut punch, uppercut, front kick, in turn) every third time, and on the
+## tick it sees a fresh read guard of his go up (as a player would: jab,
+## blocked, gut punch; a press in its own recovery is buffered by B; Tuning
+## read chance, no overrides). The Duelist
+## guards some (B's guard blocks the taps), never parries or teleports, and
+## every broken guard is answered with an e_hook (before any other attack of
+## his) within ANSWER_LIMIT s of him being able to act again (an uppercut's
+## lift ends in a knockdown and a get-up first), never started while he reacts.
+## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
 
@@ -32,14 +40,25 @@ var waiting_since := -1.0        ## player recovery time not yet answered by an 
 var waiting_allow := RECOVER_ATTACK_MAX
 var stalls := 0
 ## Phase B.
-const JAB_PHASE_MIN := 30.0       ## s at least...
-const JAB_PHASE_MAX := 100.0      ## ...until PARRIES_WANTED parries, at most this
-const PARRIES_WANTED := 4
-const JAB_GAP := 1.6              ## s between the dummy's jabs
-const JAB_REACH := 1.9            ## m: the dummy jabs when the Duelist is this close
-const COUNTER_LIMIT := 1.8        ## s from a parry to the counter (the parried stagger ~0.8 s comes first)
-var parries: Array[float] = []
-var launch_log: Array = []        ## [time, move]
+const PHASE_B_MIN := 30.0         ## s at least...
+## ...until BREAKS_WANTED guard breaks, at most this. A break needs a read
+## (Tuning read chance ~30%, more on repeats): about 3 per 100 s.
+const PHASE_B_MAX := 240.0
+const BREAKS_WANTED := 4
+const STRIKE_GAP := 1.2           ## s between the dummy's strikes
+const STRIKE_REACH := 1.9         ## m: the dummy strikes when the Duelist is this close
+## s from the Duelist being able to act again after a broken guard to the hook.
+const ANSWER_LIMIT := AIBrain.ANSWER_WINDOW
+## s after a break in which the dummy holds off (his reaction, a knockdown and
+## get-up, then the answer).
+const BREAK_QUIET := 5.0
+const BREAKERS: Array[int] = [CombatController.Action.GUT_PUNCH, CombatController.Action.UPPERCUT,
+	CombatController.Action.FRONT_KICK]
+var breaks: Array[float] = []
+var parries := 0
+var counter_tells := 0
+var guard_blocked := 0           ## player strikes the Duelist's guard stopped
+var launch_log: Array = []        ## [time, move, reacting or stunned at the start]
 
 func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
@@ -156,18 +175,22 @@ func _run() -> void:
 	check(stalls == 0, "attacks again within %.0f s after every player get-up (%d get-ups answered, gaps %s, %d stalls)" % [
 		RECOVER_ATTACK_MAX, recover_gaps.size(), str(recover_gaps.map(func(g: float) -> String: return "%.1f" % g)), stalls])
 	check(combat_starts == 0 or combat_starts == n, "combat.attack_started matches brain starts (%d / %d)" % [combat_starts, n])
-	await _phase_jabs()
+	await _phase_guard()
 	_finish()
 
-## Phase B: the dummy jabs; the Duelist parries some and counters each one.
-func _phase_jabs() -> void:
+## Phase B: the dummy jabs and breaks the Duelist's guard; he guards, never
+## parries or teleports, and answers every broken guard with a hook.
+func _phase_guard() -> void:
 	var brain := duelist.brain as AIBrain
-	if not (duelist.defence != null and duelist.defence.is_enabled()):
-		print("[ai] info: Round 5 Defence is off: parry counters not checked")
-		return
-	GameEvents.parried.connect(func(d: Node3D, _a: Node3D) -> void:
-		if d == duelist: parries.append(Util.game_now()))
-	brain.attack_launched.connect(func(m: StringName) -> void: launch_log.append([Util.game_now(), m]))
+	if GameEvents.has_signal(&"parried"):
+		GameEvents.connect(&"parried", func(d: Node3D, _a: Node3D) -> void:
+			if d == duelist: parries += 1)
+	GameEvents.attack_tell.connect(func(a: Node3D, kind: StringName, _d: float) -> void:
+		if a == duelist and kind == &"counter": counter_tells += 1)
+	GameEvents.hit_blocked.connect(func(i: HitInfo) -> void:
+		if i.victim == duelist: guard_blocked += 1)
+	brain.attack_launched.connect(func(m: StringName) -> void:
+		launch_log.append([Util.game_now(), m, duelist.is_reacting() or duelist.is_lifted() or duelist.is_in_hitstun()]))
 	# Back to the duel spawns, in the open (phase A may have knocked the dummy
 	# into the clutter); the dummy stays on its spot when on its feet.
 	var home := player.get_ground_position()
@@ -182,16 +205,29 @@ func _phase_jabs() -> void:
 		if not duelist.is_down():
 			duelist.global_position = (sp[1] as Transform3D).origin
 			duelist.reset_physics_interpolation()
-	var jabs := 0
-	var next_jab := 0.0
+	var strikes := 0
+	var states := {}                  ## the Duelist's state at each of the dummy's strikes
+	var answered_read := -1           ## brain.guard_reads when the dummy last answered a guard
+	var breakers := 0
+	var synthetic := 0
+	var next_strike := 0.0
 	var t0 := Util.game_now()
-	var counters0 := brain.parry_counters
-	var teleports0 := brain.counters_started
-	while Util.game_now() - t0 < JAB_PHASE_MAX:
+	var reads0 := brain.guard_reads
+	var seen_breaks := brain.guard_breaks
+	var acts: Array[float] = []       ## times the Duelist could act again after not being able to
+	var could_act := true
+	while Util.game_now() - t0 < PHASE_B_MAX:
 		var now := Util.game_now()
-		if now - t0 > JAB_PHASE_MIN and parries.size() >= PARRIES_WANTED and now - parries[-1] > COUNTER_LIMIT + 0.2:
+		if now - t0 > PHASE_B_MIN and breaks.size() >= BREAKS_WANTED and now - breaks[-1] > BREAK_QUIET:
 			break
 		await get_tree().physics_frame
+		var can := duelist.can_act() or (duelist.combat.is_attacking() and not duelist.is_reacting())
+		if can and not could_act:
+			acts.append(Util.game_now())
+		could_act = can
+		if brain.guard_breaks > seen_breaks:
+			seen_breaks = brain.guard_breaks
+			breaks.append(Util.game_now())
 		if player.hp < player.max_hp * 0.4 and not player.is_dead():
 			player.heal_fraction(1.0)
 		if duelist.hp < duelist.max_hp * 0.3:
@@ -200,38 +236,95 @@ func _phase_jabs() -> void:
 			player.global_position = home
 			player.reset_physics_interpolation()
 		var d := Util.flat_dist(duelist.get_ground_position(), player.get_ground_position())
-		var after_parry := not parries.is_empty() and now - parries[-1] < COUNTER_LIMIT + 0.2
-		if now >= next_jab and d < JAB_REACH and player.can_act() and not after_parry:
-			var to := duelist.get_ground_position() - player.get_ground_position()
-			to.y = 0.0
-			player.snap_facing(to)
-			player.combat.press(CombatController.Action.LIGHT)
+		var after_break := not breaks.is_empty() and Util.game_now() - breaks[-1] < BREAK_QUIET
+		# A fresh read guard: answer it with a guard breaker at once (buffered
+		# when the dummy is still in its own recovery).
+		if duelist.combat.is_blocking() and brain.guard_reads != answered_read and d < STRIKE_REACH \
+				and not after_break and not player.is_down() and not player.is_in_hitstun() \
+				and (player.can_act() or player.combat.is_in_recovery()):
+			answered_read = brain.guard_reads
+			var bk: int = BREAKERS[breakers % BREAKERS.size()]
+			breakers += 1
+			strikes += 1
+			states["guarding"] = int(states.get("guarding", 0)) + 1
+			player.snap_facing(duelist.get_ground_position() - player.get_ground_position())
+			player.combat.press(bk)
 			await get_tree().physics_frame
-			player.combat.release(CombatController.Action.LIGHT)
-			jabs += 1
-			next_jab = Util.game_now() + JAB_GAP
-	var countered := 0
+			player.combat.release(bk)
+			next_strike = Util.game_now() + STRIKE_GAP
+			continue
+		if Util.game_now() < next_strike or d >= STRIKE_REACH or not player.can_act() \
+				or after_break or AttackDirector.has_token(duelist) or duelist.combat.is_attacking():
+			continue
+		var to := duelist.get_ground_position() - player.get_ground_position()
+		to.y = 0.0
+		player.snap_facing(to)
+		strikes += 1
+		var st := "attacking" if duelist.combat.is_attacking() else ("reacting" if duelist.is_reacting() or duelist.is_down() \
+			else ("stunned" if duelist.combat.is_hit_stunned() else ("guarding" if duelist.combat.is_blocking() else "free")))
+		states[st] = int(states.get(st, 0)) + 1
+		next_strike = Util.game_now() + STRIKE_GAP
+		var action := CombatController.Action.LIGHT
+		if strikes % 3 == 0:
+			action = BREAKERS[breakers % BREAKERS.size()]
+			breakers += 1
+		player.combat.press(action)
+		await get_tree().physics_frame
+		player.combat.release(action)
+		if action != CombatController.Action.LIGHT and not player.combat.is_attacking() \
+				and duelist.combat.is_blocking():
+			# B does not run this button yet: a hit his guard cannot stop.
+			synthetic += 1
+			_guard_break_hit()
+	var answered := 0
 	var gaps: Array[String] = []
-	var kinds := {}
-	for t in parries:
-		var hit := false
+	for t in breaks:
+		var first: Array = []
 		for l: Array in launch_log:
-			if l[0] > t and l[0] - t <= COUNTER_LIMIT and l[1] in [&"e_hook", &"counter"]:
-				countered += 1
-				gaps.append("%.2f" % (l[0] - t))
-				kinds[l[1]] = kinds.get(l[1], 0) + 1
-				hit = true
+			if l[0] > t:
+				first = l
 				break
-		if not hit:
-			var after := launch_log.filter(func(l: Array) -> bool: return l[0] > t - 0.5 and l[0] - t < 3.0)
-			print("[ai] info: parry at %.2f s not countered; Duelist launches around it %s" % [t - t0,
-				str(after.map(func(l: Array) -> String: return "%s@%+.2f" % [l[1], l[0] - t]))])
-	print("[ai] info: phase B %.0f s: %d jabs, %d parries by the Duelist, %d countered %s (s after the parry: %s); brain: %d parry counters, %d teleport counters" % [
-		Util.game_now() - t0, jabs, parries.size(), countered, str(kinds), ", ".join(gaps),
-		brain.parry_counters - counters0, brain.counters_started - teleports0])
-	check(parries.size() >= 1, "the Duelist parries the player's jabs in Duel mode (%d of %d jabs)" % [parries.size(), jabs])
-	check(parries.size() > 0 and countered == parries.size(),
-		"every parry is followed by a counter within %.1f s (%d / %d)" % [COUNTER_LIMIT, countered, parries.size()])
+		if first.is_empty():
+			print("[ai] info: guard break at %.2f s: no attack after it" % (t - t0))
+			continue
+		var t_act := t
+		for a in acts:
+			if a > t and a <= first[0]:
+				t_act = a
+				break
+		gaps.append("%s %.2f s after he could act (%.2f s after the break)" % [first[1], first[0] - t_act, first[0] - t])
+		if first[1] == &"e_hook" and first[0] - t_act <= ANSWER_LIMIT and not first[2]:
+			answered += 1
+	var bad := launch_log.filter(func(l: Array) -> bool: return l[2]).size()
+	print("[ai] info: the Duelist at the dummy's strikes: %s" % str(states))
+	print("[ai] info: phase B %.0f s: %d strikes (%d guard breakers, %d as guard-break hits while B lacks them), %d reads, %d blocked, %d guard breaks; first attack after each break: %s" % [
+		Util.game_now() - t0, strikes, breakers, synthetic, brain.guard_reads - reads0, guard_blocked,
+		breaks.size(), "; ".join(gaps)])
+	check(brain.guard_reads - reads0 >= 1 and guard_blocked >= 1,
+		"the Duelist guards the player's strikes in Duel mode (%d reads, %d blocked)" % [brain.guard_reads - reads0, guard_blocked])
+	check(breaks.size() >= 2, "guard breakers get through his raised guard in the duel (%d breaks)" % breaks.size())
+	check(breaks.size() >= 1 and answered == breaks.size(),
+		"every broken guard is answered with an e_hook within %.1f s of him acting again (%d / %d)" % [ANSWER_LIMIT, answered, breaks.size()])
+	check(parries == 0 and counter_tells == 0, "no parry (%d) and no teleport counter (%d) in Duel" % [parries, counter_tells])
+	check(bad == 0, "never starts an attack while reacting or in hitstun (%d of %d)" % [bad, launch_log.size()])
+
+## A gut punch his guard cannot stop (stands in for B's guard break).
+func _guard_break_hit() -> void:
+	var info := HitInfo.new()
+	info.attacker = player
+	info.victim = duelist
+	info.kind = &"strike"
+	info.move_id = &"gut_punch"
+	info.damage = 8.0
+	info.unblockable = true
+	info.tier = HitInfo.Tier.STAGGER
+	info.reaction = HitInfo.Reaction.STAGGER
+	info.react = &"fold"
+	info.stun = 1.1
+	info.push = 0.3
+	info.hit_direction = (duelist.get_ground_position() - player.get_ground_position()).normalized()
+	info.hit_position = duelist.get_aim_point()
+	duelist.take_hit(info)
 
 func _finish() -> void:
 	AttackDirector.reset()

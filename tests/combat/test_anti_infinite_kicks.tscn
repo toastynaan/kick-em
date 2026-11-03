@@ -1,6 +1,0 @@
-[gd_scene format=3]
-
-[ext_resource type="Script" path="res://tests/combat/test_anti_infinite_kicks.gd" id="1"]
-
-[node name="TestAntiInfiniteKicks" type="Node"]
-script = ExtResource("1")

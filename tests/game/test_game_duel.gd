@@ -47,7 +47,6 @@ func _run() -> void:
 	var enemies := gm.get_alive_enemies()
 	_check(enemies.size() == 1 and enemies[0].archetype == &"duelist", "one Duelist spawned")
 	_check(enemies.size() == 1 and enemies[0].max_hp == 200.0 and gm.player.max_hp == 100.0, "Round 5 health: Duelist 200, player 100")
-	_check(is_equal_approx(gm.player.focus, Tuning.debug_start_focus), "the duel starts with %.0f Focus bar" % Tuning.debug_start_focus)
 	_check(gm.hud.opponent == enemies[0] and gm.hud._opp_root.visible, "duel HUD shows the Duelist's HP bar")
 	_check(not gm.camera_rig.is_follow_cam_active(), "duel: no follow-cam in play")
 	var cam := get_viewport().get_camera_3d()

@@ -6,6 +6,7 @@ const FakeRig := preload("res://tests/fx/fx_fake_rig.gd")
 
 var rig: Node3D
 var traversal: Node   ## tests/fx/fx_fake_traversal.gd when a test needs one
+var combat: Node      ## a stand-in CombatController when a test needs one
 var hp := 1000.0
 var max_hp := 1000.0
 var com_velocity := Vector3.ZERO

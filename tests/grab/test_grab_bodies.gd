@@ -1,13 +1,14 @@
 extends Node3D
 ## F9 acceptance: "Grabbing a flying, a downed and a dead body all succeed."
-## Each through the player's Grab press (CombatController routing -> Carry):
+## Round 7: "Reacting, downed and dead bodies connect at once"; the hold is
+## always the collar. Each through the player's Grab press (CombatController
+## routing -> Carry):
 ## - flying: a grunt launched up in front of the player, grabbed in the air;
 ## - downed: a grunt knocked down and lying still, grabbed off the floor;
 ## - dead: a grunt killed and settled (frozen corpse), picked up (wake).
-## Each must end held (the held state on its ragdoll), come with the holder,
-## and be throwable (live ones taken by the collar, the corpse by its nearest
-## bone). Logs the state at the press, the bone taken and the time
-## to the hold.
+## Each must end held at once (no clinch, the held state on its ragdoll), by
+## the collar (Chest), come with the holder, and be throwable (LIGHT). Logs the
+## state at the press, the bone taken and the time to the hold.
 ## OWNER: agent G.
 
 var _fail: Array[String] = []
@@ -54,14 +55,9 @@ func _case(kind: StringName) -> void:
 	var st := GrabTestUtil.state_name(e)
 	var com_y := e.get_center_of_mass().y
 	var t0 := TimeDirector.now()
-	# Live bodies are taken by the collar (stick toward them: a leg hold would
-	# make Heavy a trip, not a throw); the corpse by its nearest bone (neutral).
-	if kind != &"dead":
-		p.move_input = p.get_forward() * 0.6
 	GrabTestUtil.press(p, CombatController.Action.GRAB)
 	GrabTestUtil.release(p, CombatController.Action.GRAB)
 	await get_tree().physics_frame
-	p.move_input = Vector3.ZERO
 	var held := await GrabTestUtil.wait_until(self, func() -> bool: return p.carry.is_holding_body(), 0.6)
 	var t_hold := TimeDirector.now() - t0
 	var bone := p.carry.get_held_bone()
@@ -74,7 +70,7 @@ func _case(kind: StringName) -> void:
 	p.move_input = Vector3.ZERO
 	var moved := e.get_center_of_mass() - c0
 	var still := p.carry.is_holding_body()
-	await GrabTestUtil.tap(self, p, CombatController.Action.HEAVY, 0.05)
+	await GrabTestUtil.tap(self, p, CombatController.Action.LIGHT, 0.05)
 	await GrabTestUtil.frames(self, 2)
 	var thrown := e.get_com_velocity().length()
 	print("[%s] setup ok=%s state at press %s (COM %.2f m up): held=%s after %.3f s by %s (%s), motor holds=%s; carried %.2f m (still holding=%s); thrown at %.2f m/s" % [
@@ -82,6 +78,9 @@ func _case(kind: StringName) -> void:
 		still, thrown])
 	_check(ok_setup, "%s: setup" % kind)
 	_check(held and motor_held, "%s body: the grab succeeds (held)" % kind)
+	_check(t_hold < Tuning.frames(Tuning.GRAB_FRAMES + Carry.GRAB_ACTIVE_FRAMES) + 0.05 and p.carry.last_grab_result != &"clinch",
+		"%s body: it connects at once (no clinch)" % kind)
+	_check(bone == Bones.CHEST, "%s body: held by the collar" % kind)
 	_check(Vector2(moved.x, moved.z).length() > 0.8 and still, "%s body: it comes with the holder" % kind)
 	_check(thrown > 4.0, "%s body: it can be thrown" % kind)
 	p.queue_free()

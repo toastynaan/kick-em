@@ -1,9 +1,10 @@
 extends "res://tests/input/input_test_base.gd"
-## Per-fighter time and the contact frame (Round 5). Acceptance (agent H):
+## Per-fighter time and the contact frame (Round 5; Round 7 cap). Agent H:
 ## - F0: during a 110 ms hitstop on two fighters, a third enemy's logged
 ##   position keeps changing (and the two frozen ones hold still, actor time 0).
-## - F4 (with B): the player's logged freeze never passes 60 ms, and a Block
-##   pressed during it fires afterwards.
+## - The player's own freeze never passes Tuning.R7_PLAYER_HITSTOP_MAX
+##   (Round 7: Hit feel); the victim keeps its full freeze; a real punch that
+##   lands freezes the player within the cap.
 
 func run() -> void:
 	var p := spawn_player(Vector3.ZERO)
@@ -46,11 +47,12 @@ func run() -> void:
 	for f in [a, b, c]:
 		f.move_input = Vector3.ZERO
 
-	# --- F4: the player's freeze is capped at 60 ms; the victim keeps its own. ---------
+	# --- The player's freeze is capped at R7_PLAYER_HITSTOP_MAX; the victim keeps its own.
 	print("player freeze cap")
 	await ticks(30)
 	var worst := 0.0
-	for stop: float in [0.04, 0.06, 0.08, 0.11, 0.15, 0.18]:
+	var cap_ms := Tuning.R7_PLAYER_HITSTOP_MAX * 1000.0
+	for stop: float in [0.04, 0.07, 0.11, 0.14, 0.16, 0.2, 0.25]:
 		TimeDirector.hitstop([p, b], stop)
 		var pt := 0
 		var bt := 0
@@ -64,7 +66,8 @@ func run() -> void:
 		var b_ms := bt / 120.0 * 1000.0
 		worst = maxf(worst, p_ms)
 		print("  hitstop %3.0f ms: player frozen %5.1f ms, victim %5.1f ms" % [stop * 1000.0, p_ms, b_ms])
-		check(p_ms <= Tuning.PLAYER_HITSTOP_MAX * 1000.0 + 0.5, "player freeze %.1f ms <= 60 ms (hitstop %.0f ms)" % [p_ms, stop * 1000.0])
+		check(p_ms <= cap_ms + 0.5 and absf(p_ms - minf(stop * 1000.0, cap_ms)) <= 1000.0 / 120.0 + 0.5,
+			"player freeze %.1f ms (hitstop %.0f ms, cap %.0f ms)" % [p_ms, stop * 1000.0, cap_ms])
 		check(absf(b_ms - stop * 1000.0) <= 1000.0 / 120.0 + 0.5, "victim freeze %.1f ms (want %.0f)" % [b_ms, stop * 1000.0])
 	print("  longest player freeze: %.1f ms" % worst)
 
@@ -75,41 +78,23 @@ func run() -> void:
 	await ticks(10)
 	var frozen_seen := 0
 	var victim_frozen := 0
-	press(&"kick")
+	var hits := []
+	GameEvents.hit_landed.connect(func(info: HitInfo) -> void:
+		if info.attacker == p:
+			hits.append(info))
+	press(&"punch")
 	await ticks(1)
-	release(&"kick")
+	release(&"punch")
 	for i in 90:
 		await get_tree().physics_frame
 		if p.is_frozen():
 			frozen_seen += 1
 		if b.is_frozen():
 			victim_frozen += 1
-	print("  real kick: player frozen %.1f ms, victim %.1f ms (last freeze %.3f s)" % [frozen_seen / 0.12, victim_frozen / 0.12, p.last_freeze])
-	check(frozen_seen / 120.0 <= Tuning.PLAYER_HITSTOP_MAX + 0.5 / 120.0, "a real hit freezes the player <= 60 ms (%.1f ms)" % (frozen_seen / 0.12))
-	await wait_until(func() -> bool: return p.can_act(), 240)
-	await wait_until(func() -> bool: return not b.is_down(), 900)
-	await ticks(30)
-
-	# --- F4: Block pressed during the player's freeze fires when it ends. ---------------
-	print("Block during the freeze")
-	await wait_until(func() -> bool: return Engine.time_scale > 0.99, 240)
-	TimeDirector.hitstop([p, b], 0.15)
-	await ticks(2)
-	check(p.is_frozen(), "player frozen")
-	var t_press := TimeDirector.now()
-	press(&"block")
-	await ticks(1)
-	var guard_during := p.combat.is_blocking()
-	var freeze_end := -1.0
-	for i in 30:
-		if not p.is_frozen() and freeze_end < 0.0:
-			freeze_end = TimeDirector.now()
-		await get_tree().physics_frame
-	var t_def := p.defence.last_block_press_time()
-	print("  pressed at %.3f, freeze ended %.3f, Defence took the press at %.3f (guard during the freeze: %s)"
-		% [t_press, freeze_end, t_def, guard_during])
-	check(t_def >= freeze_end - 1e-4 and t_def <= freeze_end + 1.5 / 120.0,
-		"the Block press fired when the freeze ended (%.1f ms after the press)" % ((t_def - t_press) * 1000.0))
-	check(p.combat.is_blocking(), "the guard is up afterwards")
-	release(&"block")
+	var hs: float = (hits[0] as HitInfo).hitstop if not hits.is_empty() else 0.0
+	print("  real punch: hit %s (hitstop %.3f s), player frozen %.1f ms, victim %.1f ms (last freeze %.3f s)"
+		% [not hits.is_empty(), hs, frozen_seen / 0.12, victim_frozen / 0.12, p.last_freeze])
+	check(not hits.is_empty() and frozen_seen > 0, "a real punch lands and freezes the player")
+	check(frozen_seen / 120.0 <= Tuning.R7_PLAYER_HITSTOP_MAX + 0.5 / 120.0,
+		"a real hit freezes the player within the cap (%.1f ms)" % (frozen_seen / 0.12))
 	done()

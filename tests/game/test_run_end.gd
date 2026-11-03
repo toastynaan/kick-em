@@ -3,7 +3,8 @@ extends Node
 ## results screen. Waves: clear a wave, land a big hit, break a wall, take a
 ## limb, smash clutter and snap a pillar, then die: round_over(false), slow time at the player-death scale, the
 ## death camera on the body for the slow motion's 1 s, then the results screen
-## (waves cleared, kills, time, biggest hit P, walls broken, objects smashed,
+## (waves cleared, kills, time, biggest hit: the most damage in one player hit
+## with its move and reaction (Round 7), walls broken, objects smashed,
 ## structures brought down, limbs taken) and
 ## GameEvents.run_ended(stats) once, with the same stats. Restart from the
 ## results works. Duel: dying loses the round (DEFEATED), no run_ended.
@@ -49,22 +50,30 @@ func _run() -> void:
 	_gm.start_round(&"waves")
 	await _frames(3)
 
-	# Wave 1: three kills, one of them launched by a P 8.75 hit.
+	# Wave 1: three kills, one of them launched by a 21-damage roundhouse payoff.
 	var tps := Engine.physics_ticks_per_second
 	for i in int(20.0 * tps):
 		for f in _gm.get_alive_enemies():
 			if _gm.kills == 0:
+				var jab := HitInfo.new()
+				jab.attacker = _gm.player
+				jab.victim = f
+				jab.move_id = &"jab"
+				jab.react = &"snap"
+				jab.damage = 5.0
+				GameEvents.hit_landed.emit(jab)
 				var big := HitInfo.new()
 				big.attacker = _gm.player
 				big.victim = f
-				big.move_id = &"kick"
-				big.power = 8.75
-				big.tier = Power.tier_of(big.power)
+				big.move_id = &"roundhouse"
+				big.react = &"launch"
+				big.payoff = true
+				big.damage = 21.0
 				GameEvents.hit_landed.emit(big)
 				var small := HitInfo.new()
 				small.attacker = f
 				small.victim = _gm.player
-				small.power = 20.0  # an enemy's hit never counts as the player's biggest
+				small.damage = 40.0  # an enemy's hit never counts as the player's biggest
 				GameEvents.hit_landed.emit(small)
 				GameEvents.limb_severed.emit(f, &"arm_l", null)
 			f.apply_damage(f.max_hp + 10.0, &"test")
@@ -138,8 +147,9 @@ func _run() -> void:
 	_check(stats == _gm.menus.last_results, "the results screen shows run_ended's stats")
 	_check(int(stats.get("waves_cleared", -1)) == 1, "waves cleared 1")
 	_check(int(stats.get("kills", -1)) == kills_before + 1 and _gm.kills == 4, "kills %d" % int(stats.get("kills", -1)))
-	_check(is_equal_approx(float(stats.get("biggest_hit", 0.0)), 8.75) and stats.get("biggest_hit_tier") == &"hard_launch",
-		"biggest hit P 8.75 hard launch (%s %s)" % [stats.get("biggest_hit"), stats.get("biggest_hit_tier")])
+	_check(is_equal_approx(float(stats.get("biggest_hit", 0.0)), 21.0) and stats.get("biggest_hit_move") == &"roundhouse"
+		and stats.get("biggest_hit_react") == &"launch",
+		"biggest hit 21 roundhouse launch (%s %s %s)" % [stats.get("biggest_hit"), stats.get("biggest_hit_move"), stats.get("biggest_hit_react")])
 	_check(int(stats.get("walls_broken", -1)) >= 2, "walls broken %d (a panel and a pillar)" % int(stats.get("walls_broken", -1)))
 	_check(int(stats.get("objects_smashed", -1)) >= smashed and smashed == 2,
 		"objects smashed %d (2 clutter smashed by hand, plus anything the blasts broke)" % int(stats.get("objects_smashed", -1)))
@@ -157,7 +167,9 @@ func _run() -> void:
 	for c in _gm.menus._over_grid.get_children():
 		shown.append((c as Label).text)
 	print("    results screen: %s" % " | ".join(shown))
-	_check(shown.has("P 8.8  HARD LAUNCH"), "biggest hit row reads 'P 8.8  HARD LAUNCH'")
+	_check(shown.has("21  ROUNDHOUSE  LAUNCH"), "biggest hit row reads '21  ROUNDHOUSE  LAUNCH'")
+	_check(GameMenus.biggest_hit_text({"biggest_hit": 9.4, "biggest_hit_move": &"heavy_hook", "biggest_hit_react": &"spin"}) == "9  HEAVY HOOK"
+		and GameMenus.biggest_hit_text({}) == "-", "a hit with no knockdown or launch shows damage and move; no hit shows '-'")
 
 	# Restart from the results screen.
 	_gm.restart()

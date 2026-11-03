@@ -57,6 +57,22 @@ var ground_strike := false           ## stomp / knee drop on a body on the groun
 var pursuit := false                 ## pursuit follow-up (relaunch rule)
 var sever_cut: StringName = &""      ## Tier.SEVER: the Bones.CUTS key that came off
 
+# Round 7 (Freeflow combat). Player strikes fill these from Tuning.R7_MOVES /
+# R7_PAYOFFS; `tier` is still filled (the move's "tier") for older listeners.
+## Fighter.react kind applied: &"snap" | &"spin" | &"fold" | &"lift" | &"buckle" |
+## &"push" | &"repop" | &"knockdown" | &"launch" | &"spike" (a pursuit hit driven
+## straight down: applied as a launch, but listeners tell it apart); &"" = not a Round 7 hit.
+var react: StringName = &""
+var weight := 0.0                    ## 0..1: FX size, sound layer, camera punch
+var push := 0.0                      ## m
+var stun := 0.0                      ## s (heavy and anti-infinite multipliers already applied)
+var lift_height := 0.0               ## m: lift (R7_LIFT_HEIGHT or a payoff's "lift", heavy mult applied)
+var payoff := false                  ## the reaction came from R7_PAYOFFS (a state payoff)
+var victim_state: StringName = &""   ## the victim's react state when hit (Fighter.get_react_state)
+var chain_index := 0                 ## 1-based hit number in the attacker's chain
+var counter := false                 ## the counter move
+var drive := false                   ## a drive slam / bowl / break (Carry)
+
 static func tier_name(t: int) -> StringName:
 	return TIER_NAMES.get(t, &"none")
 

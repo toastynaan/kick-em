@@ -6,19 +6,23 @@ extends Node
 ##    the hand's velocity; it can be picked up (can_pick_up(), and through the
 ##    player's Carry, forced on for the test while G's switch is off); he
 ##    fights on with the grunt's moves.
-## B. Grunt: sidesteps a sprint attack aimed at him from more than
-##    Tuning.SIDESTEP_SPRINT_MIN_DIST Tuning.SIDESTEP_SPRINT_CHANCE of the
-##    time, never from closer, never a walking strike; heavies never sidestep.
-## C. Grunt: guards Tuning.GUARD_TAP_CHANCE of tapped strikes aimed at him
-##    (a plain guard, never a parry), never a charged one; stick and heavy never.
+## C. Grunt: guards Tuning.GUARD_TAP_CHANCE of the tapped punches aimed at
+##    him (Round 7's jab, cross, hook), never a guard breaker (heavies, gut
+##    punch, uppercut, kicks) nor an older charged strike; a plain guard,
+##    never a parry; stick and heavy never.
 ## D. Breaking the player's grab (G's Carry asks wants_grab_break): per
-##    archetype rate (heavies more), never while stunned or fleeing, likelier
-##    for each recent grab on him.
+##    archetype rate (heavies more), never while stunned, reacting or
+##    fleeing, likelier for each recent grab on him; Round 7: never once the
+##    clinch has connected (the grabber holds the body) nor during a drive.
+## (Round 7 removed part B, the sidestep of sprint strikes.)
 ## OWNER: agent C (AI tests).
 
 const Util := preload("res://tests/ai/ai_test_util.gd")
-const SIDESTEP_TRIALS := 200
+const FakeCarry := preload("res://tests/ai/fake_carry.gd")
 const GUARD_TRIALS := 300
+## Round 7 player moves that break a guard (Tuning.R7_MOVES "guard_break").
+const BREAKERS: Array[StringName] = [&"heavy_jab", &"heavy_cross", &"heavy_hook", &"gut_punch", &"uppercut",
+	&"leg_kick", &"front_kick", &"roundhouse"]
 
 var failures := 0
 var player: Fighter
@@ -41,7 +45,6 @@ func _run() -> void:
 	AttackDirector.set_player(player)
 	await _wait(0.2)
 	await _part_stick()
-	await _part_sidestep()
 	await _part_guard()
 	await _part_grab_break()
 	_finish()
@@ -56,7 +59,6 @@ func _part_stick() -> void:
 	var mesh := brain.get_weapon_mesh()
 	check(brain.has_stick() and mesh != null and mesh.get_parent() == att and mesh.visible and mesh.layers == Layers.VIS_CHARACTERS,
 		"stick enemy holds a visible stick on his right hand attachment")
-	check(mesh != null and mesh.is_in_group(AIBrain.FOCUS_KEEP_GROUP), "the held stick keeps its colour (and glow) in the Focus tint (group %s)" % AIBrain.FOCUS_KEEP_GROUP)
 	if mesh:
 		var tip := mesh.global_transform * Vector3(0, AIBrain.STICK_LENGTH * 0.5, 0)
 		print("[ai] info: stick length %.2f m, tip %.2f m from the fist" % [AIBrain.STICK_LENGTH,
@@ -148,52 +150,6 @@ func _part_stick() -> void:
 	e.queue_free()
 	await _wait(0.2)
 
-# --- B. Sidesteps -------------------------------------------------------------------
-
-func _part_sidestep() -> void:
-	player.global_position = Vector3(0, 0.05, 0)
-	player.reset_physics_interpolation()
-	var g := FighterFactory.spawn_enemy(self, &"grunt", Transform3D(Basis.from_euler(Vector3(0, PI, 0)), Vector3(0, 0.05, -6.0)))
-	var h := FighterFactory.spawn_enemy(self, &"heavy", Transform3D(Basis.from_euler(Vector3(0, PI, 0)), Vector3(4, 0.05, -6.0)))
-	await _wait(0.5)
-	var gb := g.brain as AIBrain
-	var hb := h.brain as AIBrain
-	# One sidestep, measured.
-	var moved := 0.0
-	for i in 40:
-		await _reset_at(g, Vector3(0, 0.05, -6.0))
-		var before := gb.sidesteps
-		var p0 := g.get_ground_position()
-		GameEvents.strike_started.emit(player, g, &"jab1", true, 1)
-		if gb.sidesteps > before:
-			await _wait(AIBrain.SPRINT_SIDESTEP_TIME + 0.05)
-			moved = Util.flat_dist(g.get_ground_position(), p0)
-			break
-	check(moved >= 1.2, "a sidestep moves him %.2f m out of the line (>= 1.2)" % moved)
-	var far := await _sidestep_rate(g, gb, Vector3(0, 0.05, -6.0), true, SIDESTEP_TRIALS)
-	var p := float(far) / SIDESTEP_TRIALS
-	check(absf(p - Tuning.SIDESTEP_SPRINT_CHANCE) <= 0.1,
-		"grunt sidesteps %d of %d sprint attacks from 6 m (%.0f%%, target %.0f%%)" % [far, SIDESTEP_TRIALS, p * 100.0, Tuning.SIDESTEP_SPRINT_CHANCE * 100.0])
-	var near := await _sidestep_rate(g, gb, Vector3(0, 0.05, -3.0), true, 60)
-	check(near == 0, "never from within %.0f m (%d of 60 at 3 m)" % [Tuning.SIDESTEP_SPRINT_MIN_DIST, near])
-	var walking := await _sidestep_rate(g, gb, Vector3(0, 0.05, -6.0), false, 60)
-	check(walking == 0, "never a walking strike (%d of 60)" % walking)
-	var heavy := await _sidestep_rate(h, hb, Vector3(4, 0.05, -6.0), true, 100)
-	check(heavy == 0, "heavies never sidestep (%d of 100)" % heavy)
-	g.queue_free()
-	h.queue_free()
-	await _wait(0.2)
-
-func _sidestep_rate(f: Fighter, b: AIBrain, at: Vector3, sprint: bool, n: int) -> int:
-	var count := 0
-	for i in n:
-		await _reset_at(f, at)
-		var before := b.sidesteps
-		GameEvents.strike_started.emit(player, f, &"jab1", sprint, 1)
-		if b.sidesteps > before:
-			count += 1
-	return count
-
 # --- C. Tap guards ------------------------------------------------------------------
 
 func _part_guard() -> void:
@@ -206,10 +162,11 @@ func _part_guard() -> void:
 	var gb := g.brain as AIBrain
 	var guards := 0
 	var blocked_up := 0
+	var taps: Array[StringName] = Tuning.R7_PUNCH_STRING
 	for i in GUARD_TRIALS:
 		await _clear_guard(g, gb)
 		var before := gb.tap_guards
-		GameEvents.strike_started.emit(player, g, &"jab1", false, 0)
+		GameEvents.strike_started.emit(player, g, taps[i % taps.size()], false, 0)
 		if gb.tap_guards > before:
 			guards += 1
 			await get_tree().physics_frame
@@ -217,22 +174,30 @@ func _part_guard() -> void:
 				blocked_up += 1
 	var p := float(guards) / GUARD_TRIALS
 	check(absf(p - Tuning.GUARD_TAP_CHANCE) <= 0.07,
-		"grunt guards %d of %d tapped strikes (%.0f%%, target %.0f%%)" % [guards, GUARD_TRIALS, p * 100.0, Tuning.GUARD_TAP_CHANCE * 100.0])
+		"grunt guards %d of %d tapped punches (jab, cross, hook: %.0f%%, target %.0f%%)" % [guards, GUARD_TRIALS, p * 100.0, Tuning.GUARD_TAP_CHANCE * 100.0])
 	check(guards > 0 and blocked_up == guards, "every guard raises his block at once (%d / %d)" % [blocked_up, guards])
+	var breakers := 0
+	for i in 160:
+		await _clear_guard(g, gb)
+		var before := gb.tap_guards
+		GameEvents.strike_started.emit(player, g, BREAKERS[i % BREAKERS.size()], false, 0)
+		if gb.tap_guards > before:
+			breakers += 1
+	check(breakers == 0, "never raises a tap guard against a guard breaker (heavies, gut punch, uppercut, kicks: %d of 160)" % breakers)
 	var charged := 0
 	for i in 100:
 		await _clear_guard(g, gb)
 		var before := gb.tap_guards
-		GameEvents.strike_started.emit(player, g, &"cross", false, 2)
+		GameEvents.strike_started.emit(player, g, &"jab1", false, 2)
 		if gb.tap_guards > before:
 			charged += 1
-	check(charged == 0, "never guards a charged strike (%d of 100)" % charged)
+	check(charged == 0, "never guards an older charged strike (%d of 100)" % charged)
 	var others := 0
 	for f: Fighter in [s, h]:
 		var fb := f.brain as AIBrain
 		for i in 60:
 			var before := fb.tap_guards
-			GameEvents.strike_started.emit(player, f, &"jab1", false, 0)
+			GameEvents.strike_started.emit(player, f, &"jab", false, 0)
 			others += fb.tap_guards - before
 	check(others == 0, "stick enemy and heavy never tap-guard (%d)" % others)
 	# Real jabs: B's strike_started reaches the brain, a guard is a plain guard.
@@ -243,7 +208,8 @@ func _part_guard() -> void:
 		if d == g: parried[0] += 1
 	var on_block := func(i: HitInfo) -> void:
 		if i.victim == g: blocked[0] += 1
-	GameEvents.parried.connect(on_parry)
+	if GameEvents.has_signal(&"parried"):
+		GameEvents.connect(&"parried", on_parry)
 	GameEvents.hit_blocked.connect(on_block)
 	var before_real := gb.tap_guards
 	for i in 40:
@@ -259,7 +225,8 @@ func _part_guard() -> void:
 		await _wait(0.45)
 		if player.hp < player.max_hp * 0.5:
 			player.heal_fraction(1.0)
-	GameEvents.parried.disconnect(on_parry)
+	if GameEvents.has_signal(&"parried"):
+		GameEvents.disconnect(&"parried", on_parry)
 	GameEvents.hit_blocked.disconnect(on_block)
 	var real_guards := gb.tap_guards - before_real
 	print("[ai] info: 40 real jabs: %d tap guards, %d blocked hits, %d parries" % [real_guards, blocked[0], parried[0]])
@@ -303,6 +270,42 @@ func _part_grab_break() -> void:
 			fb += 1
 	check(stunned == 0.0 and fb == 0, "never breaks while stunned (chance %.2f, %d of 50)" % [stunned, fb])
 	await _settle(g)
+	# Round 7: once the clinch has connected, or while the holder drives, never.
+	var holder := FighterFactory.spawn_dummy(self, &"player", Transform3D(Basis(), Vector3(8, 0.05, 8)), Fighter.TEAM_PLAYER)
+	var fake: Carry = FakeCarry.new()
+	fake.name = "FakeCarry"
+	holder.add_child(fake)
+	holder.carry = fake
+	await get_tree().physics_frame
+	var hb := h.brain as AIBrain
+	hb.grab_break_override = 1.0
+	var rows: Array[String] = []
+	var gate_ok := true
+	for state: Array in [[false, false, 1], [true, false, 0], [false, true, 0], [true, true, 0]]:
+		fake.set(&"fake_holding_body", state[0])
+		fake.set(&"fake_driving", state[1])
+		var n := 0
+		for i in 50:
+			if hb.wants_grab_break(holder):
+				n += 1
+		var want: int = 50 * int(state[2])
+		gate_ok = gate_ok and n == want
+		rows.append("connected %s driving %s: %d/50" % [state[0], state[1], n])
+	hb.grab_break_override = -1.0
+	check(gate_ok, "no break attempt once the clinch has connected or during a drive (break chance forced to 1: %s)" % "; ".join(rows))
+	holder.queue_free()
+	# Reacting (Round 7): a reacting body connects at once (FakeFighter's forced state).
+	var fe := Util.spawn_fake_enemy(self, &"grunt", Vector3(-6, 0.05, -4))
+	await _wait(0.2)
+	var feb := fe.brain as AIBrain
+	fe.set(&"fake_reacting", true)
+	var react_n := 0
+	for i in 50:
+		if feb.wants_grab_break(player):
+			react_n += 1
+	check(feb.grab_break_chance() == 0.0 and react_n == 0, "never breaks while reacting (chance %.2f, %d of 50)" % [feb.grab_break_chance(), react_n])
+	fe.set(&"fake_reacting", false)
+	fe.queue_free()
 	g.sever_limb(&"leg_r")
 	await get_tree().physics_frame
 	check(gb.is_fleeing() and gb.grab_break_chance() == 0.0, "never breaks while fleeing")
@@ -311,20 +314,6 @@ func _part_grab_break() -> void:
 	await _wait(0.2)
 
 # --- Helpers -------------------------------------------------------------------------
-
-## Stand `f` at `at` facing the player, recovered and calm (no sidestep running).
-func _reset_at(f: Fighter, at: Vector3) -> void:
-	var b := f.brain as AIBrain
-	var t0 := Util.game_now()
-	while (not f.can_act() or b._time < b._sidestep_until) and Util.game_now() - t0 < 2.0:
-		await get_tree().physics_frame
-	f.clear_forced_velocity()
-	f.global_position = at
-	f.reset_physics_interpolation()
-	var to := player.get_ground_position() - at
-	to.y = 0.0
-	f.snap_facing(to)
-	await get_tree().physics_frame
 
 func _clear_guard(f: Fighter, b: AIBrain) -> void:
 	b._tap_guard_until = -INF

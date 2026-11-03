@@ -2,7 +2,7 @@ extends "res://tests/input/input_test_base.gd"
 ## Fighter.sever_limb (Round 5, agent H; A cuts the rig, B calls it on a
 ## severing launch and adds Tuning.LIMB_LOST_DAMAGE): a whole arm or leg comes
 ## off an enemy, GameEvents.limb_severed carries the loose limb, the lost
-## bones' hurtboxes switch off and zone aim skips them; at most MAX_SEVERS per
+## bones' hurtboxes switch off; at most MAX_SEVERS per
 ## body; the player never loses a limb; nothing comes off with gore below
 ## DISMEMBER; a corpse is no longer dismembered by impact energy.
 
@@ -31,12 +31,6 @@ func run() -> void:
 			if hb.monitorable:
 				arm_boxes_on += 1
 	check(arm_boxes_on == 0, "the lost arm's hurtboxes are off")
-	var caps := ZoneAim.capsules_of(g)
-	var arm_caps := 0
-	for c in caps:
-		if String(c[0]).begins_with("Right") and String(c[0]).contains("Arm"):
-			arm_caps += 1
-	check(arm_caps == 0, "zone aim has no capsule on the lost arm (%d)" % arm_caps)
 	check(not g.sever_limb(&"arm_r") and not g.sever_limb(&"forearm_r"), "the same limb never comes off twice")
 	check(g.sever_limb(&"leg_l"), "a leg comes off")
 	check(g.has_lost_leg() and got.size() == 2, "lost a leg")

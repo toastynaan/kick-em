@@ -1,132 +1,94 @@
 extends "res://tests/combat/combat_test_base.gd"
-## Anti-infinite unit checks: stun decay per hit, the victim count shared by
-## two attackers (damage scaling per victim), the juggle relaunch cap, a short
-## string still at full stun, and the break-away hit itself. Round 5: the stun
-## of a hit is its tier's act-again time (Tuning.REACT_*), and only a strike
-## with P in the launch band relaunches a flying body.
+## Anti-infinite, Round 7 (docs/Round 7 — Freeflow Combat.md: Hit feel): per
+## victim, from anyone; the stun of a player strike shrinks from hit
+## R7_COMBO_STUN_DECAY_FROM by R7_COMBO_STUN_DECAY per hit down to
+## R7_COMBO_STUN_MIN; the hit that would be number R7_COMBO_ESCAPE_HITS breaks
+## the victim away (damage, no stun, pushed apart, a short auto-guard); the
+## damage keeps the combo scaling (combo_scale) by the victim's count, shared
+## by two attackers; enemy hits on the player keep the Round 5 decay.
 
-const L := CombatController.Action.LIGHT
+const AimBrain := preload("res://tests/combat/aim_brain.gd")
 
 func _init() -> void:
 	_timeout = 90.0
 
 func run() -> void:
-	print("stun decay per hit")
+	print("Round 7 stun decay per hit")
 	var d: Array = []
-	for n in range(1, 10):
-		d.append(snappedf(CombatController.stun_decay(n), 0.001))
-	var want := [1.0, 1.0, 1.0, 0.85, 0.7, 0.55, 0.4, 0.4, 0.4]
-	var same := true
-	for i in want.size():
-		same = same and absf(float(d[i]) - float(want[i])) < 0.001
-	check(same, "decay per hit %s" % [d])
+	var want: Array = []
+	for n in range(1, 13):
+		d.append(snappedf(CombatController.r7_stun_decay(n), 0.001))
+		var w := 1.0
+		if n >= Tuning.R7_COMBO_STUN_DECAY_FROM:
+			w = maxf(Tuning.R7_COMBO_STUN_MIN, 1.0 - Tuning.R7_COMBO_STUN_DECAY * float(n - Tuning.R7_COMBO_STUN_DECAY_FROM + 1))
+		want.append(snappedf(w, 0.001))
+	print("  hits 1-12: %s" % [d])
+	check(d == want and is_equal_approx(float(d[Tuning.R7_COMBO_STUN_DECAY_FROM - 2]), 1.0)
+		and float(d[Tuning.R7_COMBO_STUN_DECAY_FROM - 1]) < 1.0, "full stun to hit %d, then the decay" % (Tuning.R7_COMBO_STUN_DECAY_FROM - 1))
 
-	print("the victim count is shared by two attackers")
-	var a1 := spawn(&"player", Vector3(0, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var a2 := spawn(&"player", Vector3(0.9, 0, -0.9), Vector3.LEFT, Fighter.TEAM_PLAYER)
+	print("a chain of player strikes: stun x decay on HitInfo.stun, the break-away at hit %d" % Tuning.R7_COMBO_ESCAPE_HITS)
+	var p := spawn_fake(&"player", Vector3(0, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
 	var g := spawn(&"grunt", Vector3(0, 0, -1.0), Vector3.BACK)
+	g.max_hp = 1000.0
+	g.hp = 1000.0
 	await ticks(12)
-	var hits: Array = []
-	GameEvents.hit_landed.connect(func(i: HitInfo) -> void:
-		if i.victim == g: hits.append(i))
-	for att: Fighter in [a1, a2, a1]:
-		var n0 := hits.size()
-		att.combat.press(L)
-		await wait_until(func() -> bool: return hits.size() > n0, 1.0)
-		await wait_real(0.15)
-	check(hits.size() == 3 and g.combat.hits_taken() == 3, "3 hits from two attackers: victim count %d" % g.combat.hits_taken())
-	if hits.size() == 3:
-		check(is_equal_approx((hits[2] as HitInfo).damage_scale, CombatController.combo_scale(3)),
-			"the 3rd hit (first attacker again) is scaled as hit 3: x%.1f" % (hits[2] as HitInfo).damage_scale)
-		check(a1.combat.get_combo_count() == 2 and a2.combat.get_combo_count() == 1, "the HUD combo counter stays per attacker")
-	await wait_real(1.5)
-
-	print("a short string plays at full stun")
-	var p := spawn(&"player", Vector3(8, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var g2 := spawn(&"grunt", Vector3(8, 0, -1.0), Vector3.BACK)
-	await ticks(12)
-	var stuns: Array = []
-	GameEvents.hit_landed.connect(func(i: HitInfo) -> void:
-		if i.victim == g2: stuns.append([i.move_id, g2.combat._stun_left]))
-	for k in 4:
-		var n0 := stuns.size()
-		p.combat.press(L)
-		await wait_until(func() -> bool: return stuns.size() > n0, 1.0)
-		await wait_real(0.12)
-	print("  stun after each hit: ", stuns)
-	# jab, jab (flinches), elbow (the finisher: a stagger), then a new string's jab.
-	var flinch: float = Tuning.REACT_FLINCH["act"]
-	var base := {&"jab1": flinch, &"jab2": flinch, &"elbow": float(Tuning.REACT_STAGGER["act"])}
-	var full := stuns.size() >= 3
-	for i in mini(3, stuns.size()):
-		full = full and absf(float(stuns[i][1]) - float(base[stuns[i][0]])) < 0.02
-	check(full, "hits 1-3 (jab, jab, elbow) at full stun")
-	if stuns.size() >= 4:
-		check(absf(float(stuns[3][1]) - float(base[stuns[3][0]]) * CombatController.stun_decay(4)) < 0.02,
-			"hit 4 at x%.2f stun" % CombatController.stun_decay(4))
-	await wait_real(1.5)
-
-	print("juggle relaunch cap")
-	var pj := spawn(&"player", Vector3(16, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var gj := spawn(&"grunt", Vector3(16, 0, -1.0), Vector3.BACK)
-	gj.max_hp = 1000.0  # survives the landing from the juggle; the test needs it to get up
-	gj.hp = gj.max_hp
-	await ticks(12)
-	gj.launch(Vector3(0, 6, 0), gj.get_center_of_mass(), &"Chest")
-	await wait_real(0.15)
-	# A level-3 kick (P 8) on the flying body: a relaunch. A jab (P 1): a nudge.
-	pj.combat._move = MoveLibrary.get_move(&"sparta_kick")
-	pj.combat._strike_class = &"kick"
-	pj.combat._move_charge = 3
-	var info := pj.combat._build_hit(gj, &"Chest", gj.get_center_of_mass())
-	check(info.juggle and HitInfo.is_launch_tier(info.tier), "a launch-band hit on the flying body relaunches it (%s)" % info)
-	gj.combat.juggle_relaunches = Tuning.JUGGLE_MAX_RELAUNCH
-	info = pj.combat._build_hit(gj, &"Chest", gj.get_center_of_mass())
-	check(not info.juggle and info.tier == HitInfo.Tier.FLINCH and info.get_meta(&"juggle_capped", false) \
-		and info.has_meta(&"nudge"), "after %d relaunches: a nudge and damage only, the body falls" % Tuning.JUGGLE_MAX_RELAUNCH)
-	gj.combat.juggle_relaunches = 0
-	pj.combat._move = MoveLibrary.get_move(&"jab1")
-	pj.combat._strike_class = &"jab"
-	pj.combat._move_charge = 0
-	info = pj.combat._build_hit(gj, &"Chest", gj.get_center_of_mass())
-	check(not info.juggle and info.has_meta(&"nudge"), "a jab (P 1) only nudges a flying body")
-	gj.combat.juggle_relaunches = 0
-	var r0 := gj.combat.juggle_relaunches
-	var real := HitInfo.new()
-	real.attacker = pj
-	real.move_id = &"jab1"
-	real.kind = &"strike"
-	real.reaction = HitInfo.Reaction.LAUNCH
-	real.juggle = true
-	real.launch_velocity = Vector3(0, 3, -3)
-	real.damage = 1.0
-	real.hit_direction = Vector3.FORWARD
-	gj.take_hit(real)
-	check(gj.combat.juggle_relaunches == r0 + 1, "a juggle relaunch is counted on the victim")
-	var up := await wait_until(func() -> bool: return not gj.is_down(), 8.0)
-	await ticks(2)
-	check(up and gj.combat.juggle_relaunches == 0, "the count resets when the body gets up (up=%s)" % up)
-
-	print("the break-away hit")
-	var pb := spawn(&"player", Vector3(24, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
-	var gb := spawn(&"grunt", Vector3(24, 0, -1.0), Vector3.BACK)
-	await ticks(12)
-	clear_events()
 	var esc := [false]
 	GameEvents.combo_escaped.connect(func(v: Node3D, a: Node3D) -> void:
-		if v == gb and a == pb: esc[0] = true)
-	gb.combat._taken = Tuning.COMBO_ESCAPE_HITS - 1
-	gb.combat._taken_last = TimeDirector.now()
-	var hp0 := gb.hp
-	var z0 := gb.global_position.z
-	pb.combat.press(L)
-	await wait_until(func() -> bool: return esc[0], 1.0)
-	check(esc[0], "hit %d breaks the victim away (combo_escaped)" % Tuning.COMBO_ESCAPE_HITS)
-	check(gb.hp < hp0 and not gb.combat.is_stunned(), "it deals damage and no stun")
-	check(gb.combat.hits_taken() == 0, "the victim count resets")
-	await wait_real(0.3)
-	check(gb.global_position.z < z0 - Tuning.COMBO_ESCAPE_PUSH * 0.5, "pushed back %.2f m" % (z0 - gb.global_position.z))
-	pb.combat.press(L)
-	await wait_until(func() -> bool: return gb.combat.last_result == HitInfo.Result.BLOCKED, 0.5)
-	check(gb.combat.last_result == HitInfo.Result.BLOCKED and not gb.combat.is_stunned(), "auto-guard: the next frontal jab is blocked without stun")
+		if v == g and a == p: esc[0] = true)
+	clear_events()
+	var stuns: Array = []
+	for k in Tuning.R7_COMBO_ESCAPE_HITS:
+		await wait_until(func() -> bool: return not p.combat.is_attacking(), 2.0)
+		var n0 := hits_on(g).size()
+		place_in_front(p, g, 1.0)
+		p.combat.play_move(&"gut_punch", g)
+		await wait_until(func() -> bool: return hits_on(g).size() > n0, 1.5)
+		var h: HitInfo = hits_on(g)[n0] if hits_on(g).size() > n0 else null
+		stuns.append(snappedf(h.stun, 0.001) if h else -1.0)
+		if esc[0]:
+			break
+	var base := float(Tuning.R7_MOVES[&"gut_punch"]["stun"])
+	print("  gut punch stuns: %s (base %.2f)" % [stuns, base])
+	var ok := stuns.size() == Tuning.R7_COMBO_ESCAPE_HITS
+	for i in mini(stuns.size(), Tuning.R7_COMBO_ESCAPE_HITS - 1):
+		ok = ok and absf(float(stuns[i]) - base * CombatController.r7_stun_decay(i + 1)) < 0.002
+	check(ok, "hits 1-%d at the decayed stun" % (Tuning.R7_COMBO_ESCAPE_HITS - 1))
+	check(esc[0] and stuns.size() == Tuning.R7_COMBO_ESCAPE_HITS and float(stuns[-1]) == 0.0,
+		"hit %d breaks the victim away with no stun" % Tuning.R7_COMBO_ESCAPE_HITS)
+	var last: HitInfo = hits_on(g)[-1] if not hits_on(g).is_empty() else null
+	check(last != null and last.has_meta(&"escaped") and last.damage > 0.0, "the break-away hit still deals damage")
+	check(g.combat.hits_taken() == 0, "the victim count resets")
+	await wait_until(func() -> bool: return not p.combat.is_attacking(), 2.0)
+	place_in_front(p, g, 1.0)
+	p.combat.play_move(&"jab", g)
+	await wait_until(func() -> bool: return g.combat.last_result == HitInfo.Result.BLOCKED, 0.8)
+	check(g.combat.last_result == HitInfo.Result.BLOCKED, "auto-guard: the next frontal jab is blocked")
+	await wait_real(1.5)
+
+	print("the victim count is shared by two attackers (damage scaling per victim)")
+	var a1 := spawn_fake(&"player", Vector3(10, 0, 0), Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var a2 := spawn_fake(&"player", Vector3(10.9, 0, -0.9), Vector3.LEFT, Fighter.TEAM_PLAYER)
+	var g2 := spawn(&"grunt", Vector3(10, 0, -1.0), Vector3.BACK)
+	await ticks(12)
+	clear_events()
+	for att: Fighter in [a1, a2, a1]:
+		var n0 := hits_on(g2).size()
+		await wait_until(func() -> bool: return not att.combat.is_attacking(), 1.5)
+		att.combat.play_move(&"jab", g2)
+		await wait_until(func() -> bool: return hits_on(g2).size() > n0, 1.0)
+		await wait_real(0.1)
+	var hs := hits_on(g2)
+	check(hs.size() == 3 and g2.combat.hits_taken() == 3, "3 hits from two attackers: victim count %d" % g2.combat.hits_taken())
+	if hs.size() == 3:
+		check(is_equal_approx(hs[2].damage_scale, CombatController.combo_scale(3))
+			and is_equal_approx(hs[2].damage, float(Tuning.R7_MOVES[&"jab"]["dmg"]) * CombatController.combo_scale(3)),
+			"the 3rd hit (first attacker again) is scaled as hit 3: x%.1f" % hs[2].damage_scale)
+		check(hs[2].chain_index == 2 and hs[1].chain_index == 1, "the chain (HUD counter) stays per attacker")
+
+	print("enemy hits on the player keep the Round 5 decay")
+	var r5: Array = []
+	for n in range(1, 8):
+		r5.append(snappedf(CombatController.stun_decay(n), 0.001))
+	check(is_equal_approx(CombatController.stun_decay(Tuning.COMBO_STUN_DECAY_FROM - 1), 1.0)
+		and CombatController.stun_decay(Tuning.COMBO_STUN_DECAY_FROM) < 1.0, "Round 5 decay %s" % [r5])
 	done()

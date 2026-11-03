@@ -11,8 +11,10 @@ shader_type spatial;
 // Round 5 (BloodFX): jitter, a world-space offset that shakes the victim's mesh
 // 2-4 cm during the hitstop freeze (Feel Reference: Contact frame, item 2).
 // Purely visual: physics never sees it.
-// Upgrade 2 (BloodFX): glow (limb-glow tells, charge), highlight (aimed body
-// zone) and view_fade (screen-door fade of a fighter that blocks the camera).
+// Upgrade 2 (BloodFX): glow (limb-glow tells, charge; Round 7: the counter's
+// caught limb and the throw wind-up), highlight (the aimed-zone highlight; no
+// writer since Round 7 removed zone aiming, kept as a contract name) and
+// view_fade (screen-door fade of a fighter that blocks the camera).
 
 render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
 

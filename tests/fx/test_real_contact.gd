@@ -1,16 +1,22 @@
 extends Node3D
 ## Integration: the effects against the real game. A real player strikes real
-## grunts through CombatController (tap jab, tap kick, a level-3 charged kick);
-## every hit_landed B emits must get its flash, impact sound and blood on that
-## physics frame, sized by B's tier; the charged kick must show the charge glow
-## rising with the level, a long whoosh, a strike trail during its active
-## frames, a shock ring and the screen flash. Skips (with a note) whatever the
-## other modules have not landed yet. OWNER: agent F.
+## grunts through CombatController: a tapped jab, a held (heavy) jab and a
+## roundhouse. Every hit_landed B emits must get its flash, sound and blood on
+## that physics frame. Round 7 hits (HitInfo.react set) must follow their
+## weight: the flash size, the sound layers (the thump exactly from 0.6), the
+## screen flash (from 0.7 or a launch) and push dust (pushes of 1 m or more),
+## and the roundhouse must flash bigger and play more layers than the jab.
+## Hits from a B that has not landed Round 7 yet follow the tier rules (noted).
+## Then a real dodge through the player's Traversal (M): on its dodged frame,
+## the whoosh, the dust kick and an after-image where it started.
+## Skips (with a note) whatever the other modules have not landed yet.
+## OWNER: agent F.
 
 const U := preload("res://tests/fx/fx_test_util.gd")
+const HOLD := 0.35               ## s a held punch is kept down (past Tuning.R7_HOLD_THRESHOLD)
 
 var hits: Array[Dictionary] = []
-var played: Array[StringName] = []
+var played: Array = []           ## [id, physics frame]
 
 func _ready() -> void:
 	var errlog := U.ErrorLogger.new()
@@ -21,11 +27,17 @@ func _ready() -> void:
 	U.make_floor(self)
 	if not await U.wait_audio(get_tree()):
 		fails.append("AudioFX never finished synthesising")
-	AudioFX.sound_played.connect(func(id: StringName, _p: Vector3) -> void: played.append(id))
+	AudioFX.sound_played.connect(func(id: StringName, _p: Vector3) -> void: played.append([id, Engine.get_physics_frames()]))
+	var ff: Node = BloodFX.get_freeflow_fx()
 	GameEvents.hit_landed.connect(func(info: HitInfo) -> void:
-		hits.append({"frame": Engine.get_physics_frames(), "tier": info.tier, "power": info.power,
-			"move": info.move_id, "fx": BloodFX.contact_log.back() if not BloodFX.contact_log.is_empty() else {},
-			"snd": AudioFX.hit_sounds.back() if not AudioFX.hit_sounds.is_empty() else {}}))
+		if info.attacker == null or not info.attacker.is_in_group(&"player"):
+			return
+		var frame := Engine.get_physics_frames()
+		var scr: bool = not ScreenFX.flash_log.is_empty() and ScreenFX.flash_log.back()["frame"] == frame
+		var log: Array = ff.get(&"effect_log")
+		var dust: bool = not log.is_empty() and log.back()["event"] == &"push_dust" and log.back()["frame"] == frame
+		hits.append({"frame": frame, "info": info, "fx": BloodFX.contact_log.back() if not BloodFX.contact_log.is_empty() else {},
+			"snd": AudioFX.hit_sounds.back() if not AudioFX.hit_sounds.is_empty() else {}, "screen": scr, "dust": dust}))
 	var p: Node3D = FighterFactory.spawn_dummy(self, &"player", Transform3D(Basis.looking_at(Vector3.FORWARD), Vector3.ZERO), 0)
 	if not p.is_in_group(&"player"):
 		p.add_to_group(&"player")
@@ -36,64 +48,113 @@ func _ready() -> void:
 		U.finish(get_tree(), "test_real_contact", fails, errlog)
 		return
 
-	var A := CombatController.Action
-	for spec in [["tap jab", A.LIGHT, 0.0], ["tap kick", A.KICK, 0.0], ["charged kick", A.KICK, 1.05]]:
+	var A: Dictionary = CombatController.Action
+	# ROUNDHOUSE is Round 7's; an older CombatController kicks with KICK.
+	var kick: int = A.get("ROUNDHOUSE", A.get("KICK", -1))
+	var r7_flash := {}
+	var r7_layers := {}
+	for spec in [["tap jab", A["LIGHT"], 0.0], ["held jab", A["LIGHT"], HOLD], ["roundhouse", kick, 0.0]]:
+		if int(spec[1]) < 0:
+			print("note: no %s action; skipped" % spec[0])
+			continue
 		var g: Node3D = FighterFactory.spawn_dummy(self, &"grunt",
 				Transform3D(Basis.looking_at(Vector3.BACK), Vector3(0, 0, -1.2)), 1)
 		await U.physics_frames(get_tree(), 20)
 		hits.clear()
 		played.clear()
-		var levels: Array[String] = []
-		var trail_seen := 0
-		if spec[2] > 0.0:
-			if "force_hold_charge" in combat:
-				combat.set(&"force_hold_charge", true)
-			combat.call(&"press", spec[1])
-			var t0 := TimeDirector.now()
-			var next := 0.15
-			while TimeDirector.now() - t0 < spec[2]:
+		combat.call(&"press", spec[1])
+		if float(spec[2]) > 0.0:
+			var th := TimeDirector.now()
+			while TimeDirector.now() - th < float(spec[2]):
 				await get_tree().physics_frame
-				if TimeDirector.now() - t0 >= next:
-					next += 0.3
-					var glow := BloodFX.get_charge_glow(p)
-					levels.append("%.2f" % (glow.call(&"get_level") if glow else -1.0))
-			combat.call(&"release", spec[1])
-			if "force_hold_charge" in combat:
-				combat.set(&"force_hold_charge", false)
-		else:
-			combat.call(&"press", spec[1])
-			combat.call(&"release", spec[1])
+		combat.call(&"release", spec[1])
 		var t1 := TimeDirector.now()
 		while hits.is_empty() and TimeDirector.now() - t1 < 1.5:
 			await get_tree().process_frame
-			trail_seen = maxi(trail_seen, int(ScreenFX.get_trails().call(&"stats")["strike"]))
 		if hits.is_empty():
 			print("note: %s landed no hit (B's strike did not connect); skipped" % spec[0])
 			g.queue_free()
 			continue
 		var h: Dictionary = hits[0]
+		var info: HitInfo = h["info"]
 		var fx: Dictionary = h["fx"]
 		var snd: Dictionary = h["snd"]
-		var scr: bool = not ScreenFX.flash_log.is_empty() and ScreenFX.flash_log.back()["frame"] == h["frame"]
-		print("%s: %s P %.2f tier %s at frame %d -> flash frame %s ring %s blood %s, sound %s frame %s, screen flash %s; whooshes %s; charge glow by 0.3 s %s; strike trail channels %d" % [
-			spec[0], h["move"], h["power"], HitInfo.tier_name(h["tier"]), h["frame"], fx.get("frame", -1),
-			fx.get("ring", false), fx.get("blood", false), snd.get("id", &"-"), snd.get("frame", -1), scr,
-			played.filter(func(s: StringName) -> bool: return String(s).begins_with("whoosh")), levels, trail_seen])
+		var on_frame: Array = played.filter(func(e: Array) -> bool: return e[1] == h["frame"]).map(
+				func(e: Array) -> StringName: return e[0])
+		var r7 := FXRules.is_round7(info)
+		print("%s: %s react %s weight %.2f push %.1f m tier %s at frame %d -> flash frame %s (%.2f m), sound frame %s %s, blood %s, screen flash %s, push dust %s; played %s" % [
+			spec[0], info.move_id, info.react if r7 else &"-", info.weight, info.push, HitInfo.tier_name(info.tier),
+			h["frame"], fx.get("frame", -1), fx.get("flash_size", 0.0), snd.get("frame", -1),
+			snd.get("layers", [snd.get("id", &"-")]), fx.get("blood", false), h["screen"], h["dust"], on_frame])
 		if fx.get("frame", -1) != h["frame"] or snd.get("frame", -1) != h["frame"]:
 			fails.append("%s: effects not on the hit frame" % spec[0])
-		if snd.get("id", &"") != AudioFX.TIER_SOUND.get(h["tier"], &"?"):
-			fails.append("%s: sound %s for tier %s" % [spec[0], snd.get("id", &""), HitInfo.tier_name(h["tier"])])
-		if fx.get("blood", false) != (h["tier"] >= HitInfo.Tier.STAGGER):
+		if fx.get("blood", false) != (FXRules.tier_of(info) >= HitInfo.Tier.STAGGER):
 			fails.append("%s: blood rule broken" % spec[0])
-		if (h["tier"] >= HitInfo.Tier.LAUNCH) != scr or (h["tier"] >= HitInfo.Tier.LAUNCH) != fx.get("ring", false):
-			fails.append("%s: ring / screen flash rule broken" % spec[0])
-		if spec[2] > 0.0:
-			if levels.size() >= 3 and float(levels[levels.size() - 1]) <= float(levels[0]):
-				fails.append("charge glow did not brighten (%s)" % [levels])
-			if not played.has(&"whoosh_charged"):
-				fails.append("no charged whoosh")
-			if trail_seen == 0:
-				fails.append("no strike trail on the charged kick")
+		if r7:
+			var w := FXRules.weight_of(info)
+			var want_layers: Array = AudioFX.hit_layers(info).map(func(l: Array) -> StringName: return l[0])
+			var want_flash := lerpf(BloodFX.IMPACT_FLASH_SIZE.x, BloodFX.IMPACT_FLASH_SIZE.y,
+					lerpf(BloodFX.R7_FLASH_POWER.x, BloodFX.R7_FLASH_POWER.y, w))
+			if snd.get("layers", []) != want_layers or (want_layers.has(&"hit_thump") != (w >= 0.6)):
+				fails.append("%s: layers %s, want %s" % [spec[0], snd.get("layers", []), want_layers])
+			for id in want_layers:
+				if not on_frame.has(id):
+					fails.append("%s: %s not played on the hit frame" % [spec[0], id])
+			if absf(float(fx.get("flash_size", 0.0)) - want_flash) > 0.001:
+				fails.append("%s: flash %.2f m, want %.2f for weight %.2f" % [spec[0], fx.get("flash_size", 0.0), want_flash, w])
+			if h["screen"] != (w >= ScreenFX.R7_FLASH_FROM or info.react == &"launch"):
+				fails.append("%s: screen flash %s at weight %.2f" % [spec[0], h["screen"], w])
+			if h["dust"] != (info.push >= 1.0):
+				fails.append("%s: push dust %s for %.1f m" % [spec[0], h["dust"], info.push])
+			r7_flash[spec[0]] = float(fx.get("flash_size", 0.0))
+			r7_layers[spec[0]] = (snd.get("layers", []) as Array).size()
+		else:
+			print("note: %s is not a Round 7 hit yet (B has not landed HitInfo.react); tier rules checked" % spec[0])
+			if snd.get("id", &"") != AudioFX.TIER_SOUND.get(FXRules.tier_of(info), &"?"):
+				fails.append("%s: sound %s for tier %s" % [spec[0], snd.get("id", &""), HitInfo.tier_name(info.tier)])
+			if (FXRules.tier_of(info) >= HitInfo.Tier.LAUNCH) != fx.get("ring", false):
+				fails.append("%s: ring rule broken" % spec[0])
 		await get_tree().create_timer(0.8).timeout
 		g.queue_free()
+	if r7_flash.has("tap jab") and r7_flash.has("roundhouse"):
+		print("real jab vs roundhouse: flash %.2f m vs %.2f m, layers %d vs %d" % [r7_flash["tap jab"],
+			r7_flash["roundhouse"], r7_layers["tap jab"], r7_layers["roundhouse"]])
+		if r7_flash["roundhouse"] <= r7_flash["tap jab"] or r7_layers["roundhouse"] <= r7_layers["tap jab"]:
+			fails.append("the real roundhouse does not out-weigh the real jab")
+	# --- A real dodge (Traversal.start_dodge) ----------------------------------------
+	var tv = p.get(&"traversal")
+	if tv == null or not (tv as Object).has_method(&"start_dodge"):
+		print("note: the player's Traversal has no start_dodge yet; real dodge skipped")
+	else:
+		await U.physics_frames(get_tree(), 60)
+		var dodge_frame := [-1]
+		var cb := func(f: Node3D, _d: Vector3) -> void:
+			if f == p:
+				dodge_frame[0] = Engine.get_physics_frames()
+		GameEvents.dodged.connect(cb)
+		played.clear()
+		var ff0: int = ff.get(&"effect_log").size()
+		var start: Vector3 = p.global_position
+		var ok: bool = tv.call(&"start_dodge", Vector3.RIGHT)
+		GameEvents.dodged.disconnect(cb)
+		var ids: Array = played.filter(func(e: Array) -> bool: return e[1] == dodge_frame[0]).map(
+				func(e: Array) -> StringName: return e[0])
+		var log: Array = ff.get(&"effect_log")
+		var dusted := false
+		for k in range(ff0, log.size()):
+			if log[k]["event"] == &"dodge_dust" and log[k]["frame"] == dodge_frame[0]:
+				dusted = true
+		var ghosts := ScreenFX.active_afterimages()
+		var ghost_at := Vector3.INF
+		for g: Node3D in ScreenFX._ghosts:
+			if g.visible and g.get_child_count() > 0:
+				ghost_at = (g.get_child(0) as Node3D).global_position
+		await U.physics_frames(get_tree(), 40)
+		print("real dodge: started %s on frame %d, sounds %s, dust %s, after-images %d (first part %.2f m from the player's start), moved %.2f m" % [
+			ok, dodge_frame[0], ids, dusted, ghosts, ghost_at.distance_to(start) if ghost_at != Vector3.INF else -1.0,
+			start.distance_to(p.global_position)])
+		if not ok or dodge_frame[0] < 0:
+			print("note: the real dodge did not start (Traversal refused); skipped")
+		elif not (ids.has(&"sidestep") and dusted and ghosts >= 1):
+			fails.append("real dodge: sounds %s, dust %s, after-images %d" % [ids, dusted, ghosts])
 	U.finish(get_tree(), "test_real_contact", fails, errlog)

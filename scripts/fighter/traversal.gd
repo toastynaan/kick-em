@@ -1,39 +1,50 @@
 class_name Traversal
 extends Node
-## Round 5 player locomotion (Feel Reference: Movement spec): sprint that builds,
-## the short dash, jump, automatic parkour, wall run, landing levels, and
-## running into enemies (Battering Ram). Player only; enemies keep Fighter's
-## own walking code.
+## Round 5 player locomotion (Feel Reference: Movement spec) with the Round 7
+## additions (docs/Round 7 — Freeflow Combat.md: Defence > Dodge and Sprint,
+## Grab > Drive): the sprint that builds, the dodge, jump, automatic parkour,
+## wall run, landing levels, running into enemies (Battering Ram), and the
+## drive run while holding a body. Player only; enemies keep Fighter's own
+## walking code.
 ## OWNER: agent M (movement). CONTRACT STUB: keep every public signature.
 ##
 ## Contract:
 ## - Fighter creates this node for the player and calls physics_move() every
-##   physics tick after its frozen / ragdolling / held early-outs. Return true
-##   once this node moved the capsule itself (Fighter then skips its own code);
-##   false falls back to Fighter's Upgrade 2 movement.
+##   physics tick after its frozen / reacting / ragdolling / held early-outs.
+##   Return true once this node moved the capsule itself (Fighter then skips
+##   its own code).
 ## - Player time: every velocity, acceleration and timer here runs in the
 ##   player's own time (Fighter.own_delta / own_time_factor), so the player keeps
 ##   real speed in any slow motion. Honour Fighter.knockback() and
-##   CombatController.has_forced_velocity() (lunges) like Fighter does.
-## - Dash routing (CombatController.press): Defence first (teleport, sidestep,
-##   pursuit), then on_dash_pressed() here, then the old combat dash.
+##   CombatController.has_forced_velocity() (glides, lunges) like Fighter does.
+## - Dash routing (CombatController.press / release): on_dash_pressed() here (on
+##   the ground a tap dodges at once; held past Tuning.DASH_HOLD_SPRINT the dodge
+##   flows into the sprint; in the air a tap is the air dash), on_dash_released().
+##   While the player holds a body B routes Dash to Carry, which runs the drive
+##   through begin_drive() / end_drive().
 ## - Jump routing (PlayerController): on_jump_pressed() here first, else Fighter.jump().
+## - Holding a body (Round 7): no jump, no vault / mantle / kick-off / wall run
+##   (steps stay), no sprint (Dash is the drive). A prop in hand changes nothing.
 ##
 ## How it moves (agent M):
 ## - `fighter.velocity` keeps Fighter's meaning: m per player second. Gravity,
-##   the sprint ramp and every timer step by own_delta(); only move_and_slide()
-##   sees velocity x own_time_factor(). Input windows (coyote, jump buffer, the
-##   150 ms Dash hold) use TimeDirector.now() (real time).
-## - Modes: GROUND (walk, short dash, sprint, release bleed, sprint charge,
-##   landing pauses), AIR (jump, fall, kick-off flight, dropping strike),
+##   the sprint ramp, the dodge, the drive and every timer step by own_delta();
+##   only move_and_slide() sees velocity x own_time_factor(). Input windows
+##   (coyote, jump buffer, the Dash hold, the dodge's invulnerability and
+##   cooldown) use TimeDirector.now() (real time).
+## - Modes: GROUND (walk, sprint, release bleed, sprint charge, landing
+##   pauses), AIR (jump, fall, kick-off flight, dropping strike, air dash),
 ##   PARKOUR (step / vault / mantle / kick-off / air mantle: the capsule follows a
 ##   curve driven by a manually stepped Tween, so it runs in player time and
-##   stops in hitstop), WALL_RUN, HANG (pursuit).
+##   stops in hitstop), WALL_RUN, HANG (pursuit). The dodge and the drive own the
+##   capsule while they run (on the ground, or falling off a ledge: then
+##   is_airborne() and get_fall_height() report the fall and the touch-down
+##   emits a landing).
 ## - Sprint speed lives in one scalar (`_speed`, along `_heading`). Below the
 ##   sprint start speed the capsule walks with Fighter's vector acceleration.
-## - "Earned" speed (what power and the Battering Ram read) is the sprint ramp,
-##   never the short-dash burst, a lunge or a knockback: a dash-tap jab is a
-##   standing jab.
+## - "Earned" speed (what the Battering Ram and the throw's run share read) is
+##   the sprint ramp (or the drive), never the dodge, a glide, a lunge or a
+##   knockback.
 ## - Any strike thrown fast (sprint, bleed, charge steering, wall run, dropping
 ##   strike) ends the sprint; a held Dash then builds again from 6 m/s once the
 ##   strike (or a dropping strike's landing) is over.
@@ -42,20 +53,29 @@ extends Node
 ##   commit (on_strike_started) on.
 ## - A vault's dropping strike follows the vault until the body has cleared
 ##   the obstacle's far side, then plunges (never lands on a wall's top).
+## - The dodge: Tuning.R7_DODGE_DIST over R7_DODGE_TIME, a cosine ease from its
+##   opening speed to its end speed (a stop with the stick neutral, walking pace
+##   along the stick), so the distance is exact. Still held at the hold time,
+##   its tail eases into the sprint ramp's speed instead and the ramp goes on
+##   from there (the cap is reached Tuning.SPRINT_RAMP_TIME after the press).
+## - God path (Round 7 amendment): a level-3 Battering Ram launches normal
+##   enemies ahead and up (R7_RAM_LAUNCH_*) through the hit pipeline, the runner
+##   keeping 95%; sprinting at R7_SPEED_CRACK_FROM or faster cracks the floor
+##   under each footstep (a level-1 crack, never a crater). Wall-run strikes and
+##   vault drops count as the speed cap in speed_toward() (B's sprint strikes).
+## - The drive: the speed ramps R7_DRIVE_START_SPEED -> R7_DRIVE_MAX_SPEED
+##   (ease-out) over R7_DRIVE_RAMP_TIME; the direction turns toward the stick
+##   (camera forward when neutral) at R7_DRIVE_TURN_RATE at most; the fighter
+##   faces it. A breakable the driven body broke open (broken, or open along the
+##   drive's line) does not stop the capsule: it passes through for DRIVE_PASS_TIME.
 
 enum Mode { GROUND, AIR, PARKOUR, WALL_RUN, HANG }
 
 # --- Local tuning (candidates for Tuning; listed in agent M's report) ----------
-## The short dash (lead decision): it opens at the current speed cap (8 base;
-## upgrades and carrying scale it; never above) and eases (cosine) to exactly
-## Tuning.SPRINT_START_SPEED at Tuning.DASH_HOLD_SPRINT. Held, the sprint ramp
-## takes over there at 6 m/s; a tap eases on to walking (to a stop with the
-## stick neutral) and covers Tuning.SHORT_DASH_DIST in all.
-## s the 6 -> cap ramp takes from that hand-off, so a held Dash reaches the cap
-## Tuning.SPRINT_RAMP_TIME (1.2 s) after the press ("6 -> 8 m/s over 1.2 s of holding").
+## s the 6 -> cap sprint ramp takes from the hold time (the dodge hands over
+## there), so a held Dash reaches the cap Tuning.SPRINT_RAMP_TIME (1.2 s) after
+## the press ("6 -> 8 m/s over 1.2 s of holding").
 const RAMP_TIME := Tuning.SPRINT_RAMP_TIME - Tuning.DASH_HOLD_SPRINT
-## s after a short dash ends before another burst (a held sprint is never limited).
-const DASH_REARM := 0.1
 ## deg/s the sprint heading follows the stick. A 90-degree cut takes 0.17 s, so
 ## it always pays Tuning.TURN_PENALTY; a curve slower than 300 deg/s never does.
 const SPRINT_STEER_RATE := 540.0
@@ -173,6 +193,9 @@ const PUSH_PASS_TIME := 0.25
 const PUSH_MIN_SPEED := 0.5
 ## Share of the ram push that goes sideways (people fly aside, Prototype 2 at 2.7 s).
 const RAM_SIDE_SHARE := 0.6
+## A level-3 ram launch flies mostly ahead of the runner, this share aside (out
+## of the runner's line, which keeps 95% of its speed).
+const RAM_LAUNCH_SIDE_SHARE := 0.3
 ## s a strike stays "pending" (sprint kept) before it must have committed: a
 ## tap commits at the press; past CombatController's hold threshold it charges.
 const STRIKE_COMMIT_GRACE := Tuning.HOLD_THRESHOLD + 2.0 / 120.0
@@ -184,6 +207,23 @@ const TURN_HISTORY := Tuning.TURN_PENALTY_WINDOW
 ## can be charged) once it turns less than this over a whole TURN_HISTORY.
 ## Half the penalty angle, so a gentle curve is steady.
 const TURN_STEADY_DEG := Tuning.TURN_PENALTY_ANGLE * 0.5
+
+# --- Round 7 (dodge, drive) ------------------------------------------------------
+## m: a neutral-stick dodge backs away from enemies this close (else from facing).
+const DODGE_AWAY_RANGE := Tuning.R7_TARGET_RANGE + Tuning.R7_TARGET_KEEP_EXTRA
+## The dodge's pose while P's &"dodge" is missing.
+const DODGE_POSE_FALLBACK := &"dash"
+## Ease-out power of the drive ramp (quadratic: most of the push comes early).
+const DRIVE_EASE_POW := 2.0
+## m/s^2 back up to R7_DRIVE_START_SPEED after Carry set the drive below it:
+## the ramp's own opening slope, (max - start) x pow / ramp time.
+const DRIVE_LOW_ACCEL := (Tuning.R7_DRIVE_MAX_SPEED - Tuning.R7_DRIVE_START_SPEED) * DRIVE_EASE_POW \
+	/ Tuning.R7_DRIVE_RAMP_TIME
+## s the capsule ignores a breakable the driven body broke open (the hole's
+## ragged edges never stop the run behind the body).
+const DRIVE_PASS_TIME := 0.5
+## m above the feet (x height scale) where the drive's line is tested for a hole.
+const DRIVE_PASS_HEIGHTS: Array[float] = [0.5, 0.9, 1.3]
 
 var fighter: Fighter
 ## 0..1 = sprint start speed (6 m/s) .. the speed cap. Effects, camera and audio read it.
@@ -197,6 +237,10 @@ var last_parkour: StringName = &""
 ## How the last vault landed: &"planned" | &"short" | &"side" | &"top" | &"overlap".
 var last_vault_landing: StringName = &""
 var rams := 0
+var last_ram_launch := Vector3.ZERO ## launch velocity of the last level-3 ram
+var speed_cracks := 0             ## footsteps that cracked the floor (ground cracks at speed)
+var dodges := 0                   ## dodges started
+var drive_passes := 0             ## breakables the drive passed through
 
 var _mode: int = Mode.GROUND
 var _clock := 0.0                 ## player s (stops in hitstop)
@@ -210,12 +254,6 @@ var _style: StringName = &""      ## locomotion style last sent to the animator
 # Dash and sprint
 var _dash_held := false
 var _press_t := -INF              ## real time of the current hold's press
-var _burst_left := 0.0            ## player s of the short dash left
-var _burst_time := 0.0
-var _burst_end_speed := 0.0
-var _burst_peak := 8.0
-var _burst_tail := 0.0            ## s of the tap's ease from 6 m/s to walking
-var _burst_rearm_at := -INF       ## player clock
 var _sprinting := false
 var _speed := 0.0                 ## sprint / bleed speed along _heading (m per player s)
 var _bleed_left := 0.0
@@ -232,7 +270,30 @@ var _turn_hist: Array[Vector2] = [] ## (clock, yaw)
 var _turn_locked := false         ## a penalty was taken: none again until the heading is steady
 var _step_accum := 0.0
 
+# Dodge
+var _dodging := false
+var _dodge_dir := Vector3.BACK
+var _dodge_t := 0.0               ## player s into the dodge
+var _dodge_press_t := -INF        ## the press that started it (-INF: start_dodge from code)
+var _dodge_invuln_until := -INF   ## real time
+var _dodge_ready_at := -INF       ## real time the cooldown ends
+var _dg_va := 0.0                 ## end speed of the opening ease
+var _dg_vp := 0.0                 ## opening speed
+var _dg_hold := false             ## held at the hold time: the tail eases into the sprint ramp
+var _dg_th := 0.0                 ## dodge time of that hold
+var _dg_sh := 0.0                 ## m covered at the hold
+var _dg_vh := 0.0                 ## m/s at the hold
+var _dg_vto := 0.0                ## m/s the tail eases to (the ramp's speed at the dodge's end)
+
+# Drive
+var _driving := false
+var _drive_dir := Vector3.FORWARD
+var _drive_speed := 0.0
+var _drive_t := 0.0               ## player s since begin_drive (debug)
+var _drive_with_body := false     ## began holding something: letting go ends the drive
+
 # Jump, air, landing
+var _off_floor := false           ## a dodge or the drive carried the capsule off a ledge (falling)
 var _coyote_until := -INF
 var _jump_buffer_until := -INF
 var _jumping := false             ## this airtime began with a jump (not a fall)
@@ -293,6 +354,9 @@ var _hang_until := -INF
 
 # Battering Ram
 var _ram_last := {}               ## victim instance id -> real time
+# Bodies the capsule passes through for a while (instance id -> real time the pass ends)
+var _passing := {}
+var _pt_params := PhysicsShapeQueryParameters3D.new()  ## the drive's look-ahead query
 
 # Probes (Feel Reference: three forward ShapeCast3Ds, a downward RayCast3D)
 var _probes: Array[ShapeCast3D] = []
@@ -303,6 +367,7 @@ var _q_params := PhysicsShapeQueryParameters3D.new()
 func setup(p_fighter: Fighter) -> void:
 	fighter = p_fighter
 	_heading = fighter.get_forward()
+	_drive_dir = _heading
 	for i in 3:
 		var sc := ShapeCast3D.new()
 		sc.name = "Probe%d" % i
@@ -328,6 +393,7 @@ func setup(p_fighter: Fighter) -> void:
 	if fighter.combat != null:
 		fighter.combat.hit_received.connect(_on_hit_received)
 	GameEvents.strike_started.connect(_on_strike_event)
+	GameEvents.react_started.connect(_on_react_started)
 
 # =============================================================================
 # Contract API
@@ -345,39 +411,55 @@ func physics_move(delta: float) -> bool:
 	_clock += pdt
 	var now := TimeDirector.now()
 	_check_discontinuity()
+	if _driving and not _drive_ok():
+		end_drive()
 	_adopt_fighter_jump(now)
 	_track_attack()
-	if _mode != Mode.AIR and _mode != Mode.WALL_RUN:
-		fighter.set_crouch_input(fighter.crouch_input)  # Fighter skips its own update
 	_update_dash_hold(now)
-	match _mode:
-		Mode.PARKOUR:
-			_tick_parkour(pdt)
-		Mode.WALL_RUN:
-			_tick_wall_run(pdt, factor, now)
-		Mode.HANG:
-			_tick_hang(pdt, factor, now)
-		Mode.AIR:
-			_tick_air(pdt, factor, now)
-		_:
-			_tick_ground(pdt, factor, now)
+	if _mode == Mode.PARKOUR:
+		_tick_parkour(pdt)
+	elif _dodging:
+		_tick_dodge(pdt, factor, now)
+	elif _driving:
+		_tick_drive(pdt, factor)
+	else:
+		match _mode:
+			Mode.WALL_RUN:
+				_tick_wall_run(pdt, factor, now)
+			Mode.HANG:
+				_tick_hang(pdt, factor, now)
+			Mode.AIR:
+				_tick_air(pdt, factor, now)
+			_:
+				_tick_ground(pdt, factor, now)
+	if _off_floor:
+		_air_top = maxf(_air_top, fighter.global_position.y)
 	_update_sprint_charge()
 	_update_animator()
 	_last_pos = fighter.global_position
 	return true
 
-## Dash pressed and not consumed by Defence. true = handled here (short dash
-## now; still held after Tuning.DASH_HOLD_SPRINT it becomes a sprint).
+## Dash pressed (B routes it here unless the player holds a body). On the
+## ground a tap starts a dodge at once when one is allowed (Round 7); in the air
+## it is the air dash. The press is also the start of a hold: still held at
+## Tuning.DASH_HOLD_SPRINT it flows into the sprint. true = handled here.
 func on_dash_pressed() -> bool:
 	if fighter == null or fighter.is_dead() or fighter.is_down():
 		return false  # the old path keeps the air recovery
 	if fighter.ragdoll != null and fighter.ragdoll.is_simulating():
 		return false
+	var now := TimeDirector.now()
 	_dash_held = true
-	_press_t = TimeDirector.now()
+	_press_t = now
+	if fighter.carry != null and fighter.carry.is_holding_body():
+		return true  # holding a body: Dash is Carry's (the drive); a prop in hand keeps the dodge
+	if _mode == Mode.GROUND or (_mode == Mode.PARKOUR and _pk_kind == &"step"):
+		if start_dodge(_stick_dir()):
+			_dodge_press_t = now
+			return true
 	if _mode != Mode.GROUND:
 		# Vault, wall run, hang: remember the hold; the sprint resumes on landing.
-		# In the air a tap is the short dash too (an air dash, once per airtime).
+		# In the air a tap is the air dash (once per airtime).
 		if _mode == Mode.AIR:
 			if _air_speed >= _sprint_floor():
 				_set_sprinting(true)
@@ -387,32 +469,28 @@ func on_dash_pressed() -> bool:
 		return true  # attacking, stunned, guarding: the hold sprints once free
 	var cur := _earned_speed()
 	if cur >= _sprint_floor():
-		# Already running fast (a re-press during the release bleed): no burst,
-		# the sprint resumes from the current speed (from the start speed after
-		# a strike: speed spent on a strike is spent).
+		# Already running fast (a re-press during the release bleed with the
+		# dodge on its cooldown): the sprint resumes from the current speed
+		# (from the start speed after a strike: speed spent on a strike is spent).
 		_bleed_left = 0.0
 		_speed = Tuning.SPRINT_START_SPEED if _rebuild else cur
 		_rebuild = false
 		_set_sprinting(true)
-		return true
-	if _clock < _burst_rearm_at:
-		return true
-	_start_burst()
 	return true
 
 func on_dash_released() -> void:
 	_dash_held = false
 	if _sprinting:
 		_set_sprinting(false)
-		if _mode == Mode.GROUND and not _charge_steer:
+		if _mode == Mode.GROUND and not _charge_steer and not _driving:
 			_start_bleed(_speed)
 
 ## Jump pressed. true = handled here (jump, wall run start, wall kick-off).
 func on_jump_pressed() -> bool:
 	if fighter == null or fighter.is_dead() or fighter.is_down():
 		return false
-	if fighter.carry != null and fighter.carry.is_held():
-		return false
+	if fighter.carry != null and (fighter.carry.is_held() or fighter.carry.is_holding_body()):
+		return false  # Round 7: no jump while holding a body
 	var now := TimeDirector.now()
 	match _mode:
 		Mode.WALL_RUN:
@@ -499,6 +577,8 @@ func hang(duration_real: float) -> void:
 		_finish_parkour_tween()
 	if _mode == Mode.WALL_RUN:
 		_end_wall_run(&"end", 1.0)
+	_cut_dodge()
+	_off_floor = false
 	_mode = Mode.HANG
 	_air_dash_left = 0.0
 	_hang_until = TimeDirector.now() + duration_real
@@ -521,6 +601,9 @@ func get_speed() -> float:
 func speed_toward(dir: Vector3) -> float:
 	if fighter == null:
 		return 0.0
+	if _driving:
+		var dd := Vector3(dir.x, 0.0, dir.z)
+		return clampf(_drive_dir.dot(dd.normalized()) * _drive_speed, 0.0, _drive_speed) if dd.length_squared() > 1e-6 else 0.0
 	if _mode == Mode.WALL_RUN:
 		return get_speed_cap()
 	if _mode == Mode.PARKOUR and _pk_kind == &"vault" and _pk_sprint and _pk_p >= Tuning.VAULT_ATTACK_FROM:
@@ -539,7 +622,7 @@ func speed_toward(dir: Vector3) -> float:
 ## Current sprint cap (Tuning.debug_speed_cap), lowered while carrying.
 func get_speed_cap() -> float:
 	var cap := Tuning.debug_speed_cap
-	if fighter != null and fighter.carry != null and fighter.carry.is_holding():
+	if fighter != null and fighter.carry != null and fighter.carry.is_holding_body():
 		cap *= fighter.carry.get_sprint_cap_mult()
 	return cap
 
@@ -568,14 +651,15 @@ func get_wall_side() -> int:
 func get_wall_normal() -> Vector3:
 	return _wr_normal if _mode == Mode.WALL_RUN else Vector3.ZERO
 
-## In the air by jump, fall, kick-off or hang (not vaulting, not wall running).
-## Fighter.is_airborne() should return this for the player (H).
+## In the air by jump, fall, kick-off or hang (not vaulting, not wall running),
+## or carried off a ledge by a dodge or the drive. Fighter.is_airborne() returns
+## this for the player.
 func is_airborne() -> bool:
-	return _mode == Mode.AIR or _mode == Mode.HANG
+	return _mode == Mode.AIR or _mode == Mode.HANG or _off_floor
 
 ## m fallen below the highest point of the current airtime (camera fall tilt).
 func get_fall_height() -> float:
-	if _mode != Mode.AIR or fighter == null:
+	if fighter == null or not (_mode == Mode.AIR or _off_floor):
 		return 0.0
 	return maxf(_air_top - fighter.global_position.y, 0.0)
 
@@ -583,9 +667,16 @@ func get_debug_text() -> String:
 	var mode_name: String = Mode.keys()[_mode]
 	if _mode == Mode.PARKOUR:
 		mode_name += " %s %.2f" % [_pk_kind, _pk_p]
-	return "move %s  v %.2f  earned %.2f  charge %.2f%s%s  land %s" % [mode_name, get_speed(),
+	var s := "move %s  v %.2f  earned %.2f  charge %.2f%s%s  land %s" % [mode_name, get_speed(),
 		_earned_speed(), sprint_charge, "  SPRINT" if _sprinting else "",
 		"  STEER" if _charge_steer else "", last_landing]
+	if _dodging:
+		s += "  DODGE %.2f" % _dodge_t
+	if is_dodge_invulnerable():
+		s += "  INVULN"
+	if _driving:
+		s += "  DRIVE %.2f m/s %.1fs" % [_drive_speed, _drive_t]
+	return s
 
 # --- Extra queries (agent M; H / B / E / F may use them) -------------------------
 ## Jump now if able (H: Fighter.jump() for the player can call this). true on take-off.
@@ -626,6 +717,20 @@ func is_dash_held() -> bool:
 func is_air_dashing() -> bool:
 	return _mode == Mode.AIR and _air_dash_left > 0.0
 
+## s left before another dodge may start (0 when ready; the dodge in progress counts).
+func get_dodge_cooldown_left() -> float:
+	if _dodging:
+		return Tuning.R7_DODGE_TIME - _dodge_t + Tuning.R7_DODGE_COOLDOWN
+	return maxf(_dodge_ready_at - TimeDirector.now(), 0.0)
+
+## The dodge's direction (flat world; zero when not dodging).
+func get_dodge_dir() -> Vector3:
+	return _dodge_dir if _dodging else Vector3.ZERO
+
+## A dodge may start right now (start_dodge would not refuse).
+func can_dodge() -> bool:
+	return _can_dodge()
+
 # =============================================================================
 # Ground
 # =============================================================================
@@ -654,8 +759,6 @@ func _tick_ground(pdt: float, factor: float, now: float) -> void:
 				_charge_speed = maxf(_charge_speed - SPRINT_OVER_DECEL * pdt, cap)
 			_steer(_stick_or(_heading), Tuning.CHARGE_SPRINT_STEER, pdt)
 			hv = _heading * _charge_speed
-		elif _burst_left > 0.0:
-			hv = _tick_burst(stick, cap, pdt)
 		elif _sprinting and _free_to_run():
 			hv = _tick_sprint(stick, cap, pdt)
 		elif _bleed_left > 0.0 and _free_to_run():
@@ -679,6 +782,7 @@ func _tick_ground(pdt: float, factor: float, now: float) -> void:
 
 func _after_ground_move(intended: Vector3, pre_speed: float, steering: bool, forced: bool,
 		now: float) -> void:
+	var rams0 := rams
 	if not forced:
 		_check_ram(intended, pre_speed, now)
 	if fighter.is_on_floor():
@@ -687,7 +791,7 @@ func _after_ground_move(intended: Vector3, pre_speed: float, steering: bool, for
 			return  # a low edge the knee probe passes over: stepped up onto
 		var actual := Vector3(fighter.velocity.x, 0.0, fighter.velocity.z)
 		var running := (_sprinting or _bleed_left > 0.0 or steering) and _speed > 0.0
-		if not forced and running:
+		if not forced and running and rams == rams0:  # a ram just set the speed it keeps
 			var want := intended.length()
 			var along := actual.dot(_heading)
 			if along < _speed * SPRINT_BLOCKED_SHARE:
@@ -706,62 +810,13 @@ func _after_ground_move(intended: Vector3, pre_speed: float, steering: bool, for
 	_coyote_until = now + Tuning.COYOTE_TIME
 
 func _tick_walk(hv: Vector3, stick: Vector3, pdt: float) -> Vector3:
-	var desired := _lock_scaled(stick) * Tuning.WALK_SPEED * _walk_mult()
+	var desired := stick * Tuning.WALK_SPEED * _walk_mult()
 	if desired.length_squared() > 1e-4:
 		_heading = desired.normalized()
 	elif hv.length_squared() > 1e-4:
 		_heading = hv.normalized()
 	_speed = 0.0
 	return hv.move_toward(desired, Fighter.ACCEL * pdt)
-
-## The short dash: from the speed cap down to 6 m/s at the hold time, then (a
-## tap) on to walking, covering Tuning.SHORT_DASH_DIST in all. Held, the sprint
-## takes over at the hold time (_update_dash_hold ends the burst there).
-func _tick_burst(_stick_v: Vector3, _cap: float, pdt: float) -> Vector3:
-	var t := _burst_time - _burst_left
-	_burst_left = maxf(_burst_left - pdt, 0.0)
-	var v := _burst_speed_at(t + pdt * 0.5)  # mid-step sample: the distance comes out exact
-	if _burst_left <= 0.0:
-		_burst_rearm_at = _clock + DASH_REARM
-		v = _burst_end_speed  # hand the velocity to the walk
-	return _heading * v
-
-## Speed `t` s into the short dash: cap -> 6 m/s by DASH_HOLD_SPRINT (cosine),
-## then (a tap) 6 m/s -> walking over the tail (cosine).
-func _burst_speed_at(t: float) -> float:
-	var h := Tuning.DASH_HOLD_SPRINT
-	var s := Tuning.SPRINT_START_SPEED
-	if t <= h:
-		return s + (_burst_peak - s) * cos(clampf(t / h, 0.0, 1.0) * PI * 0.5)
-	if _burst_tail <= 0.0:
-		return _burst_end_speed
-	var k := clampf((t - h) / _burst_tail, 0.0, 1.0)
-	return _burst_end_speed + (s - _burst_end_speed) * cos(k * PI * 0.5)
-
-func _start_burst() -> void:
-	var stick := _stick()
-	var dir := stick.normalized() if stick.length() > STICK_DEADZONE else fighter.get_forward()
-	_heading = dir
-	var s := Tuning.SPRINT_START_SPEED
-	var h := Tuning.DASH_HOLD_SPRINT
-	# Opens at the speed cap, never above (upgrades raise it, carrying lowers it).
-	_burst_peak = maxf(get_speed_cap(), s)
-	# A tap eases on to walking pace along the stick (a stop with it neutral).
-	var walk := Tuning.WALK_SPEED * (fighter.carry.get_move_speed_mult() if fighter.carry != null else 1.0)
-	_burst_end_speed = minf(walk * minf(stick.length(), 1.0) if stick.length() > STICK_DEADZONE else 0.0, s)
-	# Cosine eases: distance = T x (end + (start - end) x 2 / pi) per part; the
-	# tail is as long as it takes to make SHORT_DASH_DIST in all.
-	var dist_open := h * (s + (_burst_peak - s) * 2.0 / PI)
-	var avg_tail := _burst_end_speed + (s - _burst_end_speed) * 2.0 / PI
-	_burst_tail = maxf(Tuning.SHORT_DASH_DIST - dist_open, 0.0) / maxf(avg_tail, 0.01)
-	_burst_time = h + _burst_tail
-	_burst_left = _burst_time
-	_bleed_left = 0.0
-	_rebuild = false
-	_speed = Tuning.SPRINT_START_SPEED  # the ramp starts at the press (6 m/s on the first step)
-	_turn_hist.clear()
-	if fighter.animator != null:
-		fighter.animator.play_timed(&"dash", _burst_time)
 
 ## The short dash in the air (Feel Reference: "Any other tap: a short dash,
 ## 3 m"; Prototype 3's air dash): a cosine ease from the speed cap down to
@@ -906,14 +961,18 @@ func _ramp_step(speed: float, cap: float, dt: float) -> float:
 
 ## Turn the heading toward `want` at no more than `rate_deg` per player second.
 func _steer(want: Vector3, rate_deg: float, dt: float) -> void:
+	_heading = _turn_toward(_heading, want, deg_to_rad(rate_deg) * dt)
+
+## `from` turned toward `want` (flat) by at most `max_rad`. `from` when `want` is zero.
+static func _turn_toward(from: Vector3, want: Vector3, max_rad: float) -> Vector3:
 	var w := Vector3(want.x, 0.0, want.z)
 	if w.length_squared() < 1e-6:
-		return
+		return from
 	w = w.normalized()
-	var a := atan2(-_heading.x, -_heading.z)
+	var a := atan2(-from.x, -from.z)
 	var b := atan2(-w.x, -w.z)
-	var na := rotate_toward(a, b, deg_to_rad(rate_deg) * dt)
-	_heading = Vector3(-sin(na), 0.0, -cos(na))
+	var na := rotate_toward(a, b, max_rad)
+	return Vector3(-sin(na), 0.0, -cos(na))
 
 ## A turn sharper than Tuning.TURN_PENALTY_ANGLE inside Tuning.TURN_PENALTY_WINDOW
 ## loses Tuning.TURN_PENALTY of the current speed; gentle curves cost nothing.
@@ -943,25 +1002,24 @@ func _turn_penalty_check() -> void:
 		_turn_hist.clear()
 	_turn_hist.append(Vector2(_clock, yaw))
 
-func _set_sprinting(on: bool) -> void:
+func _set_sprinting(on: bool, start_pose := true) -> void:
 	if on == _sprinting:
 		return
 	_sprinting = on
 	if on:
 		_turn_hist.clear()
 		_turn_locked = false
-		# The first stride of a sprint that did not open with the dash burst
-		# (resumed after a strike, a stun, a landing pause, or from a run).
-		if _mode == Mode.GROUND and _burst_left <= 0.0 and _land_left <= 0.0:
+		# The first stride of a sprint (not out of a dodge, whose pose is still on).
+		if start_pose and _mode == Mode.GROUND and _land_left <= 0.0:
 			_play_timed(&"sprint_start", SPRINT_START_POSE)
 		GameEvents.sprint_started.emit(fighter)
 	else:
 		GameEvents.sprint_ended.emit(fighter)
 
-## Dash held long enough: the sprint takes over (from the short dash, or once
-## the player is free to run again after a strike, a stun or a landing).
+## Dash held long enough: the sprint takes over (once the player is free to run
+## again after a strike, a stun or a landing). A dodge hands over by itself.
 func _update_dash_hold(now: float) -> void:
-	if not _dash_held or _sprinting or _mode != Mode.GROUND:
+	if not _dash_held or _sprinting or _dodging or _driving or _mode != Mode.GROUND:
 		return
 	if now - _press_t < Tuning.DASH_HOLD_SPRINT - 1e-6:
 		return
@@ -969,19 +1027,16 @@ func _update_dash_hold(now: float) -> void:
 		return
 	if _rebuild and _bleed_left > 0.0:
 		return  # after a strike: back down to walking first, then build again
-	if _burst_left > 0.0 or _rebuild:
-		# Hand-off from the dash at exactly 6 m/s (or a fresh start after a
-		# strike): the ramp builds from here, never dipping.
-		_speed = Tuning.SPRINT_START_SPEED
+	if _rebuild:
+		_speed = Tuning.SPRINT_START_SPEED  # a fresh start after a strike
 	else:
 		_speed = maxf(_earned_speed(), Tuning.SPRINT_START_SPEED)
-	_burst_left = 0.0
 	_rebuild = false
 	_bleed_left = 0.0
 	if _heading.length_squared() < 0.5:
 		_heading = fighter.get_forward()
 	var stick := _stick()
-	if stick.length() > STICK_DEADZONE and _burst_left <= 0.0:
+	if stick.length() > STICK_DEADZONE:
 		_heading = stick.normalized()
 	_set_sprinting(true)
 
@@ -994,7 +1049,6 @@ func _suspend_sprint() -> void:
 
 func _drop_to_walk(clamp_velocity: bool) -> void:
 	_end_sprint_state()
-	_burst_left = 0.0
 	if clamp_velocity and fighter != null:
 		var hv := Vector3(fighter.velocity.x, 0.0, fighter.velocity.z)
 		if hv.length() > Tuning.WALK_SPEED:
@@ -1026,8 +1080,6 @@ func _earned_speed() -> float:
 	if _charge_steer:
 		return _charge_speed
 	var actual := _free_hv.length()
-	if _burst_left > 0.0:
-		return minf(actual, _speed if _sprinting else Tuning.WALK_SPEED)
 	if _sprinting or _bleed_left > 0.0:
 		return minf(actual, _speed)
 	# Walking earns walking speed at most: what is left of a lunge or a
@@ -1043,12 +1095,14 @@ func _update_sprint_charge() -> void:
 	var v := _earned_speed()
 	sprint_charge = clampf((v - Tuning.SPRINT_START_SPEED) / span, 0.0, 1.0) if span > 0.0 else 0.0
 
-## Free to run: not attacking (beyond a pending press), stunned, guarding or held.
+## Free to run: not attacking (beyond a pending press), stunned, guarding,
+## reacting, held, or holding a body (Dash is the drive then; a prop in hand runs).
 func _free_to_run() -> bool:
-	if fighter.is_crouching():
-		return false  # crouching walks at crouch speed: no dash, no sprint
-	if fighter.carry != null and (fighter.carry.is_held() or fighter.carry.get_move_speed_mult() <= 0.0):
-		return false  # clinching, being held, a grab's recovery
+	if fighter.carry != null and (fighter.carry.is_holding_body() or fighter.carry.is_held() \
+			or fighter.carry.get_move_speed_mult() <= 0.0):
+		return false  # holding a body, clinching, being held, a grab's recovery
+	if fighter.is_reacting():
+		return false
 	var c := fighter.combat
 	if c == null:
 		return true
@@ -1059,11 +1113,11 @@ func _free_to_run() -> bool:
 	return c.get_move_speed_mult() > 0.0
 
 func _walk_mult() -> float:
+	if fighter.is_reacting():
+		return 0.0
 	var m := fighter.combat.get_move_speed_mult() if fighter.combat != null else 1.0
 	if fighter.carry != null:
 		m *= fighter.carry.get_move_speed_mult()  # holding 70%; clinching, recovering 0
-	if fighter.is_crouching():
-		m *= Tuning.CROUCH_SPEED
 	return m
 
 ## G's body slam is under way (holder lands on the body: a heavy landing).
@@ -1107,22 +1161,20 @@ func _can_jump_now() -> bool:
 	var c := fighter.combat
 	if c == null:
 		return true
-	if fighter.carry.is_held() or c.is_stunned():
-		return false  # holding a body jumps at full height (the body comes along)
+	if fighter.carry.is_held() or fighter.carry.is_holding_body() or c.is_stunned():
+		return false  # Round 7: no jump while holding a body
 	return c.is_charging() or not c.is_attacking()
 
 ## Take-off: horizontal velocity kept exactly; height 1.2 m standing to 1.5 m
 ## at full speed (by sprint_charge) under Tuning.PLAYER_GRAVITY rising.
 func _do_jump(emit := true) -> void:
-	if fighter.is_crouching():
-		fighter.set_crouch_input(false)
+	_cut_dodge()
 	var h := lerpf(Tuning.JUMP_HEIGHT, Tuning.JUMP_HEIGHT_SPRINT, sprint_charge)
 	var hv := _free_hv
 	if _mode == Mode.GROUND and _land_left > 0.0 and _land_kind == &"roll":
 		hv = _roll_vel
 	_land_left = 0.0
 	_land_kind = &""
-	_burst_left = 0.0
 	_bleed_left = 0.0
 	_charge_steer = false
 	_enter_air(true)
@@ -1140,7 +1192,6 @@ func _enter_air(jumped: bool) -> void:
 	_air_top = fighter.global_position.y
 	_air_floor = fighter.global_position.y
 	_air_speed = Vector3(_free_hv.x, 0.0, _free_hv.z).length()
-	_burst_left = 0.0
 	_bleed_left = 0.0
 
 func _tick_air(pdt: float, factor: float, now: float) -> void:
@@ -1351,7 +1402,7 @@ func _height_above_floor() -> float:
 ## due this tick. true = the capsule now follows a parkour curve.
 func _try_parkour(hv: Vector3, _pdt: float) -> bool:
 	var speed := hv.length()
-	if speed < STEP_MIN_SPEED or fighter.is_crouching():
+	if speed < STEP_MIN_SPEED:
 		return false
 	var c := fighter.combat
 	# Only a committed strike (or being held) blocks parkour. A charge (a strike
@@ -1414,10 +1465,9 @@ func _try_parkour(hv: Vector3, _pdt: float) -> bool:
 	var height := top_y - feet.y
 	if height < OBSTACLE_MIN:
 		return false
-	var holding := fighter.carry != null and fighter.carry.is_holding()
+	# Round 7: holding a body, only steps (no vault, mantle or kick-off).
+	var holding := fighter.carry != null and fighter.carry.is_holding_body()
 	var vault_max := Tuning.VAULT_MAX
-	if holding:
-		vault_max = minf(vault_max, fighter.carry.get_vault_max_height())
 	var cap := get_speed_cap()
 	# Sprinting / full speed read the earned speed: a dash's opening burst runs
 	# at the cap but is not a sprint (no mantle, no kick-off off a dash tap).
@@ -1427,7 +1477,7 @@ func _try_parkour(hv: Vector3, _pdt: float) -> bool:
 	if height <= Tuning.STEP_MAX:
 		# Something taller packed right behind it (a coffee table against a
 		# sofa): one vault over both, not a step into the next one's face.
-		if speed >= Tuning.PARKOUR_MIN_SPEED and not busy:
+		if speed >= Tuning.PARKOUR_MIN_SPEED and not busy and not holding:
 			var step_far := far_hint if not is_nan(far_hint) else _find_far_edge(feet, dir, face, top_y, face + 1.2)
 			if not is_nan(step_far):
 				var chain := _chain_far(feet, dir, step_far, top_y, vault_max)
@@ -1436,12 +1486,10 @@ func _try_parkour(hv: Vector3, _pdt: float) -> bool:
 		if body <= face + 2.0 * r + 0.1 or _probe_overhang(chest, top_y + 1.0, face + 2.0 * r):
 			return false  # someone standing right there, or no headroom over the step
 		return _plan_step(feet, dir, face, top_y, speed)
-	if busy or speed < Tuning.PARKOUR_MIN_SPEED:
+	if busy or holding or speed < Tuning.PARKOUR_MIN_SPEED:
 		return false
 	if height <= vault_max:
 		return _plan_vault(feet, dir, face, top_y, speed, cap, probe_len, body, chest, head, far_hint)
-	if holding:
-		return false  # carrying: anything over the vault limit is a wall
 	if height <= Tuning.MANTLE_MAX:
 		if not sprinting:
 			return false  # walking into it: it's a wall
@@ -1759,9 +1807,8 @@ func _try_air_mantle(hv: Vector3) -> bool:
 		return false
 	if top_y > _air_floor + AIR_MANTLE_MAX:
 		return false
-	if fighter.carry != null and fighter.carry.is_holding() \
-			and top_y - feet.y > fighter.carry.get_vault_max_height():
-		return false
+	if fighter.carry != null and fighter.carry.is_holding_body():
+		return false  # Round 7: no parkour while holding a body
 	var face: float = hit["dist"]
 	var far := _find_far_edge(feet, dir, face, top_y, face + 2.0 * r + 0.6)
 	if not is_nan(far) and far - face < 2.0 * r + 0.1:
@@ -1796,7 +1843,6 @@ func _start_parkour(kind: StringName, dur: float, pts: Array, keys: Array, exit_
 	_pk_exit_vel = exit_vel
 	_pk_exit_air = exit_air
 	_pk_sprint = sprint
-	_burst_left = 0.0
 	_bleed_left = 0.0
 	_land_left = 0.0
 	last_parkour = kind
@@ -1936,6 +1982,9 @@ func _end_parkour() -> void:
 		fighter.velocity = exit_v
 		if kind == &"kickoff":
 			GameEvents.jumped.emit(fighter)
+	elif _dodging:
+		_mode = Mode.GROUND  # a step under a dodge: the dodge goes on from here
+		fighter.velocity = Vector3(hv.x, 0.0, hv.z)
 	else:
 		_mode = Mode.GROUND
 		fighter.velocity = Vector3(hv.x, 0.0, hv.z)
@@ -1968,6 +2017,8 @@ func _finish_parkour_tween() -> void:
 func _try_wall_run() -> bool:
 	if _mode != Mode.GROUND and _mode != Mode.AIR:
 		return false
+	if fighter.carry != null and fighter.carry.is_holding_body():
+		return false  # Round 7: no wall run while holding a body
 	# "You must be sprinting with sprint_charge of at least 0.6."
 	if not is_sprinting() or sprint_charge < Tuning.WALLRUN_MIN_CHARGE - 1e-4:
 		return false
@@ -2027,7 +2078,7 @@ func _start_wall_run(hit: Dictionary, side: int, dir: Vector3) -> void:
 	_wr_wall = hit["collider"]
 	_wr_step = 0.0
 	_heading = _wr_dir
-	_burst_left = 0.0
+	_cut_dodge()
 	_bleed_left = 0.0
 	_land_left = 0.0
 	_jumping = false
@@ -2104,7 +2155,7 @@ func _push_bodies(intended: Vector3) -> bool:
 	for i in fighter.get_slide_collision_count():
 		var col := fighter.get_slide_collision(i)
 		var body := col.get_collider() as RigidBody3D
-		if body == null or fighter.get_collision_exceptions().has(body):
+		if body == null:
 			continue
 		var n := col.get_normal()
 		n.y = 0.0
@@ -2115,8 +2166,8 @@ func _push_bodies(intended: Vector3) -> bool:
 		# Walking into it after the first shove, the velocity is what the
 		# contact left: the stick's walk is what the walker is pushing with.
 		var walking := into < Tuning.RUN_THROUGH_SPEED
-		if walking and _mode == Mode.GROUND:
-			into = maxf(into, (_lock_scaled(_stick()) * Tuning.WALK_SPEED * _walk_mult()).dot(-n))
+		if walking and _mode == Mode.GROUND and not _dodging and not _driving:
+			into = maxf(into, (_stick() * Tuning.WALK_SPEED * _walk_mult()).dot(-n))
 		if into < PUSH_MIN_SPEED:
 			continue
 		var big_m := fighter.get_total_mass()
@@ -2152,6 +2203,8 @@ func _push_bodies(intended: Vector3) -> bool:
 		_speed *= keep
 		_charge_speed *= keep
 		_air_speed *= keep
+		if _driving:
+			_drive_speed *= keep
 	return pushed
 
 ## The capsule was stopped by a low edge (its top within Tuning.STEP_MAX of the
@@ -2160,7 +2213,7 @@ func _push_bodies(intended: Vector3) -> bool:
 func _contact_step(intended: Vector3) -> bool:
 	var hv := Vector3(intended.x, 0.0, intended.z)
 	var speed := hv.length()
-	if speed < STEP_MIN_SPEED or fighter.is_crouching():
+	if speed < STEP_MIN_SPEED:
 		return false
 	var actual := Vector3(fighter.velocity.x, 0.0, fighter.velocity.z)
 	if actual.length() > speed * 0.95:
@@ -2217,16 +2270,29 @@ func _crash_through(intended: Vector3) -> bool:
 		_free_hv = hv
 	return crashed
 
-## The capsule and `body` ignore each other for `t` s (ids held: either may go first).
+## The capsule ignores `body` for `t` real s. The exception is dropped when the
+## time is up or as soon as the body leaves the tree (a freed body's RID must
+## never stay in the capsule's exception list).
 func _pass_body(body: PhysicsBody3D, t: float) -> void:
-	fighter.add_collision_exception_with(body)
-	var me_id := fighter.get_instance_id()
-	var b_id := body.get_instance_id()
-	TimeDirector.real_timer(t).timeout.connect(func() -> void:
-		var me := instance_from_id(me_id) as PhysicsBody3D
-		var b := instance_from_id(b_id) as PhysicsBody3D
-		if me != null and b != null:
-			me.remove_collision_exception_with(b))
+	var id := body.get_instance_id()
+	var until := TimeDirector.now() + t
+	if not _passing.has(id):
+		fighter.add_collision_exception_with(body)
+		var on_exit := _end_pass.bind(id, true)
+		if not body.tree_exiting.is_connected(on_exit):  # still there from an earlier pass
+			body.tree_exiting.connect(on_exit, CONNECT_ONE_SHOT)
+	_passing[id] = maxf(float(_passing.get(id, -INF)), until)
+	TimeDirector.real_timer(t).timeout.connect(_end_pass.bind(id, false))
+
+func _end_pass(id: int, gone: bool) -> void:
+	if not _passing.has(id):
+		return
+	if not gone and TimeDirector.now() < float(_passing[id]) - 1e-4:
+		return  # extended by a later pass
+	_passing.erase(id)
+	var b := instance_from_id(id) as PhysicsBody3D
+	if b != null and fighter != null and is_instance_valid(fighter):
+		fighter.remove_collision_exception_with(b)
 
 ## A wall as a plane: (normal x, normal z, offset along the normal).
 static func _wall_plane(n: Vector3, point: Vector3) -> Vector3:
@@ -2313,11 +2379,15 @@ func _check_ram(intended: Vector3, pre_speed: float, now: float) -> void:
 		if to2.length_squared() > 1e-6 and to2.normalized().dot(dir) < RAM_FRONT_DOT * 0.5:
 			continue
 		_ram_last[f.get_instance_id()] = now
-		_ram(f, dir)
+		_ram(f, dir, pre_speed)
 		if fighter.is_down() or fighter.is_in_hitstun():
 			return
 
-func _ram(victim: Fighter, dir: Vector3) -> void:
+## One collision with `victim` at `speed` (the runner's earned speed). Through
+## the one hit pipeline (victim.take_hit, preset tier): B applies it, so a
+## level-3 launch goes through Fighter.launch with the player as the launcher
+## (hit_landed opens H's pursuit window).
+func _ram(victim: Fighter, dir: Vector3, speed: float) -> void:
 	var lvl := clampi(Tuning.debug_ram_level, 0, Tuning.RAM_TABLE.size() - 1)
 	var row: Dictionary = Tuning.RAM_TABLE[lvl]["heavy" if victim.is_heavy() else "normal"]
 	var vres: StringName = row["victim"]
@@ -2337,8 +2407,20 @@ func _ram(victim: Fighter, dir: Vector3) -> void:
 			tier = HitInfo.Tier.STUMBLE
 		&"knockdown":
 			tier = HitInfo.Tier.KNOCKDOWN
+		&"launch":
+			tier = HitInfo.Tier.LAUNCH
 	var bone := _near_leg(victim, push) if tier == HitInfo.Tier.STUMBLE else Bones.CHEST
 	var info := _preset_hit(victim, &"ram", &"ram", tier, push, bone)
+	if tier == HitInfo.Tier.LAUNCH:
+		# Round 7 amendment: level 3 sends normal enemies flying, ahead and up, at
+		# the runner's speed x R7_RAM_LAUNCH_SHARE, R7_RAM_LAUNCH_ANGLE up.
+		var fly := (dir * (1.0 - RAM_LAUNCH_SIDE_SHARE) + side * RAM_LAUNCH_SIDE_SHARE).normalized()
+		var v := speed * Tuning.R7_RAM_LAUNCH_SHARE
+		var a := deg_to_rad(Tuning.R7_RAM_LAUNCH_ANGLE)
+		info.hit_direction = fly
+		info.launch_velocity = fly * v * cos(a) + Vector3.UP * v * sin(a)
+		info.reaction = HitInfo.Reaction.LAUNCH
+		last_ram_launch = info.launch_velocity
 	victim.take_hit(info)
 	# The runner: speed, then the runner's own reaction.
 	if loss < 0.0:
@@ -2413,7 +2495,7 @@ func _preset_hit(victim: Fighter, move_id: StringName, kind: StringName, tier: i
 	info.hit_direction = Vector3(dir.x, 0.0, dir.z).normalized()
 	info.hit_bone = bone
 	info.hit_position = victim.get_ground_position() + Vector3.UP * (0.45 if tier == HitInfo.Tier.STUMBLE else 1.1)
-	info.launch_velocity = Vector3.ZERO  # never a launch, at any level
+	info.launch_velocity = Vector3.ZERO  # a level-3 ram launch sets its own
 	info.hitstop = 0.0
 	info.level = HitInfo.Level.LOW if tier == HitInfo.Tier.STUMBLE else HitInfo.Level.MID
 	info.set_meta(&"strength", 0.8)
@@ -2433,6 +2515,9 @@ func _on_ragdoll_state_changed(_old: int, new_state: int) -> void:
 	_interrupt(&"hit")
 
 func _interrupt(reason: StringName, keep_hang := false) -> void:
+	_cut_dodge()
+	_driving = false  # Carry ends its side (a hit on the player ends the drive and the hold)
+	_off_floor = false
 	if _mode == Mode.WALL_RUN:
 		_end_wall_run(reason, Tuning.WALLRUN_DROP_KEEP)
 	if _mode == Mode.PARKOUR:
@@ -2448,13 +2533,13 @@ func _interrupt(reason: StringName, keep_hang := false) -> void:
 	_land_left = 0.0
 	_land_kind = &""
 	_end_sprint_state()
-	_burst_left = 0.0
 	_free_hv = Vector3.ZERO
 
 ## A hit during a sprinting charge knocks the player out of it and they stumble.
 func _on_hit_received(info: HitInfo) -> void:
 	if info == null or info.result != HitInfo.Result.HIT:
 		return
+	_driving = false  # any hit that lands ends the drive (Carry ends the hold)
 	# The hit's reaction (applied before this signal) may already have ended
 	# the steering through the ragdoll's state change: look one frame back.
 	if not _charge_steer and Engine.get_physics_frames() - _charge_steer_frame > 1:
@@ -2469,6 +2554,12 @@ func _on_hit_received(info: HitInfo) -> void:
 	if t == HitInfo.Tier.NONE and info.reaction != HitInfo.Reaction.FLINCH:
 		return
 	fighter.stumble(info.hit_direction, Bones.L_LOWER_LEG)
+
+## A Round 7 reaction (Fighter.react) took the player: it moves the capsule
+## itself (Fighter skips physics_move while it lasts), so drop everything now.
+func _on_react_started(victim: Node3D, _kind: StringName, _attacker: Node3D) -> void:
+	if victim == fighter:
+		_interrupt(&"hit")
 
 ## Fallback commit when B emits strike_started before (or without) calling on_strike_started().
 func _on_strike_event(attacker: Node3D, _target: Node3D, _move_id: StringName, sprint: bool,
@@ -2571,28 +2662,13 @@ func _stick_or(fallback: Vector3) -> Vector3:
 	var s := _stick()
 	return s if s.length() > STICK_DEADZONE else fallback
 
-## Round 4 lock-on (ported from Fighter): slower backpedal and strafe around the target.
-func _lock_scaled(desired: Vector3) -> Vector3:
-	var lt := fighter.lock_target
-	if lt == null or not is_instance_valid(lt) or desired.length_squared() < 1e-6:
-		return desired
-	var to := lt.get_ground_position() - fighter.global_position
-	to.y = 0.0
-	if to.length_squared() < 1e-4:
-		return desired
-	to = to.normalized()
-	var along := desired.dot(to)
-	var side := desired - to * along
-	return to * along * (Fighter.LOCK_BACK_MULT if along < 0.0 else 1.0) + side * Fighter.LOCK_STRAFE_MULT
-
 ## Facing (ported from Fighter): toward face_dir, or the run heading while
-## sprinting, dashing or charge-steering (the camera / lock-on keeps face_dir
-## for walking and strafing).
+## sprinting, charge-steering or rolling (the stick sets face_dir for walking).
+## A dodge keeps the facing it started with; the drive faces its own direction.
 func _update_facing(pdt: float) -> void:
 	var want := fighter.face_dir
-	var running := _sprinting or _charge_steer or _burst_left > 0.0 or _land_kind == &"roll"
-	var locked := fighter.lock_target != null and is_instance_valid(fighter.lock_target)
-	if running and not (locked and not _sprinting):
+	var running := _sprinting or _charge_steer or _land_kind == &"roll"
+	if running:
 		want = _heading
 		fighter.face_dir = _heading  # in step, so ending the run never snaps back to an old facing
 	var c := fighter.combat
@@ -2605,7 +2681,6 @@ func _update_facing(pdt: float) -> void:
 	fd = fd.normalized()
 	var target_yaw := atan2(-fd.x, -fd.z)
 	var rate := Tuning.TURN_SPEED * (c.get_turn_mult() if c != null else 1.0)
-	rate = minf(rate, fighter.max_turn_rate)
 	fighter.rotation.y = rotate_toward(fighter.rotation.y, target_yaw, rate * pdt)
 
 func _face_now(dir: Vector3, pdt: float) -> void:
@@ -2630,19 +2705,19 @@ func _update_animator() -> void:
 			hv = _pk_exit_vel if _pk_kind == &"step" else Vector3.ZERO
 		Mode.WALL_RUN:
 			style = &"wall_run_l" if _wr_side < 0 else &"wall_run_r"
-		_:
-			if fighter.is_crouching():
-				stance = &"crouch"
+	if _off_floor:
+		stance = &"air"
 	if _mode != Mode.WALL_RUN:
-		if fighter.carry != null and fighter.carry.is_holding():
+		if _driving:
+			style = &"sprint"  # the legs run; Carry poses the arms (drive_hold)
+		elif fighter.carry != null and fighter.carry.is_holding():
 			style = &"carry"
 		elif hv.length() > Tuning.WALK_SPEED + 0.3:
 			style = &"sprint"
-		elif fighter.lock_target != null and is_instance_valid(fighter.lock_target):
-			style = &"strafe"
 	anim.set_stance(stance, fighter.velocity.y)
 	var local_v := fighter.global_basis.inverse() * hv
-	anim.set_locomotion(local_v, maxf(get_speed_cap(), Tuning.WALK_SPEED))
+	var top := maxf(get_speed_cap(), Tuning.R7_DRIVE_MAX_SPEED if _driving else Tuning.WALK_SPEED)
+	anim.set_locomotion(local_v, top)
 	if style != _style:
 		_style = style
 		anim.set_locomotion_style(style)
@@ -2674,6 +2749,20 @@ func _tick_footsteps(pdt: float) -> void:
 			_floor_collider = under["collider"]
 		var surface := WorldTags.surface_of(_floor_collider) if _floor_collider != null else &"concrete"
 		GameEvents.footstep.emit(fighter, fighter.global_position, surface, sprint_charge)
+		_speed_crack(surface)
+
+## Round 7 amendment (God path): sprinting at Tuning.R7_SPEED_CRACK_FROM or
+## faster cracks the floor under each footstep (WorldDamage.damage_floor): a
+## level-1 crack on an unmarked cell, never more (WorldDamage keeps its decal budget).
+func _speed_crack(surface: StringName) -> void:
+	if not (_sprinting or _charge_steer) or _earned_speed() < Tuning.R7_SPEED_CRACK_FROM - 1e-3:
+		return
+	var pos := fighter.global_position
+	if WorldDamage.floor_level_at(pos) > 0:
+		return  # already cracked: footsteps never deepen it into a crater
+	# Exactly a level-1 crack's energy (Tuning.FLOOR_LEVEL_ENERGY[0]) on an unmarked cell.
+	if WorldDamage.damage_floor(pos, Tuning.FLOOR_LEVEL_ENERGY[0], surface) > 0:
+		speed_cracks += 1
 
 ## m per footfall, matching PoseAnimator's locomotion stride.
 static func _stride(speed: float) -> float:
@@ -2819,6 +2908,20 @@ func _cast_ray(from: Vector3, to: Vector3, mask: int) -> Dictionary:
 
 ## The player's capsule fits with its feet at `feet` (`mask`: world and
 ## fighters by default; WORLD_MASK for static geometry only).
+## The player and the bodies its capsule ignores on purpose (passing through
+## them, the body it holds): never read from get_collision_exceptions(), which
+## errors on a freed body's RID.
+func _excluded_rids() -> Array[RID]:
+	var ex: Array[RID] = [fighter.get_rid()]
+	for id: int in _passing:
+		var b := instance_from_id(id) as CollisionObject3D
+		if b != null:
+			ex.append(b.get_rid())
+	var held := fighter.carry.held as CollisionObject3D if fighter.carry != null else null
+	if held != null and is_instance_valid(held):
+		ex.append(held.get_rid())
+	return ex
+
 func _capsule_free(feet: Vector3, mask := Layers.WORLD | Layers.DESTRUCTIBLE | Layers.CAPSULE) -> bool:
 	if not fighter.is_inside_tree():
 		return true
@@ -2826,7 +2929,482 @@ func _capsule_free(feet: Vector3, mask := Layers.WORLD | Layers.DESTRUCTIBLE | L
 	_q_shape.radius = shape.radius
 	_q_shape.height = shape.height
 	_q_params.collision_mask = mask
+	_q_params.exclude = _excluded_rids()
 	_q_params.shape = _q_shape
 	_q_params.transform = Transform3D(Basis(), feet + Vector3.UP * (shape.height * 0.5))
 	var space := fighter.get_world_3d().direct_space_state
 	return space.intersect_shape(_q_params, 1).is_empty()
+
+# =============================================================================
+# Dodge
+# =============================================================================
+
+## Start a dodge along `direction` (flat world; zero = straight back from the
+## nearest attacking enemy, else the closest one, else from facing).
+## Cancels the player's own startup or recovery (CombatController.cancel());
+## never during active frames, while reacting, down, held, or holding a body.
+## Invulnerable for Tuning.R7_DODGE_INVULN from now. False if not allowed now.
+func start_dodge(direction: Vector3) -> bool:
+	if not _can_dodge():
+		return false
+	var now := TimeDirector.now()
+	var d := Vector3(direction.x, 0.0, direction.z)
+	if d.length_squared() < 1e-4:
+		d = _dodge_away_dir()
+	d = d.normalized()
+	var c := fighter.combat
+	if c != null and c.is_attacking():
+		c.cancel()  # startup or recovery (active frames were refused above)
+	if _mode == Mode.PARKOUR:
+		_finish_parkour_tween()  # a step cut short (only steps let a dodge start)
+	_set_sprinting(false)
+	_charge_steer = false
+	_land_left = 0.0
+	_land_kind = &""
+	_bleed_left = 0.0
+	_speed = 0.0
+	_dodging = true
+	_dodge_dir = d
+	_dodge_t = 0.0
+	_dodge_press_t = -INF
+	_dodge_invuln_until = now + Tuning.R7_DODGE_INVULN
+	_heading = d
+	# The opening ease ends at a stop (stick neutral) or at walking pace along the stick.
+	var stick := _stick()
+	var v_end := 0.0
+	if stick.length() > STICK_DEADZONE:
+		v_end = Tuning.WALK_SPEED * _walk_mult() * minf(stick.length(), 1.0) * maxf(stick.normalized().dot(d), 0.0)
+	var t := Tuning.R7_DODGE_TIME
+	_dg_va = minf(v_end, Tuning.R7_DODGE_DIST / t)
+	_dg_vp = _dg_va + (Tuning.R7_DODGE_DIST - _dg_va * t) * PI / (2.0 * t)
+	_dg_hold = false
+	dodges += 1
+	# The dodge's opening velocity first: P's dodge pose picks its slip side from
+	# the local velocity at the start (mirror_by_motion).
+	var hv0 := d * _dg_vp
+	fighter.velocity = Vector3(hv0.x, fighter.velocity.y, hv0.z)
+	_play_dodge_pose()
+	GameEvents.dodged.emit(fighter, d)
+	return true
+
+func is_dodging() -> bool:
+	return _dodging
+
+## Inside the dodge's Tuning.R7_DODGE_INVULN (real s from the press).
+func is_dodge_invulnerable() -> bool:
+	return TimeDirector.now() < _dodge_invuln_until
+
+func _can_dodge() -> bool:
+	if fighter == null or fighter.is_dead() or fighter.is_down() or fighter.is_held():
+		return false
+	if fighter.ragdoll != null and fighter.ragdoll.is_simulating():
+		return false
+	if fighter.carry != null and (fighter.carry.is_holding_body() or fighter.carry.is_busy()):
+		return false  # holding a body (Dash is the drive) or in a grab's own startup / recovery
+	if fighter.is_reacting() or fighter.is_in_hitstun():
+		return false
+	if fighter.combat != null and fighter.combat.is_attack_active():
+		return false
+	if _dodging or _driving:
+		return false
+	if _mode != Mode.GROUND and not (_mode == Mode.PARKOUR and _pk_kind == &"step"):
+		return false  # in the air, vaulting, wall running: no dodge
+	return TimeDirector.now() >= _dodge_ready_at
+
+## Straight back from the nearest attacking enemy, else the closest one (within
+## DODGE_AWAY_RANGE), else straight back from facing.
+func _dodge_away_dir() -> Vector3:
+	var me := fighter.global_position
+	var near: Fighter = null
+	var near_d := INF
+	var att: Fighter = null
+	var att_d := INF
+	for f in Targeting.opponents_of(fighter):
+		if f.is_down():
+			continue
+		var to := f.get_ground_position() - me
+		to.y = 0.0
+		var dist := to.length()
+		if dist > DODGE_AWAY_RANGE:
+			continue
+		if dist < near_d:
+			near_d = dist
+			near = f
+		if f.combat != null and f.combat.is_attacking() and dist < att_d:
+			att_d = dist
+			att = f
+	var from := att if att != null else near
+	if from != null:
+		var away := me - from.get_ground_position()
+		away.y = 0.0
+		if away.length_squared() > 1e-4:
+			return away.normalized()
+	return -fighter.get_forward()
+
+func _tick_dodge(pdt: float, factor: float, now: float) -> void:
+	var dur := Tuning.R7_DODGE_TIME
+	# Held at the hold time (this dodge's own press): the tail eases into the
+	# sprint ramp's speed at the dodge's end instead of the stop / walk.
+	if not _dg_hold and _dash_held and _dodge_press_t > -INF and is_equal_approx(_press_t, _dodge_press_t) \
+			and now - _press_t >= Tuning.DASH_HOLD_SPRINT - 1e-6 and _dodge_t < dur:
+		_dg_hold = true
+		_dg_th = _dodge_t
+		_dg_sh = _dodge_s(_dodge_t)
+		_dg_vh = _dodge_v(_dodge_t)
+		_dg_vto = _ramp_speed_at(dur - _dodge_t, get_speed_cap())
+	var t0 := _dodge_t
+	var t1 := t0 + pdt
+	var dist := _dodge_s(minf(t1, dur)) - _dodge_s(t0)
+	var ending := t1 >= dur - 1e-6
+	if ending:
+		dist += _dodge_exit_speed() * maxf(t1 - dur, 0.0)  # the rest of the tick at the exit speed
+	var hv := _dodge_dir * (dist / pdt)
+	# Automatic parkour stays on: a dodge (or the sprint it flows into) runs over
+	# what it meets, at the sprint's speed at most (the dodge's burst above the
+	# cap is not run speed, like the Round 5 dash it replaces). A step pauses
+	# the dodge for its short curve; a vault, mantle or kick-off takes over.
+	if fighter.is_on_floor() and _try_parkour(hv.limit_length(get_speed_cap()), pdt):
+		if _pk_kind != &"step":
+			_cut_dodge()
+		return
+	var vy := _vertical(pdt)
+	_apply_move(hv, vy.x, vy.y, factor)
+	_push_bodies(hv)
+	_track_off_floor(vy.y)
+	_dodge_t = t1
+	_free_hv = _dodge_dir * minf(hv.length(), Tuning.WALK_SPEED)  # a dodge is not earned speed
+	if ending:
+		_end_dodge(now)
+	elif fighter.is_on_floor():
+		_contact_step(hv)  # a low edge it met: stepped onto, the dodge goes on
+
+## m covered `t` s into the dodge.
+func _dodge_s(t: float) -> float:
+	var dur := Tuning.R7_DODGE_TIME
+	if _dg_hold and t > _dg_th:
+		var tau := dur - _dg_th
+		if tau <= 1e-5:
+			return _dg_sh + _dg_vto * (t - _dg_th)
+		var u := t - _dg_th
+		return _dg_sh + _dg_vto * u + (_dg_vh - _dg_vto) * (2.0 * tau / PI) * sin(u / tau * PI * 0.5)
+	return _dg_va * t + (_dg_vp - _dg_va) * (2.0 * dur / PI) * sin(clampf(t / dur, 0.0, 1.0) * PI * 0.5)
+
+## m/s `t` s into the dodge.
+func _dodge_v(t: float) -> float:
+	var dur := Tuning.R7_DODGE_TIME
+	if _dg_hold and t > _dg_th:
+		var tau := dur - _dg_th
+		if tau <= 1e-5:
+			return _dg_vto
+		return _dg_vto + (_dg_vh - _dg_vto) * cos(clampf((t - _dg_th) / tau, 0.0, 1.0) * PI * 0.5)
+	return _dg_va + (_dg_vp - _dg_va) * cos(clampf(t / dur, 0.0, 1.0) * PI * 0.5)
+
+func _dodge_exit_speed() -> float:
+	return _dg_vto if _dg_hold else _dg_va
+
+func _end_dodge(now: float) -> void:
+	if not _dodging:
+		return
+	_dodging = false
+	_hand_fall_to_air()
+	_dodge_ready_at = now + Tuning.R7_DODGE_COOLDOWN
+	var v := _dodge_exit_speed()
+	var hv := _dodge_dir * v
+	fighter.velocity = Vector3(hv.x, fighter.velocity.y, hv.z)
+	_free_hv = hv
+	_heading = _dodge_dir
+	if _dash_held and now - _press_t >= Tuning.DASH_HOLD_SPRINT - 1e-6 and _free_to_run() and _mode == Mode.GROUND:
+		# Held: flow into the sprint ramp at the speed the tail eased to.
+		_speed = maxf(v, Tuning.SPRINT_START_SPEED)
+		_rebuild = false
+		_bleed_left = 0.0
+		_set_sprinting(true, false)
+	elif _dg_hold:
+		_start_bleed(v)  # let go after the hold time: the run bleeds back to walking
+
+func _play_dodge_pose() -> void:
+	var anim := fighter.animator
+	if anim == null:
+		return
+	var hv := Vector3(fighter.velocity.x, 0.0, fighter.velocity.z)
+	anim.set_locomotion(fighter.global_basis.inverse() * hv, maxf(get_speed_cap(), Tuning.WALK_SPEED))
+	var id := &"dodge"
+	if not PoseLibrary.has_move(id):
+		id = DODGE_POSE_FALLBACK
+		if not PoseLibrary.has_move(id):
+			return
+	anim.play_timed(id, Tuning.R7_DODGE_TIME)
+
+## End a dodge early (a jump, a wall run, a hit). The invulnerability keeps its time.
+func _cut_dodge() -> void:
+	if not _dodging:
+		return
+	_dodging = false
+	_dodge_ready_at = TimeDirector.now() + Tuning.R7_DODGE_COOLDOWN
+
+# =============================================================================
+# Drive (Carry calls these while the player holds a body and Dash is held)
+# =============================================================================
+
+## Carry starts the drive (holding a body, Dash held): a forward run that ramps
+## R7_DRIVE_START_SPEED -> R7_DRIVE_MAX_SPEED, steered toward the camera/stick.
+## The run starts along the fighter's facing (the body is in front). Carry's
+## speed multipliers never slow it. It ends on end_drive(), or by itself when
+## the player is hit into a reaction, goes down, or lets go of what it held.
+func begin_drive() -> bool:
+	if fighter == null or fighter.is_dead() or fighter.is_down() or fighter.is_held():
+		return false
+	if fighter.ragdoll != null and fighter.ragdoll.is_simulating():
+		return false
+	if fighter.is_reacting() or fighter.is_in_hitstun():
+		return false
+	if _driving:
+		return true
+	if (_mode == Mode.PARKOUR and _pk_kind != &"step") or _mode == Mode.WALL_RUN or _mode == Mode.HANG:
+		return false
+	_set_sprinting(false)
+	_bleed_left = 0.0
+	_speed = 0.0
+	_cut_dodge()
+	_charge_steer = false
+	if _mode == Mode.AIR:
+		var top := _air_top
+		_mode = Mode.GROUND
+		_off_floor = true  # the drive carries the fall on
+		_air_top = top
+	var fwd := fighter.get_forward()
+	var cur := maxf(Vector3(fighter.velocity.x, 0.0, fighter.velocity.z).dot(fwd), 0.0)
+	_driving = true
+	_drive_dir = fwd
+	_drive_speed = clampf(cur, Tuning.R7_DRIVE_START_SPEED, Tuning.R7_DRIVE_MAX_SPEED)
+	_drive_t = 0.0
+	_drive_with_body = fighter.carry != null and fighter.carry.is_holding_body()
+	_heading = fwd
+	return true
+
+## End the drive. The player keeps moving at get_drive_speed() along the drive
+## and walking slows it down; call set_drive_speed(0) first to stop dead.
+func end_drive() -> void:
+	if not _driving:
+		return
+	_driving = false
+	_hand_fall_to_air()
+	var hv := _drive_dir * _drive_speed
+	if fighter != null:
+		fighter.velocity = Vector3(hv.x, fighter.velocity.y, hv.z)
+		fighter.face_dir = _drive_dir
+	_free_hv = hv
+	_heading = _drive_dir
+
+func is_driving() -> bool:
+	return _driving
+
+## m/s of the drive right now (0 when not driving).
+func get_drive_speed() -> float:
+	return _drive_speed if _driving else 0.0
+
+## Carry slows the drive after breaking through something or bowling an enemy.
+## The ramp goes on from the new speed (at most R7_DRIVE_MAX_SPEED).
+func set_drive_speed(speed: float) -> void:
+	if not _driving:
+		return
+	_drive_speed = clampf(speed, 0.0, Tuning.R7_DRIVE_MAX_SPEED)
+
+## Flat world direction of the drive (zero when not driving).
+func get_drive_dir() -> Vector3:
+	return _drive_dir if _driving else Vector3.ZERO
+
+## Still able to drive: alive, on the feet, not hit, still holding (when it began holding).
+func _drive_ok() -> bool:
+	if fighter.is_dead() or fighter.is_down() or fighter.is_held() or fighter.is_reacting():
+		return false
+	if fighter.combat != null and fighter.combat.is_stunned():
+		return false
+	if _drive_with_body and (fighter.carry == null or not fighter.carry.is_holding_body()):
+		return false
+	return true
+
+func _tick_drive(pdt: float, factor: float) -> void:
+	_drive_t += pdt
+	_drive_speed = _drive_step(_drive_speed, pdt)
+	_drive_dir = _turn_toward(_drive_dir, _drive_want(), deg_to_rad(Tuning.R7_DRIVE_TURN_RATE) * pdt)
+	_heading = _drive_dir
+	var hv := _drive_dir * _drive_speed
+	_drive_pass_through(hv * pdt)
+	var vy := _vertical(pdt)
+	_apply_move(hv, vy.x, vy.y, factor)
+	var pushed := _push_bodies(hv)
+	_track_off_floor(vy.y)
+	_free_hv = _drive_dir * _drive_speed
+	_face_drive()
+	if fighter.is_on_floor():
+		if not pushed and _contact_step(hv):
+			return
+		# Head-on into static geometry the body did not open: the run collapses
+		# to the speed it really has (Carry's probes slam the body first).
+		var along := Vector3(fighter.velocity.x, 0.0, fighter.velocity.z).dot(_drive_dir)
+		if not pushed and along < _drive_speed * SPRINT_BLOCKED_SHARE and _blocked_by_static():
+			_drive_speed = maxf(along, 0.0)
+	_tick_footsteps(pdt)
+
+## Where the drive steers: the camera-relative stick, else camera forward, else straight on.
+func _drive_want() -> Vector3:
+	var s := _stick()
+	if s.length() > STICK_DEADZONE:
+		return s.normalized()
+	var cf := _camera_forward()
+	return cf if cf != Vector3.ZERO else _drive_dir
+
+## Ease-out ramp: drive speed `t` s after it started (start speed at 0, max at the ramp time).
+static func _drive_speed_at(t: float) -> float:
+	var x := clampf(t / Tuning.R7_DRIVE_RAMP_TIME, 0.0, 1.0)
+	return lerpf(Tuning.R7_DRIVE_START_SPEED, Tuning.R7_DRIVE_MAX_SPEED, 1.0 - pow(1.0 - x, DRIVE_EASE_POW))
+
+## Inverse of _drive_speed_at: s of ramp this speed corresponds to.
+static func _drive_time_of(speed: float) -> float:
+	var span := Tuning.R7_DRIVE_MAX_SPEED - Tuning.R7_DRIVE_START_SPEED
+	var f := clampf((speed - Tuning.R7_DRIVE_START_SPEED) / span, 0.0, 1.0)
+	return Tuning.R7_DRIVE_RAMP_TIME * (1.0 - pow(1.0 - f, 1.0 / DRIVE_EASE_POW))
+
+## One step of the drive ramp from `speed` (a speed Carry set goes on along the curve).
+static func _drive_step(speed: float, dt: float) -> float:
+	if speed < Tuning.R7_DRIVE_START_SPEED:
+		var up := speed + DRIVE_LOW_ACCEL * dt
+		if up <= Tuning.R7_DRIVE_START_SPEED:
+			return up
+		dt = (up - Tuning.R7_DRIVE_START_SPEED) / DRIVE_LOW_ACCEL  # the rest of the step on the curve
+		speed = Tuning.R7_DRIVE_START_SPEED
+	return _drive_speed_at(_drive_time_of(speed) + dt)
+
+## The fighter faces the drive.
+func _face_drive() -> void:
+	fighter.rotation.y = atan2(-_drive_dir.x, -_drive_dir.z)
+	fighter.face_dir = _drive_dir
+
+## A breakable the driven body broke open in the capsule's way this tick: the
+## capsule ignores it for DRIVE_PASS_TIME so it follows the body through. Loose
+## debris never blocks capsules (Layers: capsules do not collide with DEBRIS).
+## A space query with our own exclude list, not test_move(): the capsule's
+## collision exceptions may hold a freed body's RID (a held body's severed
+## bone, a broken piece), which the physics server reports as an error.
+func _drive_pass_through(motion: Vector3) -> void:
+	if fighter.capsule == null or not fighter.is_inside_tree():
+		return
+	var space := fighter.get_world_3d().direct_space_state
+	_pt_params.shape = fighter.capsule.shape
+	_pt_params.collision_mask = fighter.collision_mask
+	_pt_params.exclude = _excluded_rids()
+	# The capsule where this tick's move (and a little more) takes it, lifted
+	# off the floor it stands on.
+	_pt_params.transform = fighter.capsule.global_transform.translated(motion + _drive_dir * 0.05 + Vector3.UP * 0.03)
+	for hit: Dictionary in space.intersect_shape(_pt_params, 8):
+		var body := hit.get("collider") as PhysicsBody3D
+		if body == null or not is_instance_valid(body) or body is CharacterBody3D or body is RigidBody3D:
+			continue
+		if _passing.has(body.get_instance_id()):
+			continue
+		if _opened_by_drive(body, motion.length()):
+			_pass_body(body, DRIVE_PASS_TIME)
+			drive_passes += 1
+
+## `body` is a breakable that is broken, or open along the drive's line within
+## the capsule's reach this tick (`ahead` m of motion).
+func _opened_by_drive(body: Node, ahead: float) -> bool:
+	var b := WorldTags.breakable_of(body)
+	if b == null or not is_instance_valid(b):
+		return false
+	if bool(b.get(&"is_broken")):
+		return true
+	if not b.has_method(&"is_point_open"):
+		return false
+	var feet := fighter.global_position
+	var hs := fighter.get_height_scale()
+	var reach := _radius() + ahead + 0.3
+	var d := 0.0
+	while d <= reach:
+		for h in DRIVE_PASS_HEIGHTS:
+			if bool(b.call(&"is_point_open", feet + _drive_dir * d + Vector3.UP * h * hs)):
+				return true
+		d += 0.1
+	return false
+
+## This tick's slide met static geometry (not a body, a prop or a fighter).
+func _blocked_by_static() -> bool:
+	for i in fighter.get_slide_collision_count():
+		var col := fighter.get_slide_collision(i)
+		if col.get_normal().y > 0.7:
+			continue
+		if col.get_collider() is StaticBody3D:
+			return true
+	return false
+
+# =============================================================================
+# Falls under a dodge or the drive
+# =============================================================================
+
+## Vertical (average over the step, at its end) for a move that owns the
+## capsule (dodge, drive): held to the floor on it, falling off it.
+func _vertical(pdt: float) -> Vector2:
+	if fighter.is_on_floor():
+		var vy := minf(fighter.velocity.y, 0.0)
+		return Vector2(vy, vy)
+	return _gravity_step(fighter.velocity.y, pdt)
+
+## A dodge or the drive owns the capsule: off a ledge it falls (is_airborne),
+## and touching down again reports a landing (events only: no pause, no shockwave).
+func _track_off_floor(vy_end: float) -> void:
+	if fighter.is_on_floor():
+		if _off_floor:
+			_off_floor = false
+			_touchdown(-minf(vy_end, 0.0))
+	elif vy_end < 0.0:
+		if not _off_floor:
+			_air_top = fighter.global_position.y
+		_off_floor = true
+
+## A dodge or the drive ended in the air: the fall goes on as a plain fall.
+func _hand_fall_to_air() -> void:
+	if not _off_floor:
+		return
+	var top := _air_top
+	_off_floor = false
+	_enter_air(false)
+	_air_top = maxf(top, _air_top)
+
+## A touch-down after a dodge or the drive carried the capsule off a ledge.
+func _touchdown(vertical_speed: float) -> void:
+	var level: StringName = &"soft"
+	if vertical_speed > Tuning.LAND_HEAVY_SPEED:
+		level = &"heavy"
+	elif vertical_speed >= Tuning.LAND_HARD_SPEED:
+		level = &"hard"
+	last_landing = level
+	last_landing_speed = vertical_speed
+	_touch_floor()
+	GameEvents.landing.emit(fighter, level, fighter.global_position, vertical_speed)
+	GameEvents.landed.emit(fighter)
+
+# =============================================================================
+# Round 7 helpers
+# =============================================================================
+
+## The stick's direction, or zero when neutral.
+func _stick_dir() -> Vector3:
+	var s := _stick()
+	return s.normalized() if s.length() > STICK_DEADZONE else Vector3.ZERO
+
+## Flat camera forward: the camera rig's yaw, else the viewport camera; zero without one.
+func _camera_forward() -> Vector3:
+	var tree := get_tree()
+	var rig := tree.get_first_node_in_group(&"camera_rig") if tree != null else null
+	var f := Vector3.ZERO
+	if rig != null and rig.has_method(&"get_flat_basis"):
+		var b: Basis = rig.call(&"get_flat_basis")
+		f = -b.z
+	else:
+		var vp := get_viewport()
+		var cam := vp.get_camera_3d() if vp != null else null
+		if cam != null:
+			f = -cam.global_basis.z
+	f.y = 0.0
+	return f.normalized() if f.length_squared() > 1e-4 else Vector3.ZERO

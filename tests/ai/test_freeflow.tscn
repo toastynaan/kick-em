@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/ai/test_freeflow.gd" id="1"]
+
+[node name="TestFreeflow" type="Node"]
+script = ExtResource("1")

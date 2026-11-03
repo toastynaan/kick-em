@@ -6,7 +6,6 @@ extends Node3D
 ## - Waves: Tuning.WAVES, then one more enemy per wave from Tuning.WAVE_GROWTH_MIX
 ##   (cycled), at most Tuning.MAX_ENEMIES_ON_FIELD alive at once. The run lasts
 ##   until the player dies. AttackDirector.set_wave() at each wave start.
-## - Every wave starts with exactly Tuning.debug_start_focus Focus bars (default 1).
 ## - The last enemy of a wave: GameEvents.last_kill (E plays the close-up and
 ##   the 0.2x slow time); the next wave waits until it has played. Then
 ##   Tuning.HEAL_BETWEEN_WAVES_HP back. No regen during a wave.
@@ -17,8 +16,13 @@ extends Node3D
 ##   clutter, wall holes, structure collapses, floor marks and decals created
 ##   (counted from events) are compared with what the world still holds, and
 ##   logged (get_persistence_report()). Round 6 adds clutter, collapses and floor.
-## Restart and "main menu" reload this scene; `pending_mode` (static, so it
-## survives the reload) makes the fresh scene skip the title and start a round.
+## - The player's upgrades are the pause menu's Debug settings (Tuning.debug_*,
+##   loaded from user://settings.cfg at start; every reader takes them live).
+## - Results: kills, time, the biggest single hit (damage, move, reaction) and
+##   the destruction counts.
+## Restart (Backspace / Back, the pause menu, the results) and "main menu"
+## reload this scene; `pending_mode` (static, so it survives the reload) makes
+## the fresh scene skip the title and start a round.
 ## OWNER: agent J (HUD, flow & menus).
 
 enum Phase { TITLE, FIGHTING, BREATHER, ENDING, OVER, CLEARING }
@@ -84,8 +88,9 @@ var _title_yaw := 0.0
 var _won := false
 
 # Run stats (results screen).
-var _biggest_p := 0.0
-var _biggest_tier: StringName = &""
+var _biggest_dmg := 0.0                 ## the player's hardest single hit (hit_landed damage)
+var _biggest_move: StringName = &""
+var _biggest_react: StringName = &""    ## its Round 7 reaction (HitInfo.react, else the tier name)
 var _walls_broken := {}             ## wall id -> true (staged breaches left out)
 var _limbs_taken := 0
 
@@ -110,7 +115,7 @@ var _debris_registered := 0
 func _ready() -> void:
 	add_to_group(&"game_mode")
 	CameraRig.load_settings()        # mouse sensitivity / invert Y from user://settings.cfg
-	GameMenus.load_debug_settings()  # speed cap, Battering Ram, starting Focus, overlay
+	GameMenus.load_debug_settings()  # the player's upgrades (speed cap, ram, teleport, pursuit) and the F3 overlay
 	menus = GameMenus.new()
 	menus.name = "Menus"
 	add_child(menus)
@@ -182,13 +187,13 @@ func start_round(round_mode: StringName) -> void:
 	_round_started_at = TimeDirector.now()
 	phase = Phase.FIGHTING
 	menus.can_pause = true
+	menus.can_restart = true
 	_capture_mouse()
 
 	if duel:
 		wave_total = 1
 		wave_index = 0
 		AttackDirector.set_wave(0)  # 0 = Duel (no wave scaling)
-		_set_wave_focus()
 		var e_xform: Transform3D = duel_spawns[1] if duel_spawns.size() > 1 else Transform3D(Basis(), p_xform.origin + Vector3(0, 0, -8))
 		e_xform = _facing(e_xform, p_xform.origin)
 		var duelist := _spawn_enemy(&"duelist", e_xform, PackedVector3Array())
@@ -208,6 +213,7 @@ func _teardown_round(keep_arena: bool) -> void:
 	get_tree().paused = false
 	menus.hide_all()
 	menus.can_pause = false
+	menus.can_restart = false
 	_free_title_cam()
 	var doomed: Array = [hud, camera_rig, fighters_root]
 	if not keep_arena:
@@ -237,8 +243,9 @@ func _teardown_round(keep_arena: bool) -> void:
 	_spawn_cd = 0.0
 	_spawn_blocked = 0.0
 	_spawn_cursor = 0
-	_biggest_p = 0.0
-	_biggest_tier = &""
+	_biggest_dmg = 0.0
+	_biggest_move = &""
+	_biggest_react = &""
 	_walls_broken.clear()
 	_limbs_taken = 0
 	_spawned_ids.clear()
@@ -320,8 +327,9 @@ func get_run_stats() -> Dictionary:
 		"wave_reached": maxi(wave_index + 1, 1),
 		"kills": kills,
 		"time": _round_elapsed(),
-		"biggest_hit": _biggest_p,
-		"biggest_hit_tier": _biggest_tier,
+		"biggest_hit": _biggest_dmg,
+		"biggest_hit_move": _biggest_move,
+		"biggest_hit_react": _biggest_react,
 		"walls_broken": _walls_broken.size(),
 		"limbs_taken": _limbs_taken,
 		"objects_smashed": _prop_ids.size(),
@@ -354,6 +362,7 @@ static func wave_mix(index: int) -> Array[StringName]:
 func _show_title() -> void:
 	phase = Phase.TITLE
 	menus.can_pause = false
+	menus.can_restart = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_ensure_arena()
 	_title_cam = Camera3D.new()
@@ -429,7 +438,6 @@ func _begin_wave(index: int) -> void:
 	_spawn_cd = 0.0
 	phase = Phase.FIGHTING
 	AttackDirector.set_wave(index + 1)  # 1-based: enemy startups shrink from Tuning.ENEMY_STARTUP_SHRINK_FROM
-	_set_wave_focus()
 	var subtitle := _mix_text(_wave_queue)
 	if index >= 1:
 		_stage_breach()
@@ -453,17 +461,6 @@ static func _mix_text(queue: Array[StringName]) -> String:
 		var n: int = counts[a]
 		parts.append("%d %s%s" % [n, String(a).to_upper(), "S" if n > 1 else ""])
 	return "  ·  ".join(parts)
-
-## Feel Reference (Focus): every wave starts with exactly Tuning.debug_start_focus
-## bars (Tuning.FOCUS_WAVE_START = 1 unless the debug setting says otherwise),
-## whatever was left from the last wave. Set directly, not through add_focus():
-## income rules (none during Focus mode) do not apply to the wave start.
-func _set_wave_focus() -> void:
-	if player == null or not is_instance_valid(player) or player.is_dead():
-		return
-	player.focus = clampf(Tuning.debug_start_focus, 0.0, Tuning.FOCUS_MAX)
-	player.focus_changed.emit(player.focus)
-	GameEvents.focus_changed.emit(player, player.focus)
 
 func _spawn_tick(delta: float) -> void:
 	_spawn_cd -= delta
@@ -702,7 +699,7 @@ func _end_round(won: bool) -> void:
 	_won = won
 	_round_time = TimeDirector.now() - _round_started_at
 	if camera_rig:
-		camera_rig.input_enabled = false  # no lock-on input once the round is decided
+		camera_rig.input_enabled = false  # no camera input once the round is decided
 	_wave_queue.clear()
 	GameEvents.round_over.emit(won)
 	if not won:
@@ -768,12 +765,15 @@ static func _has_listener(sig: Signal, obj: Object) -> bool:
 	return false
 
 # --- Run stats --------------------------------------------------------------------------
+## The biggest hit is the most damage one player hit did (strikes, counters,
+## drive slams, throws): Round 7 resolves hits per move, not by power score.
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null or player == null or info.attacker != player:
 		return
-	if info.power > _biggest_p:
-		_biggest_p = info.power
-		_biggest_tier = HitInfo.tier_name(info.tier)
+	if info.damage > _biggest_dmg:
+		_biggest_dmg = info.damage
+		_biggest_move = info.move_id
+		_biggest_react = info.react if info.react != &"" else HitInfo.tier_name(info.tier)
 
 func _on_limb_severed(fighter: Node3D, _cut: StringName, _piece: Node3D) -> void:
 	if fighter != null and _spawned_ids.has(fighter.get_instance_id()):

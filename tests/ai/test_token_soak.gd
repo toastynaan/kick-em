@@ -1,13 +1,14 @@
 extends Node
 ## F5 acceptance over real Waves (Feel Reference: Enemies have to be readable
-## first). Loads the real main scene, starts Waves, and drives the player with
-## a bot through the real Input actions (strikes, charges, sprint attacks,
-## blocks) for --seconds of simulation time (default 300 s = 5 minutes, at
+## first; Round 7). Loads the real main scene, starts Waves, and drives the
+## player with a bot through the real Round 7 Input actions (punch taps and
+## holds, the specials and kicks, Counter, grabs, dodges and sprints) for
+## --seconds of simulation time (default 300 s = 5 minutes, at
 ## --fixed-fps 120). The bot alternates PASSIVE_TIME of standing open (the
 ## crowd closes in and both token holders swing) with ACTIVE_TIME of fighting.
 ## The player is healed so the run lasts; every KILL_EVERY s one enemy is
-## finished off so the run reaches the later waves, where startups shrink (2
-## frames per wave from wave 5, down to 12): grunts first, a stick enemy or a
+## finished off so the run reaches the later waves (where the Round 5 startups
+## would shrink; Round 7 floors them at the tell minimum): grunts first, a stick enemy or a
 ## heavy only once it has attacked SPECIAL_MIN_ATTACKS times, so every
 ## archetype fights.
 ## Logged and checked:
@@ -19,9 +20,9 @@ extends Node
 ## - grunts, the stick enemy and the heavy all attack;
 ## - Round 6: no enemy is stuck (wanting to move, barely moving:
 ##   AIBrain.stuck_time) for more than MAX_STUCK s in the clutter-filled Yard;
-## - every attack's limb glow starts at least Tuning.ENEMY_STARTUP_EARLY_MIN
-##   frames before its first active frame in waves 1-4 (and no less than the
-##   wave's startup later);
+## - every attack's limb glow starts at least AttackDirector.tell_min_frames()
+##   (Tuning.R7_COUNTER_WINDOW + Tuning.R7_TELL_MARGIN) before its first
+##   active frame, at every wave;
 ## - no attack starts while the player is held; while he is down only free
 ##   swings (Tuning.DOWNED_FREE_SWINGS per holder per knockdown).
 ## Usage: Godot --headless --path <copy> --fixed-fps 120 res://tests/ai/test_token_soak.tscn [-- --seconds=N --seed=N]
@@ -282,21 +283,27 @@ func _drive(player: Fighter, t: float) -> void:
 	var actions: Array[StringName] = []
 	if dist > 4.5:
 		if roll < 0.45:
-			actions = [&"dash"]          # sprint at him, then strike (sidestep chances)
+			actions = [&"dash"]          # sprint at him
 		elif roll < 0.6:
-			actions = [&"dash", &"punch"]
-	elif roll < 0.35:
-		actions = [&"punch"]
+			actions = [&"punch"]         # a strike glides in
+	elif roll < 0.3:
+		actions = [&"punch"]             # held 0.18-0.55 s: a tap or a heavy
+	elif roll < 0.4:
+		actions = [&"uppercut"]
 	elif roll < 0.5:
-		actions = [&"heavy"]
-	elif roll < 0.62:
-		actions = [&"kick"]
+		actions = [&"gut_punch"]
+	elif roll < 0.57:
+		actions = [&"leg_kick"]
+	elif roll < 0.63:
+		actions = [&"front_kick"]
+	elif roll < 0.67:
+		actions = [&"roundhouse"]
 	elif roll < 0.8:
-		actions = [&"block"]
+		actions = [&"counter"]
 	elif roll < 0.88:
 		actions = [&"grab"]
 	else:
-		actions = [&"dash"]
+		actions = [&"dash"]              # a dodge (or a drive with a body)
 	for action in actions:
 		if InputMap.has_action(action):
 			Input.action_press(action)
@@ -348,12 +355,10 @@ func _end() -> void:
 	set_physics_process(false)
 	_release_all()
 	_report(_now())
-	var sides := 0
 	var guards := 0
 	for e in get_tree().get_nodes_in_group(&"enemies"):
 		var b := (e as Fighter).brain as AIBrain if e is Fighter else null
 		if b:
-			sides += b.sidesteps
 			guards += b.tap_guards
 	var waves := []
 	for w in min_lead_by_wave.keys():
@@ -362,8 +367,8 @@ func _end() -> void:
 	var per_wave := []
 	for w in waves:
 		per_wave.append("w%d %.1ff" % [w, min_lead_by_wave[w]])
-	print("[ai] info: %.0f s of Waves: reached wave %d, %d attacks %s, kills %d (forced %d), player downs %d, free swings %d (landed %d), stick drops %d, sidesteps/guards of live enemies %d/%d" % [
-		seconds, max_wave, attacks, str(by_arch), kills, forced_kills, downs, free_swings, free_landed, stick_drops, sides, guards])
+	print("[ai] info: %.0f s of Waves: reached wave %d, %d attacks %s, kills %d (forced %d), player downs %d, free swings %d (landed %d), stick drops %d, tap guards of live enemies %d" % [
+		seconds, max_wave, attacks, str(by_arch), kills, forced_kills, downs, free_swings, free_landed, stick_drops, guards])
 	print("[ai] info: min glow lead per wave (frames): %s" % ", ".join(per_wave))
 	var two_holders_early := 0
 	var two_attacking_early := 0
@@ -387,15 +392,14 @@ func _end() -> void:
 	check(gap_violations == 0 and min_gap >= Tuning.TOKEN_ACTIVE_GAP - 0.004,
 		"first active frames of different enemies always >= %.0f frames apart (min %.1f frames, %d violations)" % [
 			Tuning.TOKEN_ACTIVE_GAP * 60.0, min_gap * 60.0, gap_violations])
-	check(leads_early > 0 and min_lead_early >= Tuning.ENEMY_STARTUP_EARLY_MIN - 0.01,
+	var floor_f := AttackDirector.tell_min_frames()
+	check(leads_early > 0 and min_lead_early >= floor_f - 0.01,
 		"waves 1-4: every glow starts >= %.0f frames before the first active frame (min %.1f over %d attacks)" % [
-			Tuning.ENEMY_STARTUP_EARLY_MIN, min_lead_early, leads_early])
+			floor_f, min_lead_early, leads_early])
 	var later_ok := true
 	for w: int in min_lead_by_wave:
-		if w >= Tuning.ENEMY_STARTUP_SHRINK_FROM:
-			var want := maxf(Tuning.ENEMY_STARTUP_EARLY_MIN - Tuning.ENEMY_STARTUP_SHRINK * (w - Tuning.ENEMY_STARTUP_SHRINK_FROM + 1), Tuning.ENEMY_STARTUP_MIN)
-			later_ok = later_ok and float(min_lead_by_wave[w]) >= want - 0.01
-	check(later_ok, "later waves: glows never shorter than the wave's fastest startup")
+		later_ok = later_ok and float(min_lead_by_wave[w]) >= floor_f - 0.01
+	check(later_ok, "every wave: glows never shorter than %.0f frames (the counter window + margin)" % floor_f)
 	check(max_wave >= Tuning.ENEMY_STARTUP_SHRINK_FROM, "the run reached the faster waves (wave %d)" % max_wave)
 	check(starts_held == 0, "no attack started while the player was held (%d)" % starts_held)
 	check(too_many_free == 0, "while the player was down, at most %d free swing per enemy per knockdown (%d over)" % [Tuning.DOWNED_FREE_SWINGS, too_many_free])

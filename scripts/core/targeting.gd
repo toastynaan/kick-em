@@ -115,3 +115,59 @@ static func pick_ground_target(from: Fighter, dir: Vector3, max_dist := Tuning.G
 			best_score = score
 			best = f
 	return best
+
+# --- Round 7: freeflow target picking (docs/Round 7 — Freeflow Combat.md) -------
+## The target of a strike, grab or counter glide at the press.
+## `stick`: the stick in world space (camera-relative, zero when neutral).
+## `current`: the attacker's combat target (CombatController.get_combat_target()).
+## `camera_fwd`: flat camera forward, used when the stick is neutral and
+## `current` is no longer valid. Stick pushed: the best opponent within
+## Tuning.R7_TARGET_CONE degrees of the stick and `max_range`, scored like
+## strike_score (angle 0.6, distance 0.4). Downed and dead opponents are never
+## picked; crawlers, fleeing and lifted ones are.
+static func pick_freeflow_target(from: Fighter, stick: Vector3, current: Fighter, camera_fwd: Vector3,
+		max_range := Tuning.R7_TARGET_RANGE) -> Fighter:
+	var dir := Vector3(stick.x, 0.0, stick.z)
+	if dir.length() <= 0.2:
+		if is_freeflow_target(from, current, max_range):
+			return current
+		dir = Vector3(camera_fwd.x, 0.0, camera_fwd.z)
+	var origin := from.get_ground_position()
+	var best: Fighter = null
+	var best_score := -INF
+	for f in opponents_of(from):
+		if not is_freeflow_target(from, f, max_range):
+			continue
+		var s := freeflow_score(origin, dir, f.get_ground_position(), max_range)
+		if s > best_score:
+			best_score = s
+			best = f
+	return best
+
+## `f` can be a freeflow target of `from`: alive, an opponent, on its feet (or
+## crawling, or lifted), within `max_range` on the ground plane.
+static func is_freeflow_target(from: Fighter, f: Fighter, max_range := Tuning.R7_TARGET_RANGE) -> bool:
+	if f == null or not is_instance_valid(f) or f == from or f.is_dead() or f.team == from.team:
+		return false
+	if f.is_down():
+		return false
+	var to := f.get_ground_position() - from.get_ground_position()
+	to.y = 0.0
+	return to.length() <= max_range
+
+## strike_score with Tuning.R7_TARGET_CONE: -INF outside the cone or `reach`;
+## a zero `aim_dir` scores by distance only.
+static func freeflow_score(origin: Vector3, aim_dir: Vector3, target_pos: Vector3, reach: float) -> float:
+	var to := target_pos - origin
+	to.y = 0.0
+	var d := to.length()
+	if d > reach:
+		return -INF
+	var flat := Vector3(aim_dir.x, 0.0, aim_dir.z)
+	var angle := 0.0
+	if flat.length_squared() > 1e-6 and d > 0.01:
+		angle = rad_to_deg(flat.normalized().angle_to(to / d))
+		if angle > Tuning.R7_TARGET_CONE:
+			return -INF
+	var w := Tuning.TARGET_ANGLE_WEIGHT
+	return w * (1.0 - angle / Tuning.R7_TARGET_CONE) + (1.0 - w) * (1.0 - d / maxf(reach, 0.01))

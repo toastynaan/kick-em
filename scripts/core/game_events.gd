@@ -116,7 +116,7 @@ signal wall_run_ended(fighter: Node3D, reason: StringName)
 signal landing(fighter: Node3D, level: StringName, position: Vector3, vertical_speed: float)
 ## M: heavy-landing / slam shockwave (enemies inside stumble / knockdown radius react).
 signal shockwave(fighter: Node3D, position: Vector3, stumble_radius: float, knockdown_radius: float)
-## M: Battering Ram collision. result: what happened to the victim (&"flinch" | &"stumble" | &"knockdown");
+## M: Battering Ram collision. result: what happened to the victim (&"flinch" | &"stumble" | &"knockdown" | &"launch" (Round 7, level 3));
 ## self_result: to the runner (&"none" | &"stumble" | &"knockdown").
 signal rammed(runner: Node3D, victim: Node3D, result: StringName, self_result: StringName)
 ## G (Carry): holder started or stopped holding `held` (a Fighter, alive or dead, or a ThrowableProp; null = let go).
@@ -149,6 +149,35 @@ signal floor_damaged(position: Vector3, radius: float, level: int, surface: Stri
 ## D (WorldDamage): a blast was applied to the breakables around `center`.
 ## source: &"slam" | &"heavy_landing" | &"wall_break" | &"structure"
 signal world_blast(center: Vector3, radius: float, power: float, source: StringName)
+
+# Round 7: freeflow combat (docs/Round 7 — Freeflow Combat.md). Effects, camera,
+# HUD and AI LISTEN to these; the owner named on each emits it.
+## B: a player hit landed inside a chain. count = hits in the chain so far (HUD combo counter).
+signal chain_hit(attacker: Node3D, victim: Node3D, move_id: StringName, count: int)
+## B: the chain dropped (grace ran out, a whiff, or the attacker was hit). count = its final length.
+signal chain_ended(attacker: Node3D, count: int)
+## B: a strike glides to its target before its startup (camera smoothing, whoosh).
+signal glide_started(fighter: Node3D, target: Node3D, distance: float)
+## B: an enemy attack's counter window on `target` opened (open = true) or closed.
+## counterable: false for grabs and the shoulder charge (blue tell: dodge only).
+signal counter_window(attacker: Node3D, target: Node3D, open: bool, counterable: bool)
+## H (Defence): a Counter press caught `attacker`'s attack; the counter move follows.
+signal countered(defender: Node3D, attacker: Node3D)
+## H (Defence): a Counter press with no counterable window (whiff lock starts).
+signal counter_whiffed(defender: Node3D)
+## M (Traversal): a dodge started. direction: world, flat.
+signal dodged(fighter: Node3D, direction: Vector3)
+## H (Fighter): a reaction started. kind: Fighter.react kind (&"snap", &"spin", &"fold",
+## &"lift", &"buckle", &"push", &"repop"); knockdown and launch keep their own events.
+signal react_started(victim: Node3D, kind: StringName, attacker: Node3D)
+## G (Carry): a drive started / ended. reason: &"release" | &"slam" | &"shove" | &"timeout" | &"hit" | &"drop".
+signal drive_started(holder: Node3D, held: Node3D)
+signal drive_ended(holder: Node3D, reason: StringName)
+## G: the driven body met something. result: &"break" (went through) | &"slam" | &"shove" | &"bowl".
+## target: the breakable or the bowled fighter. speed: m/s at contact.
+signal drive_impact(holder: Node3D, victim: Node3D, target: Node3D, position: Vector3, speed: float, result: StringName)
+## G: throw wind-up progress 0..1 while LMB is held with a body (FX arm glow, camera zoom). 0 = ended.
+signal throw_windup(holder: Node3D, amount: float)
 
 # Flow
 signal round_started(mode: StringName)

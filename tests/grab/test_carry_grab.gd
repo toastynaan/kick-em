@@ -1,16 +1,19 @@
 extends Node3D
-## Round 5 (Feel Reference: Getting the grab), through CombatController's Grab
-## routing into Carry:
+## Round 7 (Grab, drive and throw: "Grab (C)"), through the real input path
+## (Input.action_press(&"grab") -> PlayerController -> InputInterpreter ->
+## CombatController -> Carry) where the button or the stick matters:
 ## - nobody in reach: the 6-frame grab whiffs and recovers;
 ## - a neutral enemy is caught in a clinch for Tuning.GRAB_BREAK_FRAMES (10
-##   frames), then the hold connects with Tuning.GRAB_CONNECT_HITSTOP;
+##   frames), then the hold connects with Tuning.GRAB_CONNECT_HITSTOP, always
+##   by the collar (Chest);
 ## - the enemy's Grab inside the window breaks it: both pushed ~1.5 m apart; a
 ##   press after the window does nothing;
-## - a staggered enemy is held at once (no window);
-## - the stick picks the part: toward = collar (Chest), sideways = arm on that
-##   side, away = leg;
-## - sprinting (when Traversal sprints): 2.0 m reach, 60% of the speed kept on
-##   contact, dropped to walk afterwards.
+## - a reacting (staggered) enemy is held at once (no window);
+## - glide: a grunt 2.8 m away is glided to at about R7_GLIDE_SPEED
+##   (glide_started) and caught; one beyond R7_GRAB_GLIDE is not picked (whiff);
+## - the stick picks the target (freeflow pick): stick right takes the grunt
+##   on the right, stick left the one on the left; the hold is still the collar;
+## - a downed grunt is picked up at once by the collar and held upright in front.
 ## OWNER: agent G.
 
 var _fail: Array[String] = []
@@ -21,7 +24,7 @@ func _ready() -> void:
 		print("FAIL timeout")
 		get_tree().quit(1))
 	Carry.force_enabled = true
-	for sig: StringName in [&"grab_started", &"grab_broken", &"carry_changed", &"strike_started", &"attack_whiff"]:
+	for sig: StringName in [&"grab_started", &"grab_broken", &"carry_changed", &"strike_started", &"attack_whiff", &"glide_started"]:
 		var s := sig
 		GameEvents.connect(s, func(a = null, b = null, c = null, d = null, e = null) -> void:
 			_events.append([s, a, b, c, d, e]))
@@ -31,20 +34,28 @@ func _ready() -> void:
 	await _neutral_clinch()
 	await _break(5, true)
 	await _break(13, false)
-	await _staggered()
-	await _parts()
-	await _sprint()
+	await _reacting()
+	await _glide(2.8, true)
+	await _glide(3.6, false)
+	await _stick_pick(Vector3.RIGHT, &"move_right")
+	await _stick_pick(Vector3.LEFT, &"move_left")
+	await _downed()
 	_finish()
 
+## The real player at the origin facing -Z, a camera rig looking -Z, and a
+## grunt `dist` m ahead facing it.
 func _pair(dist := 1.2, archetype := &"grunt") -> Array:
 	GrabTestUtil.reset_world()
+	GrabTestUtil.release_all_input()
 	_events.clear()
-	var p := GrabTestUtil.spawn(self, &"player", Vector3.ZERO, Vector3.FORWARD, Fighter.TEAM_PLAYER)
+	var p := GrabTestUtil.spawn_player(self, Vector3.ZERO, Vector3.FORWARD)
+	var cam := GrabTestUtil.make_camera(self, p, Vector3.FORWARD)
 	var e := GrabTestUtil.spawn(self, archetype, Vector3(0.0, 0.0, -dist), Vector3.BACK)
 	await GrabTestUtil.frames(self, 20)
-	return [p, e]
+	return [p, e, cam]
 
 func _clear(nodes: Array) -> void:
+	GrabTestUtil.release_all_input()
 	for n in nodes:
 		if is_instance_valid(n):
 			n.queue_free()
@@ -64,9 +75,10 @@ func _whiff() -> void:
 	var t_whiff := TimeDirector.now() - t0
 	await GrabTestUtil.wait_until(self, func() -> bool: return not p.carry.is_busy(), 1.0)
 	var t_free := TimeDirector.now() - t0
-	print("[whiff] whiff after %.3f s (startup %d + active %d frames), free after %.3f s, held=%s" % [
-		t_whiff, int(Tuning.GRAB_FRAMES), int(Carry.GRAB_ACTIVE_FRAMES), t_free, p.carry.held])
+	print("[whiff] whiff after %.3f s (startup %d + active %d frames), free after %.3f s, glide=%d held=%s" % [
+		t_whiff, int(Tuning.GRAB_FRAMES), int(Carry.GRAB_ACTIVE_FRAMES), t_free, _count(&"glide_started"), p.carry.held])
 	_check(p.carry.last_grab_result == &"whiff", "nobody in reach: whiff")
+	_check(_count(&"glide_started") == 0, "a grunt 5 m away (beyond R7_GRAB_GLIDE) is not glided to")
 	_check(absf(t_whiff - Tuning.frames(Tuning.GRAB_FRAMES + Carry.GRAB_ACTIVE_FRAMES)) < 0.03,
 		"whiff at the end of the 6-frame startup + active frames")
 	_check(t_free > t_whiff + Tuning.frames(Carry.GRAB_WHIFF_FRAMES) - 0.03, "whiff recovery")
@@ -77,30 +89,23 @@ func _neutral_clinch() -> void:
 	var pr: Array = await _pair(1.2)
 	var p: Fighter = pr[0]
 	var e: Fighter = pr[1]
-	e.carry.set(&"_ai_break_at", INF)
 	var t0 := TimeDirector.now()
-	GrabTestUtil.press(p, CombatController.Action.GRAB)
-	GrabTestUtil.release(p, CombatController.Action.GRAB)
-	# Keep the AI fallback from breaking it: clear its scheduled press every frame.
-	var ok := await GrabTestUtil.wait_until(self, func() -> bool:
-		e.carry.set(&"_ai_break_at", INF)
-		return e.carry.is_held(), 0.5)
+	await GrabTestUtil.key_tap(self, &"grab")
+	var ok := await GrabTestUtil.wait_until(self, func() -> bool: return e.carry.is_held(), 0.5)
 	var t_contact := TimeDirector.now() - t0
-	_check(ok and p.carry.held == e, "contact: the enemy is caught")
+	_check(ok and p.carry.held == e, "real input: C catches the enemy")
 	_check(p.carry.last_grab_result == &"clinch", "a neutral enemy is clinched first (break window)")
 	var clinch_start := TimeDirector.now()
-	ok = await GrabTestUtil.wait_until(self, func() -> bool:
-		e.carry.set(&"_ai_break_at", INF)
-		return p.carry.is_holding_body(), 0.6)
+	ok = await GrabTestUtil.wait_until(self, func() -> bool: return p.carry.is_holding_body(), 0.6)
 	var clinch := TimeDirector.now() - clinch_start
-	print("[neutral] contact after %.3f s, clinch %.3f s (window %.3f s), hold=%s motor=%s bone=%s frozen_after=%s" % [
+	print("[neutral] contact after %.3f s, clinch %.3f s (window %.3f s), hold=%s motor=%s bone=%s part=%s frozen_after=%s" % [
 		t_contact, clinch, Tuning.frames(Tuning.GRAB_BREAK_FRAMES), ok,
-		"ragdoll" if p.carry.uses_ragdoll_motor() else "pin", p.carry.get_held_bone(), p.is_frozen()])
+		"ragdoll" if p.carry.uses_ragdoll_motor() else "pin", p.carry.get_held_bone(), p.carry.get_held_part(), p.is_frozen()])
 	_check(ok, "the hold connects after the window")
 	_check(absf(clinch - Tuning.frames(Tuning.GRAB_BREAK_FRAMES)) < 0.03, "clinch lasts GRAB_BREAK_FRAMES")
 	_check(p.is_frozen() and e.is_frozen(), "connect hitstop on both")
-	_check(e.ragdoll.is_full_ragdoll(), "the held enemy is a ragdoll")
-	_check(p.carry.get_held_bone() == Bones.CHEST, "neutral stick: the collar (Chest)")
+	_check(e.ragdoll.is_full_ragdoll(), "the held enemy is a ragdoll held by the motor")
+	_check(p.carry.get_held_bone() == Bones.CHEST and p.carry.get_held_part() == &"collar", "the hold is the collar (Chest)")
 	_check(_count(&"grab_started") == 1 and _count(&"strike_started") == 1, "grab_started and strike_started once")
 	await GrabTestUtil.frames(self, 30)
 	_check(p.carry.is_holding_body() and e.carry.get_holder() == p, "still holding")
@@ -114,18 +119,15 @@ func _break(at_frame: int, expect_break: bool) -> void:
 	var e: Fighter = pr[1]
 	GrabTestUtil.press(p, CombatController.Action.GRAB)
 	GrabTestUtil.release(p, CombatController.Action.GRAB)
-	await GrabTestUtil.wait_until(self, func() -> bool:
-		e.carry.set(&"_ai_break_at", INF)
-		return e.carry.is_held(), 0.5)
+	await GrabTestUtil.wait_until(self, func() -> bool: return e.carry.is_held(), 0.5)
 	var caught := TimeDirector.now()
-	var d0 := Vector2(p.global_position.x - e.global_position.x, p.global_position.z - e.global_position.z).length()
+	var d0 := GrabTestUtil.flat_dist(p.global_position, e.global_position)
 	while TimeDirector.now() - caught < Tuning.frames(at_frame) - 1e-4:
-		e.carry.set(&"_ai_break_at", INF)
 		await get_tree().physics_frame
 	e.carry.on_grab_pressed(TimeDirector.now())
 	var pressed_at := TimeDirector.now() - caught
 	await GrabTestUtil.wait(self, 0.4)
-	var d1 := Vector2(p.global_position.x - e.global_position.x, p.global_position.z - e.global_position.z).length()
+	var d1 := GrabTestUtil.flat_dist(p.global_position, e.global_position)
 	var broken := _count(&"grab_broken") == 1
 	print("[break] enemy Grab %.3f s (%d frames) after the catch: broken=%s, gap %.2f -> %.2f m (+%.2f), holding=%s" % [
 		pressed_at, at_frame, broken, d0, d1, d1 - d0, p.carry.is_holding()])
@@ -138,101 +140,94 @@ func _break(at_frame: int, expect_break: bool) -> void:
 		p.carry.drop(&"release")
 	await _clear(pr)
 
-func _staggered() -> void:
+func _reacting() -> void:
 	var pr: Array = await _pair(1.2)
 	var p: Fighter = pr[0]
 	var e: Fighter = pr[1]
-	e.stagger(Vector3.FORWARD, 0.75)
+	e.react(&"fold", Vector3.FORWARD, 0.0, 1.0)
 	await GrabTestUtil.frames(self, 3)
-	var st := GrabTestUtil.state_name(e)
-	GrabTestUtil.press(p, CombatController.Action.GRAB)
-	GrabTestUtil.release(p, CombatController.Action.GRAB)
+	var st := "%s react=%s reacting=%s" % [GrabTestUtil.state_name(e), e.get_react_state(), e.is_reacting()]
+	await GrabTestUtil.key_tap(self, &"grab")
 	var ok := await GrabTestUtil.wait_until(self, func() -> bool: return p.carry.is_holding_body(), 0.4)
-	print("[staggered] enemy %s: result %s, holding=%s" % [st, p.carry.last_grab_result, ok])
-	_check(ok and p.carry.last_grab_result == &"hold", "a staggered enemy is held at once (no break window)")
+	print("[reacting] enemy %s: result %s, holding=%s" % [st, p.carry.last_grab_result, ok])
+	_check(ok and p.carry.last_grab_result == &"hold", "a reacting enemy is held at once (no break window)")
 	p.carry.drop(&"release")
 	await _clear(pr)
 
-func _parts() -> void:
-	var cases := [["toward", Vector3.FORWARD, [Bones.CHEST]],
-		["right", Vector3.RIGHT, [Bones.L_LOWER_ARM, Bones.R_LOWER_ARM]],
-		["left", Vector3.LEFT, [Bones.L_LOWER_ARM, Bones.R_LOWER_ARM]],
-		["away", Vector3.BACK, [Bones.L_LOWER_LEG, Bones.R_LOWER_LEG]]]
-	for c: Array in cases:
-		var pr: Array = await _pair(1.1)
-		var p: Fighter = pr[0]
-		var e: Fighter = pr[1]
-		# Off balance (always succeeds: no clinch to wait for), and not pushed away.
-		if e.combat.has_method(&"apply_stumble"):
-			e.combat.call(&"apply_stumble", 1.0)
-		else:
-			e.stagger(Vector3.BACK, 0.4)
-		await GrabTestUtil.frames(self, 2)
-		p.move_input = c[1]
-		GrabTestUtil.press(p, CombatController.Action.GRAB)
-		GrabTestUtil.release(p, CombatController.Action.GRAB)
-		await get_tree().physics_frame
-		p.move_input = Vector3.ZERO
-		await GrabTestUtil.wait_until(self, func() -> bool: return p.carry.is_holding_body(), 0.4)
-		var bone := p.carry.get_held_bone()
-		var side_ok := true
-		if c[0] == "right" or c[0] == "left":
-			# The held forearm is the one on the grabber's stick side.
-			var hp := e.rig.get_bone_global_position(bone)
-			var other := Bones.L_LOWER_ARM if bone == Bones.R_LOWER_ARM else Bones.R_LOWER_ARM
-			var op := e.rig.get_bone_global_position(other)
-			side_ok = (hp.x - op.x) * (c[1] as Vector3).x >= -0.05
-		print("[part] stick %s -> %s (%s) side ok=%s" % [c[0], bone, p.carry.get_held_part(), side_ok])
-		_check((c[2] as Array).has(bone) and side_ok, "stick %s holds %s" % [c[0], c[2]])
-		p.carry.drop(&"release")
-		await _clear(pr)
-
-## Sprint grab: only when Traversal (agent M) sprints.
-func _sprint() -> void:
-	var pr: Array = await _pair(9.0)
+## A grunt `dist` m ahead: glided to (and caught) when within R7_GRAB_GLIDE.
+func _glide(dist: float, expect: bool) -> void:
+	var pr: Array = await _pair(dist)
 	var p: Fighter = pr[0]
 	var e: Fighter = pr[1]
-	if p.traversal == null:
-		print("[sprint] SKIP: no Traversal")
-		await _clear(pr)
-		return
-	p.move_input = Vector3.FORWARD
-	p.face_dir = Vector3.FORWARD
-	GrabTestUtil.press(p, CombatController.Action.DASH)
-	var sprinting := await GrabTestUtil.wait_until(self, func() -> bool:
-		return p.traversal.is_sprinting() and p.traversal.get_speed() > 7.0, 1.6)
-	if not sprinting:
-		print("[sprint] SKIP: Traversal does not sprint yet (speed %.2f)" % p.traversal.get_speed())
-		GrabTestUtil.release(p, CombatController.Action.DASH)
-		p.move_input = Vector3.ZERO
-		await _clear(pr)
-		return
-	# Grab once the enemy is just inside the sprint reach.
-	await GrabTestUtil.wait_until(self, func() -> bool:
-		return absf(e.global_position.z - p.global_position.z) <= Tuning.GRAB_SPRINT_REACH + 0.35, 2.0)
-	var gap := absf(e.global_position.z - p.global_position.z)
-	var v0 := p.traversal.get_speed()
-	GrabTestUtil.press(p, CombatController.Action.GRAB)
-	GrabTestUtil.release(p, CombatController.Action.GRAB)
-	GrabTestUtil.release(p, CombatController.Action.DASH)
-	var caught := await GrabTestUtil.wait_until(self, func() -> bool:
-		e.carry.set(&"_ai_break_at", INF)
-		return e.carry.is_held(), 0.4)
-	var e_contact := e.get_center_of_mass()
-	await GrabTestUtil.frames(self, 3)
-	var v_contact := p.traversal.get_speed()
-	await GrabTestUtil.wait(self, 0.35)
-	var dragged := e.get_center_of_mass().z - e_contact.z
-	await GrabTestUtil.wait(self, 0.4)
-	var v_after := p.traversal.get_speed()
-	print("[sprint] gap %.2f m at %.2f m/s: caught=%s, speed on contact %.2f (%.0f%%), victim dragged %.2f m, speed after %.2f" % [
-		gap, v0, caught, v_contact, 100.0 * v_contact / maxf(v0, 0.01), -dragged, v_after])
-	_check(caught, "sprint grab reaches the enemy from up to GRAB_SPRINT_REACH")
-	_check(absf(v_contact / maxf(v0, 0.01) - Tuning.GRAB_SPRINT_KEEP) < 0.12, "the grab keeps 60% of the speed on contact")
-	_check(dragged < -0.3, "the victim is dragged backwards from the contact")
-	_check(v_after <= Tuning.WALK_SPEED * Tuning.HOLD_WALK_MULT + 0.6 or not p.traversal.is_sprinting(),
-		"a sprint grab drops you to walking speed afterwards")
-	p.move_input = Vector3.ZERO
+	var t0 := TimeDirector.now()
+	var peak := {"v": 0.0, "gliding": 0}
+	await GrabTestUtil.key_tap(self, &"grab", 1)
+	var ok := await GrabTestUtil.wait_until(self, func() -> bool:
+		peak["v"] = maxf(peak["v"], GrabTestUtil.hspeed(p))
+		if p.carry.is_gliding():
+			peak["gliding"] += 1
+		return e.carry.is_held() or p.carry.last_grab_result == &"whiff", 1.0)
+	var t := TimeDirector.now() - t0
+	var gap := GrabTestUtil.flat_dist(p.global_position, e.global_position)
+	print("[glide %.1f m] glide_started=%d gliding ticks %d, peak speed %.2f m/s (R7_GLIDE_SPEED %.1f), caught=%s after %.3f s, gap %.2f m, result %s" % [
+		dist, _count(&"glide_started"), int(peak["gliding"]), float(peak["v"]), Tuning.R7_GLIDE_SPEED,
+		e.carry.is_held(), t, gap, p.carry.last_grab_result])
+	if expect:
+		_check(_count(&"glide_started") == 1, "glide %.1f m: glide_started" % dist)
+		_check(float(peak["v"]) > Tuning.R7_GLIDE_SPEED * 0.85 and float(peak["v"]) < Tuning.R7_GLIDE_SPEED * 1.1,
+			"glide %.1f m: the glide runs at about R7_GLIDE_SPEED" % dist)
+		_check(ok and e.carry.is_held(), "glide %.1f m: the grunt is caught" % dist)
+	else:
+		_check(_count(&"glide_started") == 0 and not e.carry.is_held(), "%.1f m (beyond R7_GRAB_GLIDE): no glide, no catch" % dist)
+	if p.carry.is_holding():
+		p.carry.drop(&"release")
+	await _clear(pr)
+
+## Two grunts 2.4 m ahead, 35 degrees either side: the stick picks one.
+func _stick_pick(side: Vector3, action: StringName) -> void:
+	var pr: Array = await _pair(6.0)
+	var p: Fighter = pr[0]
+	var far: Fighter = pr[1]
+	var a := deg_to_rad(35.0)
+	var right := GrabTestUtil.spawn(self, &"grunt", Vector3(sin(a), 0.0, -cos(a)) * 2.4, Vector3(-sin(a), 0.0, cos(a)))
+	var left := GrabTestUtil.spawn(self, &"grunt", Vector3(-sin(a), 0.0, -cos(a)) * 2.4, Vector3(sin(a), 0.0, cos(a)))
+	await GrabTestUtil.frames(self, 10)
+	GrabTestUtil.key_down(action)
+	await GrabTestUtil.frames(self, 2)
+	await GrabTestUtil.key_tap(self, &"grab", 1)
+	GrabTestUtil.key_up(action)
+	var want := right if side == Vector3.RIGHT else left
+	var ok := await GrabTestUtil.wait_until(self, func() -> bool: return p.carry.is_holding_body(), 0.8)
+	var got: Node3D = p.carry.held
+	print("[stick %s] held %s (want %s), bone %s" % [action, got.name if got else "-", want.name, p.carry.get_held_bone()])
+	_check(ok and got == want, "stick %s picks the grunt on that side" % action)
+	_check(p.carry.get_held_bone() == Bones.CHEST, "stick %s: still the collar (no stick-chosen parts)" % action)
+	if p.carry.is_holding():
+		p.carry.drop(&"release")
+	await _clear(pr + [right, left, far])
+
+func _downed() -> void:
+	var pr: Array = await _pair(1.5)
+	var p: Fighter = pr[0]
+	var e: Fighter = pr[1]
+	e.knockdown(Vector3.FORWARD, Bones.CHEST)
+	await GrabTestUtil.wait_until(self, func() -> bool: return e.get_state() == RagdollController.State.GROUNDED, 3.0)
+	await GrabTestUtil.wait(self, 0.3)
+	var st := GrabTestUtil.state_name(e)
+	await GrabTestUtil.key_tap(self, &"grab")
+	var ok := await GrabTestUtil.wait_until(self, func() -> bool: return p.carry.is_holding_body(), 0.6)
+	await GrabTestUtil.wait(self, 0.6)
+	var hips := e.rig.get_physical_bone(Bones.HIPS)
+	var chest := e.rig.get_physical_bone(Bones.CHEST)
+	var hp: Vector3 = PhysicsServer3D.body_get_state(hips.get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM).origin
+	var cp: Vector3 = PhysicsServer3D.body_get_state(chest.get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM).origin
+	var tilt := rad_to_deg((cp - hp).normalized().angle_to(Vector3.UP))
+	var ahead := (cp - p.global_position).dot(p.get_forward())
+	print("[downed] state %s: result %s holding=%s bone %s, torso tilt %.0f deg, chest %.2f m ahead at %.2f m high" % [
+		st, p.carry.last_grab_result, ok, p.carry.get_held_bone(), tilt, ahead, cp.y])
+	_check(ok and p.carry.last_grab_result == &"hold", "a downed grunt is picked up at once")
+	_check(p.carry.get_held_bone() == Bones.CHEST, "picked up by the collar")
+	_check(tilt < 35.0 and ahead > 0.25 and cp.y > 0.9, "held upright in front")
 	p.carry.drop(&"release")
 	await _clear(pr)
 
@@ -243,6 +238,7 @@ func _check(ok: bool, what: String) -> void:
 
 func _finish() -> void:
 	Carry.force_enabled = false
+	GrabTestUtil.release_all_input()
 	if _fail.is_empty():
 		print("PASS test_carry_grab")
 		get_tree().quit(0)

@@ -1,8 +1,9 @@
 extends Traversal
-## Test double (Round 5): a Traversal whose speed and state the test sets.
-## Records what CombatController tells it, and drops to walking speed on a
-## sprint strike like the real one, so a test sees whether the strike sampled
-## its speed BEFORE calling on_strike_started().
+## Test double (Round 7): a Traversal whose speed and state the test sets.
+## Records what CombatController routes to it (Dash presses and releases,
+## strike starts, dropping strikes) and drops to walking speed on a sprint
+## strike like the real one, so a test sees whether the strike sampled its
+## speed BEFORE calling on_strike_started().
 ## OWNER: agent B (combat tests). Assign with `fighter.traversal = double`.
 
 var speed := 0.0            ## m/s toward anything (speed_toward) and get_speed()
@@ -13,11 +14,13 @@ var vaulting := false
 var vault_progress := 0.0
 var airborne := false
 var charge_steering := false
+var dodging := false
+var dash_presses := 0
+var dash_releases := 0
 ## on_strike_started() calls: the sprint flag of each, in order.
 var strikes: Array[bool] = []
 ## speed reported by speed_toward() at each call (before / after the drop).
 var sampled: Array[float] = []
-var last_dir := Vector3.ZERO
 var drops := 0
 
 ## Only the fighter: the real setup() builds probes.
@@ -27,8 +30,8 @@ func setup(p_fighter: Fighter) -> void:
 func physics_move(_delta: float) -> bool:
 	return false
 
-func speed_toward(dir: Vector3) -> float:
-	last_dir = dir
+## A wall run reads as the cap (doc: God path).
+func speed_toward(_dir: Vector3) -> float:
 	var v := cap if wall_running else speed
 	sampled.append(v)
 	return v
@@ -56,6 +59,16 @@ func get_vault_progress() -> float:
 
 func is_airborne() -> bool:
 	return airborne
+
+func is_dodging() -> bool:
+	return dodging
+
+func on_dash_pressed() -> bool:
+	dash_presses += 1
+	return true
+
+func on_dash_released() -> void:
+	dash_releases += 1
 
 ## Like the real one: a sprint strike drops to walk and ends a wall run.
 func on_strike_started(sprint_strike: bool) -> void:

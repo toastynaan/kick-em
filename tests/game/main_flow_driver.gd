@@ -23,11 +23,21 @@ func _frames(n: int) -> void:
 func _gm() -> GameMode:
 	return get_tree().current_scene as GameMode
 
-func _press(action: StringName) -> void:
-	var ev := InputEventAction.new()
-	ev.action = action
-	ev.pressed = true
-	get_tree().root.push_input(ev)
+## A real key press and release, routed by the viewport as in play.
+func _key(code: Key) -> void:
+	for down in [true, false]:
+		var ev := InputEventKey.new()
+		ev.physical_keycode = code
+		ev.keycode = code
+		ev.pressed = down
+		get_tree().root.push_input(ev)
+
+func _pad(button: JoyButton) -> void:
+	for down in [true, false]:
+		var ev := InputEventJoypadButton.new()
+		ev.button_index = button
+		ev.pressed = down
+		get_tree().root.push_input(ev)
 
 func _run() -> void:
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
@@ -63,83 +73,150 @@ func _run() -> void:
 	_check(CameraRig.invert_y, "invert Y toggles")
 	gm.menus.sens_slider.value = old_sens  # restore the user's settings
 	gm.menus.invert_check.button_pressed = old_inv
-	# Debug settings (pause > DEBUG SETTINGS): Tuning debug vars, saved to settings.cfg.
-	var saved := [Tuning.debug_speed_cap, Tuning.debug_ram_level, Tuning.debug_start_focus, Tuning.debug_overlay]
+	# Pause items: resume, restart, debug settings (the player's upgrades), main menu.
 	var labels2 := PackedStringArray()
 	for b in gm.menus._pause.find_children("*", "Button", true, false):
 		labels2.append((b as Button).text)
-	_check(labels2.has("DEBUG SETTINGS"), "pause menu lists DEBUG SETTINGS")
-	gm.menus.show_debug()
+	print("    pause items: %s" % " | ".join(labels2))
+	_check(labels2.has("RESUME") and labels2.has("RESTART  (Backspace / Back)") and labels2.has("DEBUG SETTINGS")
+		and labels2.has("MAIN MENU"), "pause menu: RESUME, RESTART (Backspace / Back), DEBUG SETTINGS, MAIN MENU")
+
+	# Debug settings (Round 7 amendment: the upgrades). Each step writes its
+	# Tuning.debug_* static at once and saves it to settings.cfg.
+	var saved := [Tuning.debug_speed_cap, Tuning.debug_ram_level, Tuning.debug_teleport, Tuning.debug_pursuit_max,
+		Tuning.debug_overlay]
+	gm.menus.debug_settings_button.pressed.emit()
 	await _frames(2)
-	_check(gm.menus.screen == GameMenus.Screen.DEBUG, "debug settings screen opens")
+	_check(gm.menus.screen == GameMenus.Screen.DEBUG, "DEBUG SETTINGS opens the debug screen")
+	var dlabels := PackedStringArray()
+	for b in gm.menus._debug.find_children("*", "Button", true, false):
+		dlabels.append((b as Button).text)
+	print("    debug items: %s" % " | ".join(dlabels))
+	_check(gm.menus.debug_buttons.keys() == [&"speed_cap", &"ram_level", &"teleport", &"pursuit_max", &"overlay"],
+		"debug items: speed cap, Battering Ram, teleport, pursuit chain, overlay (%s)" % [gm.menus.debug_buttons.keys()])
+	_check(not " ".join(dlabels).contains("FOCUS"), "no starting Focus setting")
 	Tuning.debug_speed_cap = 8.0
 	Tuning.debug_ram_level = 0
-	Tuning.debug_start_focus = 1.0
+	Tuning.debug_teleport = true
+	Tuning.debug_pursuit_max = 2
 	Tuning.debug_overlay = false
-	gm.menus.step_debug_setting(&"speed_cap", 1)
-	_check(is_equal_approx(Tuning.debug_speed_cap, 10.0), "speed cap 8 -> 10")
+	(gm.menus.debug_buttons[&"speed_cap"] as Button).pressed.emit()
+	_check(is_equal_approx(Tuning.debug_speed_cap, 10.0), "speed cap 8 -> 10 (pressing the item)")
 	gm.menus.step_debug_setting(&"speed_cap", 1)
 	gm.menus.step_debug_setting(&"speed_cap", 1)
 	_check(is_equal_approx(Tuning.debug_speed_cap, 8.0), "speed cap cycles 10 -> 12 -> 8")
 	gm.menus.step_debug_setting(&"speed_cap", -1)
 	_check(is_equal_approx(Tuning.debug_speed_cap, 12.0), "left steps back to 12")
+	var tr := gm.player.traversal
+	if tr != null and tr.has_method(&"get_speed_cap"):
+		_check(is_equal_approx(float(tr.call(&"get_speed_cap")), 12.0), "applies live: the player's sprint cap reads %.0f m/s" % float(tr.call(&"get_speed_cap")))
 	for i in 3:
 		gm.menus.step_debug_setting(&"ram_level", 1)
 	_check(Tuning.debug_ram_level == 3, "Battering Ram 0 -> 3")
+	_check((gm.menus.debug_buttons[&"ram_level"] as Button).text == "BATTERING RAM:  LEVEL 3  (launches)", "level 3 says it launches")
 	gm.menus.step_debug_setting(&"ram_level", 1)
 	_check(Tuning.debug_ram_level == 0, "Battering Ram wraps to 0")
 	gm.menus.step_debug_setting(&"ram_level", -1)
-	gm.menus.step_debug_setting(&"start_focus", 1)
-	_check(is_equal_approx(Tuning.debug_start_focus, 2.0), "starting Focus 1 -> 2")
+	gm.menus.step_debug_setting(&"teleport", 1)
+	_check(not Tuning.debug_teleport and (gm.menus.debug_buttons[&"teleport"] as Button).text == "TELEPORT:  OFF", "teleport toggles off")
+	gm.menus.step_debug_setting(&"pursuit_max", 1)
+	_check(Tuning.debug_pursuit_max == 3, "pursuit chain 2 -> 3")
+	gm.menus.step_debug_setting(&"pursuit_max", 1)
+	_check(Tuning.debug_pursuit_max == 0 and (gm.menus.debug_buttons[&"pursuit_max"] as Button).text == "PURSUIT CHAIN:  0  (off)",
+		"pursuit chain wraps to 0 (off)")
+	gm.menus.step_debug_setting(&"pursuit_max", 1)
 	gm.menus.step_debug_setting(&"overlay", 1)
 	_check(Tuning.debug_overlay, "debug overlay toggles on")
 	await _frames(2)
 	_check(gm.hud.is_debug_visible(), "HUD overlay follows the setting")
 	var btn_text := (gm.menus.debug_buttons[&"speed_cap"] as Button).text
-	_check(btn_text.contains("12 m/s"), "button shows the value (%s)" % btn_text)
+	_check(btn_text == "SPEED CAP:  12 m/s  (upgraded)", "button shows the value (%s)" % btn_text)
 	var cfg2 := ConfigFile.new()
 	cfg2.load(GameMenus.SETTINGS_PATH)
 	_check(is_equal_approx(float(cfg2.get_value("debug", "speed_cap", 0.0)), 12.0) and int(cfg2.get_value("debug", "ram_level", -1)) == 3
-		and is_equal_approx(float(cfg2.get_value("debug", "start_focus", 0.0)), 2.0) and bool(cfg2.get_value("debug", "overlay", false))
-		and cfg2.has_section_key("camera", "mouse_sensitivity"),
-		"debug settings saved to settings.cfg next to the camera settings")
+		and bool(cfg2.get_value("debug", "teleport", true)) == false and int(cfg2.get_value("debug", "pursuit_max", -1)) == 1
+		and bool(cfg2.get_value("debug", "overlay", false)) and cfg2.has_section_key("camera", "mouse_sensitivity"),
+		"upgrades saved to settings.cfg next to the camera settings (%s)" % [cfg2.get_section_keys("debug")])
 	Tuning.debug_speed_cap = 8.0
 	Tuning.debug_ram_level = 0
+	Tuning.debug_teleport = true
+	Tuning.debug_pursuit_max = 2
+	Tuning.debug_overlay = false
 	GameMenus.load_debug_settings(true)
-	_check(is_equal_approx(Tuning.debug_speed_cap, 12.0) and Tuning.debug_ram_level == 3, "settings load back from settings.cfg")
-	_press(&"pause")
+	_check(is_equal_approx(Tuning.debug_speed_cap, 12.0) and Tuning.debug_ram_level == 3 and not Tuning.debug_teleport
+		and Tuning.debug_pursuit_max == 1 and Tuning.debug_overlay, "settings load back from settings.cfg")
+	# Bad values in the file are refused or clamped.
+	cfg2.set_value("debug", "speed_cap", 11.0)
+	cfg2.set_value("debug", "ram_level", 9)
+	cfg2.set_value("debug", "pursuit_max", -4)
+	cfg2.save(GameMenus.SETTINGS_PATH)
+	GameMenus.load_debug_settings(true)
+	_check(is_equal_approx(Tuning.debug_speed_cap, 12.0) and Tuning.debug_ram_level == 3 and Tuning.debug_pursuit_max == 0,
+		"a cap that is not 8/10/12 is ignored; levels clamp (cap %.0f, ram %d, pursuit %d)" % [
+			Tuning.debug_speed_cap, Tuning.debug_ram_level, Tuning.debug_pursuit_max])
+	_key(KEY_ESCAPE)
 	await _frames(2)
 	_check(gm.menus.screen == GameMenus.Screen.PAUSE and get_tree().paused, "Esc in debug settings goes back to pause")
 	Tuning.debug_speed_cap = saved[0]
 	Tuning.debug_ram_level = saved[1]
-	Tuning.debug_start_focus = saved[2]
-	Tuning.debug_overlay = saved[3]
+	Tuning.debug_teleport = saved[2]
+	Tuning.debug_pursuit_max = saved[3]
+	Tuning.debug_overlay = saved[4]
 	GameMenus.save_debug_settings()  # restore the user's settings
 	gm.resume()
 	await _frames(2)
 	_check(not get_tree().paused and gm.menus.screen == GameMenus.Screen.NONE, "resume")
 
+	# Restart from the pause menu's item.
+	gm.pause()
+	await _frames(2)
 	var old := gm
-	gm.restart()
+	gm.menus.restart_button.pressed.emit()
 	await _frames(8)
 	gm = _gm()
-	_check(gm != null and gm != old, "restart reloads the scene")
+	_check(gm != null and gm != old, "pause > RESTART reloads the scene")
 	if gm == null:
 		return
-	_check(gm.mode == &"duel" and gm.phase == GameMode.Phase.FIGHTING and gm.player != null, "restart goes straight back into a duel")
+	_check(gm.mode == &"duel" and gm.phase == GameMode.Phase.FIGHTING and gm.player != null and not get_tree().paused,
+		"restart goes straight back into a duel, unpaused")
 	_check(get_tree().get_nodes_in_group(&"player").size() == 1, "exactly one player after restart")
 
-	# Same restart through the keys (Esc, then R), routed by the viewport as in
-	# play. GameMenus once called get_viewport() after the reload had already
-	# taken it out of the tree: a SCRIPT ERROR that froze the editor run.
-	_press(&"pause")
+	# Backspace in play restarts (the real key, routed by the viewport as in play).
+	await _frames(4)
+	old = gm
+	_key(KEY_BACKSPACE)
+	await _frames(8)
+	gm = _gm()
+	_check(gm != null and gm != old and gm.phase == GameMode.Phase.FIGHTING and gm.mode == &"duel", "Backspace in play restarts the duel")
+	if gm == null:
+		return
+
+	# Esc, then Backspace in the pause menu. GameMenus once called get_viewport()
+	# after the reload had already taken it out of the tree: a SCRIPT ERROR that
+	# froze the editor run.
+	await _frames(4)
+	_key(KEY_ESCAPE)
 	await _frames(2)
 	_check(get_tree().paused and gm.menus.screen == GameMenus.Screen.PAUSE, "Esc pauses")
 	old = gm
-	_press(&"restart")
+	_key(KEY_BACKSPACE)
 	await _frames(8)
 	gm = _gm()
-	_check(gm != null and gm != old and gm.phase == GameMode.Phase.FIGHTING, "R in the pause menu restarts the duel")
+	_check(gm != null and gm != old and gm.phase == GameMode.Phase.FIGHTING and not get_tree().paused,
+		"Backspace in the pause menu restarts the duel")
+	if gm == null:
+		return
+
+	# Gamepad: Start pauses, Back restarts.
+	await _frames(4)
+	_pad(JOY_BUTTON_START)
+	await _frames(2)
+	_check(get_tree().paused and gm.menus.screen == GameMenus.Screen.PAUSE, "Start pauses")
+	old = gm
+	_pad(JOY_BUTTON_BACK)
+	await _frames(8)
+	gm = _gm()
+	_check(gm != null and gm != old and gm.phase == GameMode.Phase.FIGHTING, "Back (gamepad) restarts the duel")
 	if gm == null:
 		return
 
@@ -149,6 +226,10 @@ func _run() -> void:
 	_check(gm != null and gm.phase == GameMode.Phase.TITLE and gm.menus.screen == GameMenus.Screen.TITLE, "main menu returns to the title")
 	if gm == null:
 		return
+	old = gm
+	_key(KEY_BACKSPACE)
+	await _frames(8)
+	_check(_gm() == old and gm.phase == GameMode.Phase.TITLE and gm.player == null, "Backspace on the title does nothing")
 
 	gm.menus.waves_pressed.emit()
 	await _frames(6)

@@ -6,9 +6,14 @@ extends Node
 ## Round 5 (Feel Reference: Contact frame, Effects that sell power): the
 ## contact frame follows the hit TIER (flash size, a shock ring from launch up
 ## at most once per Tuning.FX_RING_GAP, blood none / small / more, the victim's
-## mesh jitter during the freeze); the charge glow; parry, sidestep and body
-## effects; world effects for movement live in the WorldFX child
-## (scripts/fx/world_fx.gd). Decals persist for the round within caps: blood
+## mesh jitter during the freeze); the charge glow; body effects; world
+## effects for movement live in the WorldFX child (scripts/fx/world_fx.gd).
+## Round 7 (Freeflow combat): a player hit (HitInfo.react set) sizes its flash,
+## brightness, shock ring and jitter by HitInfo.weight instead of the tier;
+## the other Round 7 effects (push dust and skid, counter, dodge, reactions,
+## drive, throw wind-up glow) live in the FreeflowFX child
+## (scripts/fx/freeflow_fx.gd). Parry, sidestep and the aimed-zone highlight
+## are gone with their features. Decals persist for the round within caps: blood
 ## decals at most Tuning.BLOOD_DECAL_MAX, marks (floor cracks) MARK_DECAL_MAX,
 ## the oldest fading first; get_decal_counts() reports them (end-of-wave check).
 ## Mostly event-driven: listens to GameEvents (hit_landed, body_impact,
@@ -380,7 +385,6 @@ func _connect_events() -> void:
 	GameEvents.fighter_damaged.connect(_on_fighter_damaged)
 	GameEvents.wave_started.connect(_on_wave_started)
 	GameEvents.armor_absorbed.connect(_on_armor_absorbed)
-	GameEvents.aim_zone_changed.connect(_on_aim_zone_changed)
 	GameEvents.dazed.connect(_on_dazed)
 	GameEvents.stumbled.connect(_on_stumbled)
 	GameEvents.tripped.connect(_on_tripped)
@@ -394,21 +398,44 @@ func _connect_events() -> void:
 ## by tier: none on flinch (or a sweep's stumble), a small spray on stagger,
 ## more from knockdown up; a ground strike adds a spray into the floor.
 ## Grabs do not bleed; a throw bleeds when the body lands (body_impact).
+## Round 7: a player hit (HitInfo.react set) sizes the flash, its brightness,
+## the shock ring (from R7_RING_FROM, or any launch payoff) and the jitter by
+## HitInfo.weight; the jitter lasts the move's own hitstop. Blood stays by tier.
 func _on_hit_landed(info: HitInfo) -> void:
 	if info == null or not is_instance_valid(info.victim):
 		return
 	_drop_charge_glow(info.victim)  # a hit knocks the victim out of any charge
+	if FXRules.is_throw_release(info):
+		return  # Round 7: a throw's release is no contact (its whoosh is AudioFX's)
 	var tier := FXRules.tier_of(info)
 	var at := _hit_point(info)
 	var frame := Engine.get_physics_frames()
-	var rec := {"frame": frame, "tier": tier, "flash": false, "ring": false, "blood": false}
+	var rec := {"frame": frame, "tier": tier, "flash": false, "ring": false, "blood": false, "weight": -1.0}
 	_flash(info.victim)
 	if info.kind != &"grab":
-		var ring := tier >= HitInfo.Tier.LAUNCH and _ring_allowed()
-		impact_flash(at, TIER_FLASH[clampi(tier, 0, TIER_FLASH.size() - 1)], false, ring)
+		if FXRules.is_round7(info):
+			var w := FXRules.weight_of(info)
+			var p := lerpf(R7_FLASH_POWER.x, R7_FLASH_POWER.y, w)
+			var bright := lerpf(R7_FLASH_BRIGHT.x, R7_FLASH_BRIGHT.y, w)
+			var rp := lerpf(R7_RING_POWER.x, R7_RING_POWER.y, clampf((w - R7_RING_FROM) / (1.0 - R7_RING_FROM), 0.0, 1.0))
+			var ring := (w >= R7_RING_FROM or info.react == &"launch") and _ring_allowed()
+			impact_flash(at, p, false, ring, bright, rp)
+			rec["ring"] = ring
+			rec["weight"] = w
+			rec["flash_size"] = lerpf(IMPACT_FLASH_SIZE.x, IMPACT_FLASH_SIZE.y, p)
+			rec["brightness"] = bright
+			rec["ring_size"] = lerpf(IMPACT_RING_SIZE.x, IMPACT_RING_SIZE.y, rp) if ring else 0.0
+			_jitter_start(info.victim, tier, w, info.hitstop)
+		else:
+			var ring := tier >= HitInfo.Tier.LAUNCH and _ring_allowed()
+			var p := TIER_FLASH[clampi(tier, 0, TIER_FLASH.size() - 1)]
+			impact_flash(at, p, false, ring)
+			rec["ring"] = ring
+			rec["flash_size"] = lerpf(IMPACT_FLASH_SIZE.x, IMPACT_FLASH_SIZE.y, p)
+			rec["brightness"] = IMPACT_BRIGHTNESS
+			rec["ring_size"] = lerpf(IMPACT_RING_SIZE.x, IMPACT_RING_SIZE.y, p) if ring else 0.0
+			_jitter_start(info.victim, tier)
 		rec["flash"] = true
-		rec["ring"] = ring
-		_jitter_start(info.victim, tier)
 	var bleeds := info.kind != &"grab" and info.kind != &"throw"
 	var spray_e: float = TIER_SPRAY[clampi(tier, 0, TIER_SPRAY.size() - 1)]
 	# Knees and headbutts on a held body are flinch-tier but bleed a little
@@ -605,7 +632,6 @@ func _process(delta: float) -> void:
 	_update_charge_glows(real)
 	_update_impact_flashes(real)
 	_update_swirls(delta)
-	_update_highlight(real)
 	_arena_check_t -= delta
 	if _arena_check_t <= 0.0:
 		_arena_check_t = 0.5
@@ -1835,15 +1861,8 @@ const SWIRL_RADIUS := 0.24        ## m
 const SWIRL_SPEED := 5.0          ## rad/s
 const SWIRL_STAR_SIZE := 0.2      ## m
 const SWIRL_COLOR := Color(1.0, 0.9, 0.4)
-const HIGHLIGHT_NORMAL := 0.55    ## aimed-zone highlight strength in normal play
-const HIGHLIGHT_FOCUS := 0.9      ## ...and while Focus is active
-const HIGHLIGHT_RATE := 6.0       ## per real second
-const HIGHLIGHT_COLOR := Color(1.0, 0.82, 0.35)
 const PLAYER_WOUND_SCALE := 1.35  ## wound radius x on the player (damage reads without the HP bar)
 const PLAYER_BLOOD_SPREAD := 1.6  ## lost-HP grime spread x on the player (shows on the back, to the camera)
-const ZONE_HALO_SIZE := Vector2(0.35, 0.75)  ## m: aimed-zone halo in normal play .. in Focus
-const ZONE_HALO_ALPHA := Vector2(0.35, 0.75)
-const ZONE_HALO_COLOR := Color(1.0, 0.82, 0.35)
 const STUMBLE_DUST_ENERGY := 900.0
 const TRIP_DUST_ENERGY := 1800.0
 
@@ -1857,6 +1876,8 @@ var _impact_nodes: Array[MeshInstance3D] = []
 var _impact_rings: Array[MeshInstance3D] = []
 var _impact_age := PackedFloat32Array()    ## real s since the flash; < 0 idle
 var _impact_power := PackedFloat32Array()
+var _impact_bright := PackedFloat32Array()     ## additive strength per flash
+var _impact_ring_power := PackedFloat32Array() ## ring size 0..1 per flash
 var _impact_tint: Array[Color] = []
 var _impact_next := 0
 var _swirls: Array[Node3D] = []
@@ -1864,12 +1885,6 @@ var _swirl_fighter: Array = []
 var _swirl_time := PackedFloat32Array()   ## s left (<= 0 idle)
 var _swirl_age := PackedFloat32Array()
 var _swirl_next := 0
-var _hl_target_id := 0
-var _hl_zone := -1
-var _hl_parts: Array[MeshInstance3D] = []
-var _hl_level := 0.0
-var _hl_age := 0.0
-var _hl_halo: MeshInstance3D
 var _fade_of: Dictionary = {}             ## fighter id -> last view_fade (absent = 0)
 var _fade_mats: Dictionary = {}           ## fighter id -> its parts' ShaderMaterials while faded
 var _struck_frame: Dictionary = {}        ## wall id -> process frame of its last wall_struck
@@ -1878,7 +1893,7 @@ var _struck_frame: Dictionary = {}        ## wall id -> process frame of its las
 ## Glow on one bone (attacking fist or foot for tells, charged limb). Returns a
 ## handle node; free it to stop early, else it ends after `duration` s of the
 ## fighter's own time (world time for enemies, so a tell stretches with slow
-## motion and Focus like the attack it announces; player time for the player).
+## motion like the attack it announces; player time for the player).
 ## duration <= 0: until freed. The handle also has set_color() and
 ## set_intensity().
 func limb_glow(fighter: Node3D, bone: StringName, color: Color, duration: float, intensity := 1.0) -> Node3D:
@@ -1979,87 +1994,25 @@ func _bone_parts(fighter: Node3D, bone: StringName) -> Array[MeshInstance3D]:
 					out.append(c)
 	return out
 
-# --- Zone highlight ------------------------------------------------------------
-
-func _on_aim_zone_changed(_aimer: Node3D, target: Node3D, zone: int) -> void:
-	set_zone_highlight(target, zone)
-
-## Highlight `zone` (BodyZones.Zone) on `target`; null clears it.
-func set_zone_highlight(target: Node3D, zone: int) -> void:
-	var id := target.get_instance_id() if is_instance_valid(target) else 0
-	if id == _hl_target_id and zone == _hl_zone:
-		return
-	_clear_highlight()
-	if id == 0:
-		return
-	_hl_target_id = id
-	_hl_zone = zone
-	for bone in BodyZones.bones(zone):
-		_hl_parts.append_array(_bone_parts(target, bone))
-	_hl_level = 0.0
-
-## Parts currently highlighted (tests, debug).
-func get_highlight_parts() -> Array[MeshInstance3D]:
-	return _hl_parts
-
-func _clear_highlight() -> void:
-	if _hl_halo != null:
-		_hl_halo.visible = false
-	for p in _hl_parts:
-		if is_instance_valid(p):
-			var mat := _part_material(p)
-			if mat != null:
-				mat.set_shader_parameter(&"highlight", 0.0)
-	_hl_parts.clear()
-	_hl_target_id = 0
-	_hl_zone = -1
-	_hl_level = 0.0
-
-func _update_highlight(real_delta: float) -> void:
-	if _hl_target_id == 0:
-		return
-	var t := instance_from_id(_hl_target_id) as Node3D
-	if t == null or not t.is_inside_tree() or (t.has_method(&"is_dead") and t.call(&"is_dead")):
-		_clear_highlight()
-		return
-	var goal := HIGHLIGHT_FOCUS if _focus_active() else HIGHLIGHT_NORMAL
-	_hl_level = move_toward(_hl_level, goal, HIGHLIGHT_RATE * real_delta)
-	_hl_age += real_delta
-	var v := _hl_level * (0.85 + 0.15 * sin(_hl_age * TAU * 1.5))
-	var sum := Vector3.ZERO
-	var n := 0
-	for p in _hl_parts:
-		if is_instance_valid(p):
-			var mat := _part_material(p)
-			if mat != null:
-				mat.set_shader_parameter(&"highlight_color", HIGHLIGHT_COLOR)
-				mat.set_shader_parameter(&"highlight", v)
-			sum += p.global_transform * p.get_aabb().get_center()
-			n += 1
-	# A soft halo on the zone; larger and brighter in Focus.
-	if n > 0:
-		var k := clampf((_hl_level - HIGHLIGHT_NORMAL) / maxf(HIGHLIGHT_FOCUS - HIGHLIGHT_NORMAL, 0.01), 0.0, 1.0)
-		var size := lerpf(ZONE_HALO_SIZE.x, ZONE_HALO_SIZE.y, k)
-		var a := lerpf(ZONE_HALO_ALPHA.x, ZONE_HALO_ALPHA.y, k) * clampf(_hl_level / HIGHLIGHT_NORMAL, 0.0, 1.0)
-		_hl_halo.global_position = sum / n
-		_hl_halo.scale = Vector3(size, size, size)
-		_hl_halo.set_instance_shader_parameter(&"tint", Color(ZONE_HALO_COLOR.r, ZONE_HALO_COLOR.g, ZONE_HALO_COLOR.b, a))
-		_hl_halo.visible = true
-
-func _focus_active() -> bool:
-	var td := get_node_or_null(^"/root/TimeDirector")
-	return td != null and td.has_method(&"is_focus_active") and td.call(&"is_focus_active")
-
 # --- Impact flash (U7) -----------------------------------------------------------
 
 ## A 2-3 frame radial flash at a contact point, plus an expanding shock ring
 ## when `ring` (Round 5: launch tier and up, budgeted by the caller).
-func impact_flash(position: Vector3, power: float, charged := false, ring := true) -> void:
+## Round 7: `brightness` (additive strength, IMPACT_BRIGHTNESS when < 0),
+## `ring_power` (0..1 ring size, `power` when < 0) and `color` (alpha 0 = the
+## default white, or the charged tint) can be set per flash.
+func impact_flash(position: Vector3, power: float, charged := false, ring := true, brightness := -1.0,
+		ring_power := -1.0, color := Color(0, 0, 0, 0)) -> void:
 	var i := _impact_next
 	_impact_next = (_impact_next + 1) % IMPACT_POOL
 	_impact_age[i] = 0.0
 	_impact_power[i] = clampf(power, 0.0, 1.0)
-	_impact_tint[i] = IMPACT_COLOR_CHARGED if charged else IMPACT_COLOR
+	_impact_bright[i] = brightness if brightness >= 0.0 else IMPACT_BRIGHTNESS
+	_impact_ring_power[i] = clampf(ring_power if ring_power >= 0.0 else power, 0.0, 1.0)
+	if color.a > 0.0:
+		_impact_tint[i] = Color(color.r, color.g, color.b)
+	else:
+		_impact_tint[i] = IMPACT_COLOR_CHARGED if charged else IMPACT_COLOR
 	var f := _impact_nodes[i]
 	var r := _impact_rings[i]
 	f.global_position = position
@@ -2070,6 +2023,15 @@ func impact_flash(position: Vector3, power: float, charged := false, ring := tru
 	r.visible = ring
 	_impact_ring_on[i] = ring
 	_update_impact_flash(i, 0.0)
+
+## The flash quad and ring quad used last (tests): [flash, ring].
+func last_impact_nodes() -> Array[MeshInstance3D]:
+	var i := (_impact_next + IMPACT_POOL - 1) % IMPACT_POOL
+	return [_impact_nodes[i], _impact_rings[i]]
+
+## Additive strength of the most recent flash (tests).
+func last_impact_brightness() -> float:
+	return _impact_bright[(_impact_next + IMPACT_POOL - 1) % IMPACT_POOL]
 
 ## Flashes currently showing (tests, debug).
 func active_impact_flashes() -> int:
@@ -2088,6 +2050,7 @@ func _update_impact_flashes(real_delta: float) -> void:
 
 func _update_impact_flash(i: int, age: float) -> void:
 	var p := _impact_power[i]
+	var b := _impact_bright[i]
 	var c := _impact_tint[i]
 	var f := _impact_nodes[i]
 	var r := _impact_rings[i]
@@ -2100,12 +2063,13 @@ func _update_impact_flash(i: int, age: float) -> void:
 	var fs := lerpf(IMPACT_FLASH_SIZE.x, IMPACT_FLASH_SIZE.y, p) * (1.0 + 0.3 * fu)
 	f.scale = Vector3(fs, fs, fs)
 	f.visible = age <= IMPACT_FLASH_TIME
-	f.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, IMPACT_BRIGHTNESS * (1.0 - fu * fu)))
+	f.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, b * (1.0 - fu * fu)))
 	var ru := clampf(age / IMPACT_RING_TIME, 0.0, 1.0)
-	var rs := lerpf(IMPACT_RING_SIZE.x, IMPACT_RING_SIZE.y, p) * (0.35 + 0.65 * (1.0 - pow(1.0 - ru, 2.5)))
+	var rs := lerpf(IMPACT_RING_SIZE.x, IMPACT_RING_SIZE.y, _impact_ring_power[i]) \
+			* (0.35 + 0.65 * (1.0 - pow(1.0 - ru, 2.5)))
 	r.scale = Vector3(rs, rs, rs)
 	r.visible = _impact_ring_on[i]
-	r.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, IMPACT_BRIGHTNESS * 0.8 * pow(1.0 - ru, 1.5)))
+	r.set_instance_shader_parameter(&"tint", Color(c.r, c.g, c.b, b * 0.8 * pow(1.0 - ru, 1.5)))
 
 # --- Dazed swirl, stumble and trip dust, broken arm ---------------------------------
 
@@ -2209,10 +2173,12 @@ func _build_upgrade2() -> void:
 	_impact_mat = _billboard_mat(BILLBOARD_XRAY, _make_flash_tex(trng))
 	_impact_ring_mat = _billboard_mat(BILLBOARD_XRAY, _make_ring_tex(trng))
 	_star_mat = _billboard_mat(BILLBOARD_ADD, _make_star_tex())
-	_hl_halo = _fx_quad(_halo_mat, "ZoneHalo", _holder)
 	_impact_age.resize(IMPACT_POOL)
 	_impact_age.fill(-1.0)
 	_impact_power.resize(IMPACT_POOL)
+	_impact_bright.resize(IMPACT_POOL)
+	_impact_bright.fill(IMPACT_BRIGHTNESS)
+	_impact_ring_power.resize(IMPACT_POOL)
 	_impact_ring_on.resize(IMPACT_POOL)
 	for i in IMPACT_POOL:
 		_impact_nodes.append(_fx_quad(_impact_mat, "ImpactFlash%d" % i, _holder))
@@ -2235,7 +2201,6 @@ func _build_upgrade2() -> void:
 		_swirl_fighter.append(null)
 
 func _reset_upgrade2() -> void:
-	_clear_highlight()
 	for i in IMPACT_POOL:
 		_impact_age[i] = -1.0
 		_impact_nodes[i].visible = false
@@ -2359,6 +2324,7 @@ func _make_star_tex() -> ImageTexture:
 
 const WorldFXScript := preload("res://scripts/fx/world_fx.gd")
 const DestructionFXScript := preload("res://scripts/fx/destruction_fx.gd")
+const FreeflowFXScript := preload("res://scripts/fx/freeflow_fx.gd")
 
 ## Contact frame by tier. Index = HitInfo.Tier: NONE, FLINCH, STUMBLE, STAGGER,
 ## KNOCKDOWN, LAUNCH, HARD_LAUNCH, SEVER. Flash size 0..1 (IMPACT_FLASH_SIZE),
@@ -2366,6 +2332,15 @@ const DestructionFXScript := preload("res://scripts/fx/destruction_fx.gd")
 const TIER_FLASH: Array[float] = [0.12, 0.18, 0.22, 0.35, 0.5, 0.72, 0.88, 1.0]
 const TIER_SPRAY: Array[float] = [0.0, 0.0, 0.0, 900.0, 2600.0, 4800.0, 7000.0, 9000.0]
 const TIER_WOUND: Array[float] = [0.0, 0.0, 0.0, 0.35, 0.55, 0.75, 0.9, 1.0]
+## Round 7 contact frame by HitInfo.weight (0 .. 1): flash size (0..1 of
+## IMPACT_FLASH_SIZE) and additive brightness; a shock ring from R7_RING_FROM
+## (the hook and up; a launch payoff always asks) sized R7_RING_POWER over
+## R7_RING_FROM .. 1. A jab (0.2) flashes 0.53 m at 1.8; a roundhouse (0.85)
+## 1.1 m at 3.1 with a 1.9 m ring.
+const R7_FLASH_POWER := Vector2(0.05, 0.85)
+const R7_FLASH_BRIGHT := Vector2(1.4, 3.4)
+const R7_RING_FROM := 0.45
+const R7_RING_POWER := Vector2(0.25, 1.0)
 const GROUND_SPRAY := 1600.0      ## a ground strike's extra spray into the floor
 const HELD_STRIKE_SPRAY := 600.0  ## a knee or headbutt on a held body: small blood (1 decal)
 const WOUNDED_LEVEL := 0.05       ## lost-HP share from which a body bleeds on impacts
@@ -2389,7 +2364,6 @@ const CHARGE_LEVEL_FLASH := 0.14  ## a small white flash at the limb on each lev
 ## (Tuning.CHARGE_AUTO_RELEASE plus a margin: a held button never locks).
 const CHARGE_GLOW_MAX := Tuning.CHARGE_AUTO_RELEASE + 0.5
 const CHARGE_GLOW_POLL := 0.05    ## s between checks of the charging fighters' state
-const PARRY_FLASH := 0.85         ## parry: a big white flash between the fighters (no ring)
 const WATER_DROP := Color(0.78, 0.86, 0.95)
 
 ## Every contact frame: {frame (physics), tier, flash, ring, blood} (F4 check, newest last).
@@ -2407,6 +2381,7 @@ var _crater_tex: ImageTexture
 var _rubble_tex: ImageTexture
 var _world: Node
 var _destruction: Node
+var _freeflow: Node
 
 func _build_round5() -> void:
 	var trng := RandomNumberGenerator.new()
@@ -2431,8 +2406,10 @@ func _build_round5() -> void:
 	GameEvents.limb_grab_started.connect(func(_g: Node3D, v: Node3D, _b: StringName) -> void: _drop_charge_glow(v))
 	GameEvents.carry_changed.connect(func(_h: Node3D, held: Node3D) -> void: _drop_charge_glow(held))
 	GameEvents.thrown.connect(func(_g: Node3D, v: Node3D, _vel: Vector3) -> void: _drop_charge_glow(v))
-	GameEvents.parried.connect(_on_parried)
-	GameEvents.sidestepped.connect(_on_sidestepped)
+	_freeflow = FreeflowFXScript.new()
+	_freeflow.name = "FreeflowFX"
+	add_child(_freeflow)
+	_freeflow.call(&"setup", self, _world, _holder)
 
 func _reset_round5() -> void:
 	for id: int in _jitter:
@@ -2449,6 +2426,8 @@ func _reset_round5() -> void:
 		_world.call(&"reset")
 	if _destruction != null:
 		_destruction.call(&"reset")
+	if _freeflow != null:
+		_freeflow.call(&"reset")
 
 ## The movement / world effects node (WorldFX).
 func get_world_fx() -> Node:
@@ -2457,6 +2436,10 @@ func get_world_fx() -> Node:
 ## The Round 6 destruction effects node (DestructionFX).
 func get_destruction_fx() -> Node:
 	return _destruction
+
+## The Round 7 effects node (FreeflowFX).
+func get_freeflow_fx() -> Node:
+	return _freeflow
 
 static func _real_now() -> float:
 	return Engine.get_physics_frames() / float(Engine.physics_ticks_per_second)
@@ -2474,8 +2457,10 @@ func _ring_allowed() -> bool:
 ## The victim's mesh shakes HITSTOP_JITTER_RANGE (2-4 cm, more for bigger
 ## tiers) for its freeze: Power.hitstop_for(tier), the player's capped at
 ## Tuning.PLAYER_HITSTOP_MAX. Real time, like the hitstop.
-func _jitter_start(victim: Node3D, tier: int) -> void:
-	var t := Power.hitstop_for(tier)
+## Round 7: `weight` >= 0 sizes it instead of the tier, and `hold` > 0 (the
+## move's own hitstop, HitInfo.hitstop) sets how long it lasts.
+func _jitter_start(victim: Node3D, tier: int, weight := -1.0, hold := -1.0) -> void:
+	var t := hold if hold > 0.0 else Power.hitstop_for(tier)
 	if victim.is_in_group(&"player"):
 		t = minf(t, Tuning.PLAYER_HITSTOP_MAX)
 	if t <= 0.0:
@@ -2483,7 +2468,8 @@ func _jitter_start(victim: Node3D, tier: int) -> void:
 	var parts := _mesh_parts(victim)
 	if parts.is_empty():
 		return
-	var amp := lerpf(Tuning.HITSTOP_JITTER_RANGE.x, Tuning.HITSTOP_JITTER_RANGE.y, FXRules.tier_t(tier))
+	var k := weight if weight >= 0.0 else FXRules.tier_t(tier)
+	var amp := lerpf(Tuning.HITSTOP_JITTER_RANGE.x, Tuning.HITSTOP_JITTER_RANGE.y, clampf(k, 0.0, 1.0))
 	_jitter[victim.get_instance_id()] = [parts, t, amp, Vector3.ZERO]
 
 ## Current jitter offset of a fighter's mesh (tests): ZERO when still.
@@ -2578,31 +2564,6 @@ func _drop_charge_glow(fighter: Node3D) -> void:
 func get_charge_glow(fighter: Node3D) -> Node3D:
 	var h = _charge_glow.get(fighter.get_instance_id()) if is_instance_valid(fighter) else null
 	return h if is_instance_valid(h) else null
-
-# --- Parry, sidestep ------------------------------------------------------------------
-
-## Parry: a big white flash and sparks where the blow met the guard.
-func _on_parried(defender: Node3D, attacker: Node3D) -> void:
-	if not is_instance_valid(defender):
-		return
-	var at := _aim_of(defender)
-	var dir := Vector3.FORWARD
-	if is_instance_valid(attacker):
-		var a := _aim_of(attacker)
-		dir = _safe_dir(a - at, Vector3.FORWARD)
-		at = at.lerp(a, 0.45)
-	impact_flash(at, PARRY_FLASH, false, false)
-	spark(at, dir, 1.0)
-	spark(at, -dir, 0.7)
-
-## Sidestep: a small dust kick at the feet, away from the step.
-func _on_sidestepped(fighter: Node3D, direction: Vector3) -> void:
-	if is_instance_valid(fighter):
-		dust(_ground_of(fighter) + Vector3.UP * 0.05, DUST_BY_SURFACE[&"floor"], 700.0,
-				_safe_dir(-direction + Vector3.UP * 0.6, Vector3.UP), false)
-
-func _aim_of(f: Node3D) -> Vector3:
-	return f.call(&"get_aim_point") if f.has_method(&"get_aim_point") else f.global_position + Vector3.UP * 1.3
 
 # --- Water, floor cracks ------------------------------------------------------------------
 

@@ -1,5 +1,7 @@
 extends Node
-## Round 5 camera framing (Feel Reference: Camera; F2, F7, F7b, F11):
+## Round 5 camera framing kept under Round 7 (Feel Reference: Camera; F2, F7,
+## F7b, F11; the Round 7 doc keeps the crowd and duel distances, the
+## amendment keeps the wall run):
 ## - F11: the logged camera distance follows the number of enemies alive over
 ##   two scripted waves (crowd 7-9 m and 2.5 m higher with 3+ alive, the
 ##   nearest 3 framed; 4-5 m low over the shoulder with 1-2 left; smooth).
@@ -11,7 +13,8 @@ extends Node
 ## - Low WORLD geometry (a 0.9 m wall, the 1.8 m platform) never pulls the arm
 ##   in; it fades when it blocks the view. A 4 m wall still collides.
 ## - Shake: trauma per event (Tuning.TRAUMA / Power.trauma_for), shake = trauma^2,
-##   decaying Tuning.TRAUMA_DECAY per s.
+##   decaying Tuning.TRAUMA_DECAY per s (hits without a Round 7 react: enemy
+##   hits and other sources; the player's Round 7 punch is test_cam_freeflow).
 ## Traversal is a scripted stand-in (test_cam_fake_traversal.gd).
 
 const FakeTraversal := preload("res://tests/game/test_cam_fake_traversal.gd")
@@ -328,7 +331,8 @@ func _low_geometry() -> void:
 func _shake() -> void:
 	for pair: Array in [[GameEvents.hit_landed, _rig._on_hit_landed], [GameEvents.wall_broken, _rig._on_wall_broken],
 			[GameEvents.landing, _rig._on_landing], [GameEvents.limb_severed, _rig._on_limb_severed],
-			[GameEvents.rammed, _rig._on_rammed], [GameEvents.screen_shake, _rig._on_screen_shake]]:
+			[GameEvents.drive_impact, _rig._on_drive_impact], [GameEvents.rammed, _rig._on_rammed],
+			[GameEvents.wall_run_started, _rig._on_wall_run_started], [GameEvents.screen_shake, _rig._on_screen_shake]]:
 		_check((pair[0] as Signal).is_connected(pair[1]), "camera listens to GameEvents.%s" % (pair[0] as Signal).get_name())
 	var dummy := FighterFactory.spawn_dummy(_world, &"grunt", Transform3D(Basis(), Vector3(0, 0.05, -1.5)))
 	await _wait_real(0.2)
@@ -347,8 +351,6 @@ func _shake() -> void:
 		float(Tuning.TRAUMA[&"heavy_landing"])])
 	cases.append(["limb lost", func() -> void: _rig._on_limb_severed(dummy, &"arm_l", null), float(Tuning.TRAUMA[&"limb_lost"])])
 	cases.append(["ram", func() -> void: _rig._on_rammed(_player, dummy, &"stumble", &"none"), float(Tuning.TRAUMA[&"ram"])])
-	cases.append(["body slam", func() -> void: _rig._on_body_slammed(_player, dummy, _player.global_position),
-		float(Tuning.TRAUMA[&"heavy_landing"])])
 	var desk := KindNode.new()
 	desk.kind = &"desk"
 	add_child(desk)
@@ -367,13 +369,13 @@ func _shake() -> void:
 	_rig._fov_amp = 0.0
 	_rig._on_wall_broken(desk, _player.global_position, 3000.0, Vector3.FORWARD)
 	_check(_rig._fov_amp == 0.0, "broken furniture does not punch the FOV like a wall break")
-	# A slam and its own heavy landing shake once.
+	# One heavy landing reported twice shakes once.
 	_rig._trauma = 0.0
 	_rig._last_heavy = -100.0
-	_rig._on_body_slammed(_player, dummy, _player.global_position)
+	_rig._on_landing(_player, &"heavy", _player.global_position, 12.0)
 	_rig._on_landing(_player, &"heavy", _player.global_position, 12.0)
 	_check(absf(_rig.get_trauma() - float(Tuning.TRAUMA[&"heavy_landing"])) < 0.001,
-		"a body slam and its heavy landing add the trauma once (%.2f)" % _rig.get_trauma())
+		"a heavy landing reported twice adds the trauma once (%.2f)" % _rig.get_trauma())
 	desk.queue_free()
 	# Far events shake less; a soft landing none; decay 1.5 per s.
 	_rig._trauma = 0.0

@@ -4,8 +4,8 @@ extends Node3D
 ##   on the tick that reaches d), for moves, holds and plain poses;
 ##   set_move_progress scrubs it.
 ## - A strike's contact keyframe lands on its first active frame for any
-##   startup: the player's frame data (Tuning.STRIKE_FRAMES) and enemy
-##   startups 12-30 frames (Tuning.ENEMY_STARTUP).
+##   startup: the player's frame data (Tuning.STRIKE_FRAMES, Round 7
+##   Tuning.R7_MOVES) and enemy startups 12-30 frames (Tuning.ENEMY_STARTUP).
 ## - Per-fighter time: time_scale 0 (hitstop) or the host's get_actor_time() 0
 ##   freezes the animation exactly; it resumes where it stopped.
 ## OWNER: agent P.
@@ -77,6 +77,9 @@ func _ready() -> void:
 		[&"e_stick_thrust", 24], [&"e_heavy", 30], [&"e_charge", 28], [&"e_grab_slam", 26]]
 	for id in Tuning.ENEMY_STARTUP:
 		strikes.append([id, int(Tuning.ENEMY_STARTUP_MIN)])
+	# Round 7: every player strike on its own R7_MOVES startup.
+	for id in Tuning.R7_MOVES:
+		strikes.append([id, int((Tuning.R7_MOVES[id]["f"] as Vector3).x)])
 	var late: Array = []
 	var worst_at := 0.0
 	for s in strikes:

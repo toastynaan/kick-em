@@ -6,37 +6,47 @@ extends CharacterBody3D
 ## Built entirely in code: call setup() before add_child().
 ## OWNER: agent H (Upgrade 2; agent B before). CONTRACT STUB: keep every public signature.
 ##
-## Upgrade 2 (agent H): crouch (hold) and jump, and player time: the player's
-## velocity, gravity, jump arcs, forced velocities, turning and landing
-## recovery all step by own_delta() (TimeDirector.player_delta).
+## Player time (Upgrade 2, Round 5): the player's velocity, gravity, forced
+## velocities, turning and reactions step by own_delta() (TimeDirector.player_delta).
 ##
 ## Round 5 (agent H, Feel Reference):
 ## - Per-fighter time: get_actor_time() is 0 while frozen by hitstop; a frozen
-##   fighter skips movement and animation (a ragdolling one freezes through
-##   RagdollController.freeze); everyone else keeps moving. The player's own
-##   freeze never passes Tuning.PLAYER_HITSTOP_MAX.
+##   fighter skips movement, animation and its reaction clock (a ragdolling one
+##   freezes through RagdollController.freeze); everyone else keeps moving. The
+##   player's own freeze never passes Tuning.R7_PLAYER_HITSTOP_MAX (Round 7).
 ## - Player time in any slow motion: TimeDirector.player_time_factor() is
 ##   1 / time scale, so velocity x factor, accelerations x factor^2 (stepping by
 ##   own_delta) and animation x factor (PoseAnimator) keep the player at real
 ##   speed. `velocity` holds the OWN-TIME velocity between ticks (m per player
 ##   second; Traversal keeps the same convention). Impulses the player gives
 ##   ragdolls use real_velocity(), never velocity x own_time_factor().
-## - Focus (the player's meter, 0..Tuning.FOCUS_MAX bars): income only through
-##   add_focus(amount, reason), never during Focus mode; this node credits the
-##   player's stagger / knockdown / launch hits (GameEvents.hit_landed) and wall
-##   breaks by bodies it launched (GameEvents.wall_broken_by); Defence credits
-##   parries. Focus mode is a press (begin_focus): 1 bar, the world at
-##   Tuning.FOCUS_SCALE for Tuning.FOCUS_MODE_TIME real s.
-## - Reactions by tier (B calls them): flinch, stumble, stagger, knockdown,
-##   launch, sever_limb. The player gets up Tuning.PLAYER_GETUP_AFTER after a
-##   knockdown and is untouchable Tuning.PLAYER_GETUP_INVULN after.
+## - Reactions by tier (enemy hits on the player, bodies, props): flinch,
+##   stumble, stagger, knockdown, launch, sever_limb. The player gets up
+##   Tuning.PLAYER_GETUP_AFTER after a knockdown and is untouchable
+##   Tuning.PLAYER_GETUP_INVULN after.
 ## - Bodies stay: a foot Area3D nudges dead bodies (Layers.DEAD_BODY, which
 ##   capsules pass through) that a walking fighter steps into.
 ## - When Traversal (M) drives the player's movement, is_airborne() reads it.
+##
+## Round 7 (agent H, docs/Round 7 — Freeflow Combat.md):
+## - react(kind, ...) runs the player strikes' reactions on the capsule (the
+##   body stays ANIMATED, so the next hit finds it): snap / spin / push slide
+##   along the hit over Tuning.R7_PUSH_SLIDE_SHARE of the stun, with stepping
+##   legs from Tuning.R7_PUSH_STEP_FROM; fold / buckle hold for the stun; lift is
+##   a ballistic capsule arc (arms loose through RagdollController.limp_chain)
+##   that lands into a knockdown; repop re-pops a lifted body, at most
+##   Tuning.R7_JUGGLE_MAX times per lift. The stun runs in the fighter's own
+##   time and stops during its hitstop. can_act() is false while reacting.
+## - is_invulnerable() adds the dodge (Traversal) and the counter (Defence).
+## - Kept (God path amendment): jump (jump(), can_jump(), the landing; the
+##   player's is Traversal's while it drives him) and the pursuit hang (hang(),
+##   held here so it works whoever drives the player).
+## - Removed from the player: Focus mode and the Focus meter (focus reads 0,
+##   add_focus / spend_focus are no-ops while callers remain), crouch, lock-on
+##   strafing and zone aiming.
 
 signal hp_changed(hp: float, max_hp: float)
 signal died(fighter: Fighter)
-signal focus_changed(value: float)
 
 const TEAM_PLAYER := 0
 const TEAM_ENEMY := 1
@@ -44,8 +54,8 @@ const TEAM_ENEMY := 1
 ## Capsule acceleration toward the desired walking velocity (m/s^2).
 const ACCEL := 40.0
 const AIR_ACCEL := 8.0
-## Walking speed multiplier while holding block.
-const BLOCK_WALK_MULT := 0.35
+## Landing pose blend back to locomotion after the landing recovery (s).
+const LAND_POSE_RECOVERY := 0.15
 ## Mesh jitter during hitstop (m), applied to the victim. Negative = a random
 ## amount in Tuning.HITSTOP_JITTER_RANGE.
 const HITSTOP_JITTER := -1.0
@@ -54,16 +64,6 @@ const MAX_SEVERS := 2
 ## Capsule radius (m at width 1.0) and nominal height (m at height 1.0).
 const CAPSULE_RADIUS := 0.3
 const CAPSULE_HEIGHT := 1.8
-## get_input_intent(): stick length below this is neutral...
-const INTENT_DEADZONE := 0.3
-## ...and it must point within 60 degrees of facing (or of its back) to count.
-const INTENT_DOT := 0.5
-## Landing pose blend back to locomotion after the landing recovery (s).
-const LAND_POSE_RECOVERY := 0.15
-## Round 4 lock-on: walking away from the locked target (backpedal) and
-## sideways (strafe) are slower than closing in (x walk speed).
-const LOCK_BACK_MULT := 0.75
-const LOCK_STRAFE_MULT := 0.9
 ## Round 5 bodies stay: the foot Area3D (Feel Reference: Bodies stay).
 const FOOT_RADIUS := 0.32       ## m (x width) around the feet
 const FOOT_HEIGHT := 0.4        ## m tall from the floor: low enough to touch only bodies lying down
@@ -72,6 +72,19 @@ const NUDGE_SHARE := 0.35       ## of the walker's real speed given to each bone
 const NUDGE_MAX := 1.4          ## ...at most (m/s), so a pile is shoved, never kicked across the room
 const NUDGE_UP := 0.25          ## m/s upward part, so limbs roll over the feet instead of scraping
 const NUDGE_COOLDOWN := 0.2     ## real s between nudges of the same bone
+## Round 7 reactions (Fighter.react). Numbers that are not in Tuning:
+const REACT_KINDS: Array[StringName] = [&"snap", &"spin", &"fold", &"lift", &"buckle", &"push", &"repop"]
+const REACT_SPIN_TURN := 100.0  ## degrees the body turns away over a spin's slide (the half-turn stumble)
+const REACT_POSE_BLEND := 0.06  ## s: a held reaction pose (fold, buckle, lift) blends in...
+const REACT_POSE_RELEASE := 0.15 ## ...and back out to locomotion
+const LIFT_ARM_LIMP := 0.7      ## physics share of both arms during a lift (loose, flailing)
+const LIFT_LAND_GRACE := 0.05   ## own s after a pop before a floor contact counts as the landing
+## Pose fallbacks until P's react_<kind> poses land: timed moves for snap,
+## spin and push (spin picks the side), holds for fold, buckle and lift.
+const REACT_POSE_FALLBACK := {&"snap": [&"stumble_back"], &"push": [&"stumble_back"],
+	&"spin": [&"stumble_side_l", &"stumble_side_r"], &"fold": [&"limp_hunch", &"stagger"],
+	&"buckle": [&"crouch"], &"lift": [&"fall", &"jump_fall"]}
+const LIFT_ARMS: Array[StringName] = [Bones.L_UPPER_ARM, Bones.L_LOWER_ARM, Bones.R_UPPER_ARM, Bones.R_LOWER_ARM]
 
 var archetype: StringName = &"player"
 var team: int = TEAM_PLAYER
@@ -79,13 +92,14 @@ var is_player := false
 var config: Dictionary = {}   ## Tuning.ARCHETYPES[archetype]
 var max_hp := 1000.0
 var hp := 1000.0
-## Focus bars (0..Tuning.FOCUS_MAX). Assigning it (J sets the wave's starting
-## bars) emits focus_changed; gains go through add_focus().
+## Round 7 (God path amendment): the Focus meter is gone; nothing costs Focus.
+## Reads 0, assignments are ignored. Kept while callers remain (B's Duelist
+## teleport counter reads it; tests/combat/test_round2_api).
 var focus: float:
 	get:
-		return _focus
-	set(value):
-		_set_focus(value)
+		return 0.0
+	set(_value):
+		pass
 
 var rig: HumanoidRig
 var ragdoll: RagdollController
@@ -116,7 +130,6 @@ var downed_hits := 0
 ## Real seconds of the last hitstop freeze this fighter took (after the player's cap).
 var last_freeze := 0.0
 
-var _focus := 0.0
 var _freeze_until := 0.0      ## real time; hitstop
 var _jitter := 0.0            ## m; hitstop mesh jitter for the current freeze
 var _rig_rest_pos := Vector3.ZERO
@@ -127,25 +140,34 @@ var _severed := 0
 var _death_info: HitInfo
 var _fading := false
 
-# Upgrade 2 (agent H): crouch, jump, Focus.
-## Crouch button held (written by the controller through set_crouch_input()).
-var crouch_input := false
-## Round 4: the player's lock-on target (PlayerController copies it from the
-## camera rig every tick; null = free camera). Walking slows by direction to it.
-var lock_target: Fighter
-## Facing turn-rate cap (rad/s), written by the controller (lock-on); INF = none.
-var max_turn_rate := INF
-var _crouching := false
+# Jump and landing (Upgrade 2; kept in Round 7), the pursuit hang (Defence).
 var _airborne := false        ## jumping (capsule in the air by choice)
 var _air_time := 0.0          ## player s since take-off
 var _takeoff_speed := 0.0     ## m/s horizontal at take-off (a running jump keeps it)
 var _land_left := 0.0         ## player s of landing recovery left
-var _focusing := false
-var _focus_left := 0.0        ## real s of Focus mode left
-var _hang_left := 0.0         ## player s of pursuit hang left (Fighter's own movement)
+var _hang_left := 0.0         ## player s of pursuit hang left
 var _traversal_driving := false  ## Traversal moved the capsule on its last tick
 var _feet: Area3D
 var _nudged := {}             ## bone instance id -> real time it may be nudged again
+
+# Round 7 reactions (react()). Times are this fighter's own seconds.
+var _react_kind: StringName = &""   ## &"" | snap | spin | fold | buckle | push | lift (repop keeps lift)
+var _react_left := 0.0               ## stun left (not lift: the arc decides)
+var _react_t := 0.0                  ## since the reaction started
+var _react_dir := Vector3.ZERO       ## flat hit direction (attacker -> victim)
+var _react_attacker: Node3D
+var _react_hold: StringName = &""    ## held pose id (fold, buckle, lift); &"" = a timed move
+var _slide_v0 := 0.0                 ## m/s at the start of the push slide
+var _slide_time := 0.0               ## s the slide lasts
+var _slide_steps := false            ## push >= R7_PUSH_STEP_FROM: the legs step with the slide
+var _turn_rate := 0.0                ## rad/s of a spin's turn while it slides (signed)
+var _lift_vy := 0.0                  ## m/s vertical speed of the lift arc
+var _lift_hv := Vector3.ZERO         ## m/s horizontal drift of the lift
+var _lift_g := 0.0                   ## m/s^2 of the lift (from R7_LIFT_HEIGHT / R7_LIFT_PEAK_TIME)
+var _lift_floor := 0.0               ## floor height at the first pop (heights are measured from it)
+var _lift_since_pop := 0.0           ## s since the last pop
+var _repops := 0                     ## re-pops in this lift
+var _arms_loose := false
 
 ## Call before add_child(). Reads Tuning.ARCHETYPES[archetype_id].
 func setup(archetype_id: StringName, p_team: int) -> void:
@@ -220,18 +242,7 @@ func _ready() -> void:
 		traversal.setup(self)
 
 	hurtboxes = Hurtbox.build_for(self, config.get("ragdoll", "passive") == "active")
-
-	# Player: Tuning.FOCUS_WAVE_START (J resets it every wave). Enemies: config "focus" (Duelist), else 0.
-	_focus = clampf(float(config.get("focus", Tuning.FOCUS_WAVE_START if is_player else 0.0)), 0.0, Tuning.FOCUS_MAX)
-	if is_player:
-		# A KO slow motion or a round reset ends Focus on TimeDirector's side.
-		TimeDirector.focus_changed.connect(_on_time_focus_changed)
-		GameEvents.hit_landed.connect(_on_hit_landed)
-		GameEvents.wall_broken_by.connect(_on_wall_broken_by)
 	GameEvents.fighter_spawned.emit(self)
-	if _focus > 0.0:
-		focus_changed.emit(_focus)
-		GameEvents.focus_changed.emit(self, _focus)
 
 # --- State queries ---------------------------------------------------------
 func get_state() -> int:
@@ -248,27 +259,33 @@ func is_down() -> bool:
 	return get_state() in [RagdollController.State.LAUNCHED, RagdollController.State.GROUNDED,
 		RagdollController.State.GETUP, RagdollController.State.DEAD]
 
+## Untouchable now: invuln_until (get-ups), the dodge (Traversal), the counter
+## (Defence), the player's get-up, and CombatController's own (AI moves).
 func is_invulnerable() -> bool:
 	if is_dead():
 		return false
 	if TimeDirector.now() < invuln_until:
 		return true
-	if defence != null and defence.is_vanished():
+	if is_instance_valid(defence) and defence.is_countering():
+		return true
+	if is_instance_valid(traversal) and traversal.is_dodge_invulnerable():
 		return true
 	if is_player and get_state() == RagdollController.State.GETUP:
 		return true  # enemies get Tuning.ENEMY_GETUP_INVULN from the start of the get-up
 	return combat != null and combat.is_invulnerable()
 
-## Flinch, stagger, blockstun, held by a grab.
+## Flinch, stagger, blockstun, a Round 7 reaction, held by a grab.
 func is_in_hitstun() -> bool:
+	if is_reacting():
+		return true
 	if combat and combat.is_stunned():
 		return true
 	if is_held():
 		return true
 	return get_state() in [RagdollController.State.FLINCH, RagdollController.State.STAGGER]
 
-## Can start a new action (not down, not in hitstun, not mid-move, not in a
-## grab, a hold or a throw (Carry), not in jump landing recovery).
+## Can start a new action (not down, not reacting or in hitstun, not mid-move,
+## not in a grab, a hold or a throw (Carry), not in jump landing recovery).
 func can_act() -> bool:
 	return not is_dead() and not is_down() and not is_in_hitstun() and _land_left <= 0.0 \
 		and not (combat and combat.is_attacking()) and not (carry and carry.is_busy())
@@ -310,7 +327,7 @@ func get_com_velocity() -> Vector3:
 ## gives a ragdoll, a prop or debris (B: strike pushes; G: throws and carries;
 ## M: Battering Ram). In slow motion the player's capsule moves 1 / time scale
 ## faster in game time to keep real speed; using that scaled velocity would make
-## every Focus-mode hit 3.3x too strong. Between ticks `velocity` already holds
+## every slow-motion hit 1 / scale times too strong. Between ticks `velocity` already holds
 ## the own-time (real-speed) value, so never multiply it by own_time_factor().
 ## A ragdolling body reports its centre-of-mass velocity.
 func real_velocity() -> Vector3:
@@ -331,9 +348,14 @@ func get_ground_position() -> Vector3:
 	return global_position
 
 ## Chest-height aim point (camera framing, targeting, glint placement).
+## Animated: halfway between the chest and head bones, so a folded or buckled
+## body is aimed at where its upper body really is (about 0.72 x height when
+## standing).
 func get_aim_point() -> Vector3:
 	if ragdoll and ragdoll.is_simulating():
 		return ragdoll.get_center_of_mass() + Vector3.UP * 0.3
+	if rig and rig.skeleton and rig.is_inside_tree():
+		return (rig.get_bone_global_position(Bones.CHEST) + rig.get_bone_global_position(Bones.HEAD)) * 0.5
 	return global_position + Vector3.UP * get_height() * 0.72
 
 func get_height() -> float:
@@ -373,6 +395,8 @@ func take_hit(info: HitInfo) -> int:
 func flinch(direction: Vector3, hit_bone: StringName = &"Chest", strength := 1.0) -> void:
 	if is_dead():
 		return
+	if _lift_interrupted(direction):
+		return
 	if not is_body_simulating():
 		combat.on_reaction(HitInfo.Reaction.FLINCH,
 			float(Tuning.REACT_FLINCH["act"]) * clampf(strength, 0.5, 1.6))
@@ -385,6 +409,8 @@ func flinch(direction: Vector3, hit_bone: StringName = &"Chest", strength := 1.0
 func stagger(direction: Vector3, strength := 1.0) -> void:
 	if is_dead():
 		return
+	if _lift_interrupted(direction):
+		return
 	if not is_body_simulating() or get_state() == RagdollController.State.STAGGER:
 		combat.on_reaction(HitInfo.Reaction.STAGGER, float(Tuning.REACT_STAGGER["act"]))
 		clear_forced_velocity()
@@ -393,7 +419,7 @@ func stagger(direction: Vector3, strength := 1.0) -> void:
 func launch(velocity_change: Vector3, hit_point: Vector3, hit_bone: StringName = &"Chest") -> void:
 	if combat:
 		combat.on_reaction(HitInfo.Reaction.LAUNCH, 0.0)
-	end_focus()  # getting launched ends Focus
+	clear_react()  # a launch payoff ends any reaction (a lifted body keeps its arc speed)
 	_leave_stance()
 	if is_launched():
 		flight_launches += 1
@@ -415,6 +441,8 @@ func stumble(direction: Vector3, leg_bone: StringName = Bones.L_LOWER_LEG) -> vo
 	if is_down():
 		ragdoll.flinch(direction, leg_bone, 0.5)
 		return
+	if _lift_interrupted(direction):
+		return
 	if not is_body_simulating():
 		clear_forced_velocity()
 		var act := float(Tuning.REACT_STUMBLE["act"])
@@ -433,7 +461,7 @@ func knockdown(direction: Vector3, hit_bone: StringName = &"Chest") -> void:
 		return
 	if combat:
 		combat.on_reaction(HitInfo.Reaction.LAUNCH, 0.0)
-	end_focus()
+	clear_react()
 	_leave_stance()
 	if is_launched():
 		flight_launches += 1
@@ -500,13 +528,13 @@ func is_fleeing() -> bool:
 func is_heavy() -> bool:
 	return bool(config.get("heavy", false)) or float(config.get("mass", 70.0)) >= Tuning.HEAVY_MASS
 
-## Local hitstop: freeze animation, movement, combat timers and (if ragdoll)
-## bone velocities of this fighter only. The player's own freeze is capped at
-## Tuning.PLAYER_HITSTOP_MAX (Feel Reference: Contact frame); the victim keeps
-## its full freeze.
+## Local hitstop: freeze animation, movement, combat timers, the reaction clock
+## and (if ragdoll) bone velocities of this fighter only. The player's own
+## freeze is capped at Tuning.R7_PLAYER_HITSTOP_MAX (Round 7: Hit feel); the
+## victim keeps its full freeze.
 func freeze_hitstop(duration_real: float) -> void:
 	if is_player:
-		duration_real = minf(duration_real, Tuning.PLAYER_HITSTOP_MAX)
+		duration_real = minf(duration_real, Tuning.R7_PLAYER_HITSTOP_MAX)
 	if duration_real <= 0.0 or not is_inside_tree():
 		return
 	var until := TimeDirector.now() + duration_real
@@ -581,26 +609,22 @@ func snap_facing(dir: Vector3) -> void:
 	rotation.y = atan2(-d.x, -d.z)
 
 ## Pursuit (Defence): hold the capsule in the air, no gravity, for up to
-## `duration_real` player s or until an attack starts. Traversal does it while
-## it drives the player; Fighter's own movement does it otherwise.
+## `duration_real` player s or until an attack starts. Fighter holds it itself
+## (Traversal is skipped while it hangs), and tells Traversal so its own air
+## state knows; the fall afterwards is whoever drives the player.
 func hang(duration_real: float) -> void:
 	velocity = Vector3.ZERO
 	_land_left = 0.0
-	if traversal != null and _traversal_driving:
-		_hang_left = 0.0
-		traversal.hang(duration_real)  # Traversal's HANG mode (its jump state stays its own)
-		return
 	_hang_left = maxf(duration_real, 0.0)
-	_airborne = true
 	_air_time = 0.0
 	_takeoff_speed = 0.0
 	if traversal != null:
 		traversal.hang(duration_real)
+	else:
+		_airborne = true
 
 ## Hanging in the air for a pursuit follow-up.
 func is_hanging() -> bool:
-	if _traversal_driving and traversal != null:
-		return traversal.has_method(&"is_hanging") and bool(traversal.call(&"is_hanging"))
 	return _hang_left > 0.0
 
 ## Drop any jump, hang and landing state (a teleport puts the fighter on the floor).
@@ -613,74 +637,35 @@ func reset_air_state() -> void:
 	_apply_stance()
 
 # --- Upgrade 2 contract (agent H) -----------------------------------------------
-## Body zone and bone the player aims at on the soft target (BodyZones), set
-## every tick by the player's ZoneAim. Enemies keep TORSO.
+## Round 7: zone aiming is gone. These keep their defaults (torso, chest)
+## for old readers; nothing writes them.
 var aim_zone: int = BodyZones.Zone.TORSO
 var aim_bone: StringName = Bones.CHEST
-## Round 4: the fighter aim_zone / aim_bone are on (null = none).
-var aim_target: Fighter
 
-## Zone a strike or grab by this fighter takes on `victim`: the aimed zone only
-## on the aimed target, else the torso. Crouch (legs) and a jump (head) set the
-## height on anyone.
-func zone_for(victim: Node3D) -> int:
-	if _crouching:
-		return BodyZones.Zone.LEGS
-	if is_airborne() and not is_hanging():
-		return BodyZones.Zone.HEAD
-	if victim != null and victim == aim_target:
-		return aim_zone
-	return BodyZones.Zone.TORSO
-
-## Bone a strike aims at / a limb grab anchors to on `victim` (see zone_for()).
-func aim_bone_for(victim: Node3D) -> StringName:
-	var zone := zone_for(victim)
-	if victim != null and victim == aim_target and zone == aim_zone:
-		return aim_bone
-	return BodyZones.AIM_BONE.get(zone, Bones.CHEST)
-
-## Crouching: capsule at Tuning.CROUCH_HEIGHT, walking at Tuning.CROUCH_SPEED.
-func is_crouching() -> bool:
-	return _crouching
-
-## In the air by choice (jump, wall kick-off, pursuit hang): Traversal's state
-## while it drives the player. Launched ragdolls are is_launched(), not this.
+## In the air by choice (jump, pursuit hang): Traversal's state while it
+## drives the player. Launched ragdolls are is_launched() and lifted bodies
+## is_lifted(), not this.
 func is_airborne() -> bool:
 	if is_body_simulating():
 		return false
+	if _hang_left > 0.0:
+		return true
 	if _traversal_driving and traversal != null:
 		return traversal.is_airborne()
 	return _airborne
 
-## Traversal (M) moved the player's capsule on its last tick.
-func is_traversal_driving() -> bool:
-	return _traversal_driving
-
-## &"forward", &"back" or &"neutral" (B: back + Kick is the sweep, back + P).
-## The player: the stick against the camera (Feel Reference: Controls, "back"
-## is toward the camera: S, or the stick pulled down), from PlayerController.
-## Everyone else: move_input against facing.
-func get_input_intent() -> StringName:
-	if brain != null and brain.has_method(&"get_input_intent"):
-		return brain.call(&"get_input_intent")
-	var s := Vector3(move_input.x, 0.0, move_input.z)
-	if s.length() < INTENT_DEADZONE:
-		return &"neutral"
-	var d := s.normalized().dot(get_forward())
-	if d >= INTENT_DOT:
-		return &"forward"
-	if d <= -INTENT_DOT:
-		return &"back"
-	return &"neutral"
-
 ## In the landing recovery after a jump (Traversal's landing pause while it
-## drives the player; an attack cuts that pause short, so can_act() ignores it).
+## drives the player).
 func is_landing() -> bool:
 	if _traversal_driving and traversal != null and traversal.has_method(&"is_landing"):
 		return bool(traversal.call(&"is_landing"))
 	return _land_left > 0.0
 
-# --- Player time (Upgrade 2: Focus; Round 5: every slow motion) -------------------
+## Traversal (M) moved the player's capsule on its last tick.
+func is_traversal_driving() -> bool:
+	return _traversal_driving
+
+# --- Player time (Upgrade 2; Round 5: every slow motion) ----------------------------
 ## This fighter's share of a physics delta: the player's runs in player time
 ## (TimeDirector.player_delta: real time in any slow motion); everyone else's
 ## in game time.
@@ -691,7 +676,7 @@ func own_delta(delta: float) -> float:
 func own_time_factor() -> float:
 	return maxf(TimeDirector.player_time_factor(), 0.01) if is_player else 1.0
 
-# --- Crouch and jump (Upgrade 2; Round 5 numbers for the player) --------------------
+# --- Jump (Upgrade 2; Round 5 numbers for the player; kept in Round 7) --------------
 ## Take-off speed of the player's jump: Tuning.JUMP_HEIGHT under
 ## Tuning.PLAYER_GRAVITY (4.85 m/s; Traversal raises it toward
 ## Tuning.JUMP_HEIGHT_SPRINT at full speed). Enemies: Tuning.JUMP_APEX under Tuning.GRAVITY.
@@ -700,26 +685,15 @@ static func jump_speed(player := true) -> float:
 		return sqrt(2.0 * Tuning.PLAYER_GRAVITY * Tuning.JUMP_HEIGHT)
 	return sqrt(2.0 * Tuning.GRAVITY * Tuning.JUMP_APEX)
 
-## Hold-crouch input from the controller. Applied at once when allowed, so an
-## attack pressed on the same tick (crouch + kick = sweep) already sees it.
-func set_crouch_input(on: bool) -> void:
-	crouch_input = on
-	_update_crouch()
-
-## Jump now if able (on the floor, free or charging: a jump keeps the charge).
-## Returns true on take-off. A crouch stands up first (if there is headroom).
-## The player's jump is Traversal.jump() while Traversal has one.
-## The player's height follows Traversal.sprint_charge (1.2 m standing, 1.5 m at
-## full speed); horizontal velocity is kept exactly.
+## Jump now if able. Returns true on take-off. The player's jump is
+## Traversal.jump() while Traversal drives him (M); otherwise Fighter's own:
+## the player's height follows Traversal.sprint_charge (1.2 m standing, 1.5 m
+## at full speed), horizontal velocity kept exactly.
 func jump() -> bool:
 	if is_player and traversal != null and traversal.has_method(&"jump"):
 		return bool(traversal.call(&"jump"))  # Traversal owns the player's jump state
 	if not can_jump():
 		return false
-	if _crouching:
-		if not _has_headroom():
-			return false
-		_set_crouch(false)
 	_airborne = true
 	_air_time = 0.0
 	_takeoff_speed = Vector2(velocity.x, velocity.z).length()
@@ -733,8 +707,9 @@ func jump() -> bool:
 	_apply_stance()
 	return true
 
+## On the floor, free (or between moves), not reacting, held or in a landing.
 func can_jump() -> bool:
-	if is_dead() or _airborne or _land_left > 0.0 or is_frozen() or not is_on_floor():
+	if is_dead() or _airborne or _land_left > 0.0 or is_frozen() or not is_on_floor() or is_reacting():
 		return false
 	if get_state() != RagdollController.State.ANIMATED:
 		return false
@@ -744,63 +719,11 @@ func can_jump() -> bool:
 		return false
 	if carry != null and carry.is_busy() and not carry.is_holding():
 		return false  # reaching or throwing (a held body jumps along: Carry)
-	return combat.is_charging() or not combat.is_attacking()
+	return not combat.is_attacking()
 
-func _can_crouch() -> bool:
-	if is_dead() or is_airborne() or capsule == null:
-		return false
-	if not (get_state() in [RagdollController.State.ANIMATED, RagdollController.State.FLINCH,
-			RagdollController.State.STAGGER]):
-		return false
-	return not is_held() and not is_holding()
-
-func _update_crouch() -> void:
-	var want := crouch_input and _can_crouch()
-	if want == _crouching:
-		return
-	if want:
-		_set_crouch(true)
-	elif not _can_crouch() or _has_headroom():
-		_set_crouch(false)
-
-## Room to stand up from a crouch (a crouch under a low gap stays down).
-func _has_headroom() -> bool:
-	if not _crouching or not is_inside_tree() or capsule.disabled:
-		return true
-	var rise := (CAPSULE_HEIGHT - Tuning.CROUCH_HEIGHT) * get_height_scale()
-	return not test_move(global_transform, Vector3.UP * rise)
-
-func _set_crouch(on: bool) -> void:
-	_crouching = on
-	var shape := capsule.shape as CapsuleShape3D
-	shape.height = (Tuning.CROUCH_HEIGHT if on else CAPSULE_HEIGHT) * get_height_scale()
-	capsule.position.y = shape.height * 0.5
-	GameEvents.crouch_changed.emit(self, on)
-	_apply_stance()
-
-## Round 4 lock-on: split the walk intent into toward/away from the locked
-## target and sideways, and slow the backpedal and the strafe.
-func _lock_scaled(desired: Vector3) -> Vector3:
-	if lock_target == null or not is_instance_valid(lock_target) or desired.length_squared() < 1e-6:
-		return desired
-	var to := lock_target.get_ground_position() - global_position
-	to.y = 0.0
-	if to.length_squared() < 1e-4:
-		return desired
-	to = to.normalized()
-	var along := desired.dot(to)
-	var side := desired - to * along
-	return to * along * (LOCK_BACK_MULT if along < 0.0 else 1.0) + side * LOCK_STRAFE_MULT
-
-## Capsule height now (crouch-aware); get_height() stays the standing height.
-func get_capsule_height() -> float:
-	return (capsule.shape as CapsuleShape3D).height if capsule else get_height()
-
-## Landing. The player never falls over from a jump (Feel Reference: Landing has
-## levels): a soft landing keeps running with no recovery; a hard one crouches
-## Tuning.LAND_HARD_CROUCH; a heavy one Tuning.LAND_HEAVY_TIME (Traversal adds
-## the effects and the shockwave while it drives). Enemies keep the Upgrade 2
-## landing recovery.
+## Landing. The player never falls over from a jump: a soft landing keeps
+## running with no recovery; a hard one crouches Tuning.LAND_HARD_CROUCH; a
+## heavy one Tuning.LAND_HEAVY_TIME. Enemies keep the Upgrade 2 landing recovery.
 func _land(vertical_speed := 0.0) -> void:
 	_airborne = false
 	_air_time = 0.0
@@ -818,139 +741,30 @@ func _land(vertical_speed := 0.0) -> void:
 	GameEvents.landed.emit(self)
 	if animator and _land_left > 0.0 and not (combat and combat.is_attacking()):
 		animator.play_move(&"land", 0.0, _land_left, LAND_POSE_RECOVERY)
-	_update_crouch()  # still holding crouch: duck on landing
 	_apply_stance()
 
-## Launch, death, grab: no jump, no crouch (capsule back to full height), no landing.
+## Launch, death, grab: no jump, no hang, no landing.
 func _leave_stance() -> void:
 	_airborne = false
 	_air_time = 0.0
 	_land_left = 0.0
 	_hang_left = 0.0
-	if _crouching:
-		_set_crouch(false)
 	_apply_stance()
 
 func _apply_stance() -> void:
 	if animator:
 		# Vertical speed times exactly when jump_rise blends into jump_fall.
-		animator.set_stance(&"air" if _airborne else (&"crouch" if _crouching else &"stand"), velocity.y)
+		animator.set_stance(&"air" if _airborne else &"stand", velocity.y)
 
-# --- Focus (player) ----------------------------------------------------------
-## In Focus mode: the world runs at Tuning.FOCUS_SCALE, the player at full speed.
-func is_focusing() -> bool:
-	return _focusing
+# --- Removed in Round 7: the Focus meter (no-ops while callers remain) ----------------
+## Round 7: the Focus meter is gone. Does nothing.
+func add_focus(_amount: float, _reason: StringName = &"") -> void:
+	pass
 
-## Real seconds of Focus mode left (0 when off).
-func get_focus_time_left() -> float:
-	return _focus_left if _focusing else 0.0
-
-## The player's Focus button (a press, Round 5): costs Tuning.FOCUS_MODE_COST
-## (a full bar) and runs Focus mode for Tuning.FOCUS_MODE_TIME real s (a pause
-## does not count). A press while it runs does nothing. Returns true when Focus
-## mode is (now) on.
-func begin_focus() -> bool:
-	if _focusing:
-		return true
-	if not is_player or is_dead() or is_down():
-		return false
-	if _focus + 1e-4 < Tuning.FOCUS_MODE_COST:
-		return false
-	if not TimeDirector.begin_focus():
-		return false
-	spend_focus(Tuning.FOCUS_MODE_COST)
-	_focusing = true
-	_focus_left = Tuning.FOCUS_MODE_TIME
-	GameEvents.focus_started.emit(self)
+## Round 7: the Focus meter is gone; nothing costs Focus. Always true (spent
+## nothing; B's Duelist code still calls it).
+func spend_focus(_amount: float) -> bool:
 	return true
-
-## Ends Focus mode (time up, knocked down, launched, dead, input off). Safe to call any time.
-func end_focus() -> void:
-	if not _focusing:
-		return
-	_focusing = false
-	_focus_left = 0.0
-	TimeDirector.end_focus()
-	GameEvents.focus_ended.emit(self)
-
-## TimeDirector ended Focus itself (KO slow motion, round reset).
-func _on_time_focus_changed(active: bool) -> void:
-	if active or not _focusing:
-		return
-	_focusing = false
-	_focus_left = 0.0
-	GameEvents.focus_ended.emit(self)
-
-## Focus mode's clock: one physics tick of real time per tick, so a paused
-## tree (where this does not run) costs nothing.
-func _tick_focus() -> void:
-	if not _focusing:
-		return
-	if is_dead() or not TimeDirector.is_focus_active():
-		end_focus()
-		return
-	_focus_left -= 1.0 / float(Engine.physics_ticks_per_second)
-	if _focus_left <= 1e-6:
-		end_focus()
-
-## Focus income (Feel Reference: Focus). reason is a Tuning.FOCUS_GAIN key:
-## &"parry" (Defence), &"stagger", &"knockdown", &"launch" (this node, from the
-## player's hits), &"wall_break" (this node, from bodies the player launched).
-## Nothing is gained during Focus mode. Any other reason (&"" ...) is a plain
-## grant (debug, tests, the Duelist's script) under the same rule. Negative
-## amounts spend.
-func add_focus(amount: float, _reason: StringName = &"") -> void:
-	if amount > 0.0 and _focusing:
-		return  # nothing refills during Focus mode
-	_set_focus(_focus + amount)
-
-## Returns false (and spends nothing) if there is not enough.
-func spend_focus(amount: float) -> bool:
-	if _focus + 1e-4 < amount:
-		return false
-	_set_focus(maxf(_focus - amount, 0.0))
-	return true
-
-func _set_focus(value: float) -> void:
-	var v := clampf(value, 0.0, Tuning.FOCUS_MAX)
-	if absf(v - _focus) < 1e-6:
-		return
-	_focus = v
-	focus_changed.emit(_focus)
-	if is_inside_tree():
-		GameEvents.focus_changed.emit(self, _focus)
-
-## The player's hits that stagger, knock down or launch an enemy earn Focus.
-func _on_hit_landed(info: HitInfo) -> void:
-	if info == null or info.attacker != self or info.result != HitInfo.Result.HIT:
-		return
-	var v := info.victim as Fighter
-	if v == null or v == self or v.team == team:
-		return
-	var tier := info.tier
-	if tier == HitInfo.Tier.NONE:
-		# A source that has not set a tier yet: read the older reaction.
-		match info.reaction:
-			HitInfo.Reaction.STAGGER:
-				tier = HitInfo.Tier.STAGGER
-			HitInfo.Reaction.LAUNCH:
-				tier = HitInfo.Tier.LAUNCH
-	if HitInfo.is_launch_tier(tier):
-		add_focus(float(Tuning.FOCUS_GAIN[&"launch"]), &"launch")
-	elif tier == HitInfo.Tier.KNOCKDOWN:
-		add_focus(float(Tuning.FOCUS_GAIN[&"knockdown"]), &"knockdown")
-	elif tier == HitInfo.Tier.STAGGER:
-		add_focus(float(Tuning.FOCUS_GAIN[&"stagger"]), &"stagger")
-
-## A body this player launched or threw broke a wall.
-func _on_wall_broken_by(flyer: Node3D, _wall: Node3D, _energy: float) -> void:
-	if flyer == null or flyer == self:
-		return
-	var launcher: Node3D = null
-	if ImpactResolver.has_method(&"get_launcher"):
-		launcher = ImpactResolver.get_launcher(flyer)
-	if launcher == self:
-		add_focus(float(Tuning.FOCUS_GAIN[&"wall_break"]), &"wall_break")
 
 # --- Lifetime ---------------------------------------------------------------
 ## Corpse cleanup: fade the body out over `duration`, then queue_free().
@@ -1027,59 +841,59 @@ func heal(amount: float) -> void:
 func _physics_process(delta: float) -> void:
 	if _freeze_until > 0.0 and TimeDirector.now() >= _freeze_until:
 		_end_freeze()  # backstop for the real-time timer
-	if is_player:
-		_tick_focus()
 	if combat:
 		combat.physics_tick(delta)  # B applies player time to combat timers
 	var frozen := is_frozen()
 	if frozen and _jitter > 0.0 and rig and not is_body_simulating():
 		rig.position = _rig_rest_pos + Vector3(randf_range(-1, 1), randf_range(-0.5, 0.5),
 			randf_range(-1, 1)) * _jitter
+	# Round 7 reactions: the clock runs in own time and stops during hitstop;
+	# the reaction moves the capsule itself (slide, spin, lift arc).
+	if not frozen and _react_kind != &"" and _tick_react(delta):
+		_nudge_bodies()
+		return
 	if is_dead() or (ragdoll and ragdoll.is_simulating()):
 		return  # RagdollController moves the host (FLINCH/STAGGER push included).
 	if frozen:
 		return  # actor time 0: no movement, no turning (the animator is stopped too)
 	if is_held():
 		velocity = Vector3.ZERO
-		if _crouching or _airborne:
+		if _airborne or _hang_left > 0.0:
 			_leave_stance()
 		return  # the grabber places us every tick
-	_update_crouch()
+	var pdt := own_delta(delta)
+	var factor := own_time_factor()
+	# Pursuit hang (Defence): held still in the air until it runs out or an attack starts.
+	if _hang_left > 0.0:
+		if combat and combat.is_attacking():
+			_hang_left = 0.0  # the pursuit attack started: the hang ends
+		else:
+			_hang_left = maxf(_hang_left - pdt, 0.0)
+			velocity = Vector3.ZERO
+			return
 	if _forced_stop and _forced_left <= 0.0:
 		_forced_stop = false  # a dead-stop slide just ended: no deceleration tail
 		velocity.x = 0.0
 		velocity.z = 0.0
 	if traversal != null and traversal.physics_move(delta):
-		_traversal_driving = true  # Round 5: M drives the player's locomotion
-		_hang_left = 0.0
+		_traversal_driving = true  # Round 5: M drives the player's locomotion (and jump)
+		_airborne = false
+		_land_left = 0.0
 		_nudge_bodies()
 		return
 	_traversal_driving = false
 
-	var pdt := own_delta(delta)
-	var factor := own_time_factor()
 	if _land_left > 0.0:
 		_land_left -= pdt
 		if _land_left < 1e-6:
 			_land_left = 0.0
 	if _airborne:
 		_air_time += pdt
-	var hanging := false
-	if _hang_left > 0.0:
-		if combat and combat.is_attacking():
-			_hang_left = 0.0  # the pursuit attack started: the hang ends
-		else:
-			_hang_left -= pdt
-			hanging = true
-
 	var max_speed := Tuning.WALK_SPEED if is_player else Tuning.ENEMY_WALK_SPEED
 	var mult := combat.get_move_speed_mult() if combat else 1.0
-	if _crouching:
-		mult *= Tuning.CROUCH_SPEED
 	var desired := Vector3(move_input.x, 0.0, move_input.z)
 	if desired.length() > 1.0:
 		desired = desired.normalized()
-	desired = _lock_scaled(desired)
 	if _land_left > 0.0:
 		desired = Vector3.ZERO  # landing recovery: feet planted
 	desired *= max_speed * mult
@@ -1092,8 +906,6 @@ func _physics_process(delta: float) -> void:
 	elif combat and combat.has_forced_velocity():
 		var forced := combat.get_forced_velocity()
 		hv = Vector3(forced.x, 0.0, forced.z)
-	elif hanging:
-		hv = Vector3.ZERO
 	elif _airborne:
 		# Jump steering: half the walk acceleration, and the stick may only steer
 		# up to JUMP_AIR_STEER x walk speed, or the take-off speed if that is
@@ -1104,17 +916,36 @@ func _physics_process(delta: float) -> void:
 			hv = hv.move_toward(desired.limit_length(cap), ACCEL * Tuning.JUMP_AIR_STEER * pdt)
 	else:
 		hv = hv.move_toward(desired, (ACCEL if on_floor else AIR_ACCEL) * pdt)
+	var vy := _move_capsule(hv, pdt, factor)
+	if _airborne and is_on_floor() and vy <= 0.0:
+		_land(vy)
 
-	# Gravity in own time, integrated exactly (trapezoid: constant acceleration),
-	# so the jump apex and air time do not depend on the tick rate or on slow
-	# motion. The player rises at Tuning.PLAYER_GRAVITY and falls
-	# Tuning.FALL_GRAVITY_MULT times harder (heavy, not floaty).
+	# Facing.
+	var allow_turn := combat.can_turn() if combat else true
+	if allow_turn:
+		var fd := Vector3(face_dir.x, 0.0, face_dir.z)
+		if fd.length_squared() > 1e-4:
+			fd = fd.normalized()
+			var target_yaw := atan2(-fd.x, -fd.z)
+			var rate := Tuning.TURN_SPEED * (combat.get_turn_mult() if combat else 1.0)
+			rotation.y = rotate_toward(rotation.y, target_yaw, rate * pdt)
+
+	if animator:
+		_apply_stance()
+		var local_v := global_basis.inverse() * Vector3(velocity.x, 0.0, velocity.z)
+		animator.set_locomotion(local_v, max_speed)
+	_nudge_bodies()
+
+## Move the capsule at horizontal own-time velocity `hv` with gravity (own
+## time, integrated exactly: trapezoid, so the jump apex, air time and a fall
+## do not depend on the tick rate or slow motion; the player rises at
+## Tuning.PLAYER_GRAVITY and falls Tuning.FALL_GRAVITY_MULT times harder,
+## everyone else at Tuning.GRAVITY). Returns the vertical speed at the end of
+## the tick (before the floor clamps it).
+func _move_capsule(hv: Vector3, pdt: float, factor: float) -> float:
 	var vy := velocity.y
 	var vy_move := vy
-	if hanging:
-		vy = 0.0
-		vy_move = 0.0
-	elif on_floor and not (_airborne and vy > 0.0):
+	if is_on_floor() and not (_airborne and vy > 0.0):
 		vy = minf(vy, 0.0)
 		vy_move = vy
 	else:
@@ -1133,25 +964,7 @@ func _physics_process(delta: float) -> void:
 		velocity.y = minf(vy, 0.0)
 	else:
 		velocity.y = vy
-	if _airborne and is_on_floor() and vy <= 0.0 and not hanging:
-		_land(vy)
-
-	# Facing.
-	var allow_turn := combat.can_turn() if combat else true
-	if allow_turn:
-		var fd := Vector3(face_dir.x, 0.0, face_dir.z)
-		if fd.length_squared() > 1e-4:
-			fd = fd.normalized()
-			var target_yaw := atan2(-fd.x, -fd.z)
-			var rate := Tuning.TURN_SPEED * (combat.get_turn_mult() if combat else 1.0)
-			rate = minf(rate, max_turn_rate)
-			rotation.y = rotate_toward(rotation.y, target_yaw, rate * pdt)
-
-	if animator:
-		_apply_stance()
-		var local_v := global_basis.inverse() * Vector3(velocity.x, 0.0, velocity.z)
-		animator.set_locomotion(local_v, max_speed)
-	_nudge_bodies()
+	return vy
 
 # --- Bodies stay: the feet nudge dead bodies ---------------------------------------
 func _build_feet(width: float) -> void:
@@ -1229,10 +1042,10 @@ static func _fighter_of(n: Node) -> Fighter:
 
 # --- Death ---------------------------------------------------------------------
 ## 0 HP: a full ragdoll (RagdollController.kill; A moves the body to
-## Layers.DEAD_BODY), hurtboxes off, Focus mode over, GameEvents.fighter_died.
+## Layers.DEAD_BODY), hurtboxes off, any reaction over, GameEvents.fighter_died.
 func _die(info: HitInfo) -> void:
 	_death_info = info  # get_death_info() (results screen, death camera)
-	end_focus()
+	clear_react()
 	_leave_stance()
 	if combat:
 		combat.on_death()
@@ -1260,7 +1073,7 @@ func get_death_info() -> HitInfo:
 func _on_ragdoll_launched(v: Vector3) -> void:
 	velocity = Vector3.ZERO  # stale walk/dash velocity must not survive the flight
 	clear_forced_velocity()
-	end_focus()  # getting launched ends Focus (a stagger can tip into a launch too)
+	clear_react()  # a stagger can tip into a launch too
 	_leave_stance()
 	GameEvents.fighter_launched.emit(self, v)
 
@@ -1287,3 +1100,283 @@ func _on_ragdoll_recovered() -> void:
 		combat.force_reappear()
 	face_dir = get_forward()
 	GameEvents.fighter_recovered.emit(self)
+
+
+
+
+# =============================================================================
+# Round 7: reactions (docs/Round 7 — Freeflow Combat.md: Reactions). Owner H.
+# B calls react() for player strikes (snap, spin, fold, lift, buckle, push,
+# repop) after applying the heavy and anti-infinite multipliers; knockdown and
+# launch go through knockdown() / launch().
+# =============================================================================
+
+## Apply a Round 7 reaction. kind: &"snap" | &"spin" | &"fold" | &"lift" |
+## &"buckle" | &"push" | &"repop". direction: world, attacker -> victim. push:
+## m. stun: own s the fighter cannot act (lift and repop: ignored, the arc decides).
+## - snap, spin, push, fold, buckle: the body slides `push` m along the hit over
+##   Tuning.R7_PUSH_SLIDE_SHARE of the stun, slowing evenly; from
+##   Tuning.R7_PUSH_STEP_FROM the legs step with the slide (stumble steps).
+##   A spin also turns REACT_SPIN_TURN degrees away over the slide. Poses:
+##   P's react_<kind> (timed over the stun for snap, spin and push; held for
+##   fold and buckle), else REACT_POSE_FALLBACK.
+## - lift: a ballistic capsule arc (not a ragdoll launch) whose feet peak
+##   info.lift_height (else Tuning.R7_LIFT_HEIGHT) above the floor, under the
+##   gravity that takes R7_LIFT_HEIGHT to its peak in R7_LIFT_PEAK_TIME; `push`
+##   drifts it along the hit over the arc; the arms go loose
+##   (RagdollController.limp_chain). Landing turns it into a knockdown. A lift
+##   on a lifted body counts as a re-pop.
+## - repop (lifted body): up Tuning.R7_REPOP_HEIGHT more from where it is, at
+##   most Tuning.R7_JUGGLE_MAX times per lift; past that the body falls into a
+##   knockdown at once. On a body that is not lifted: a lift of R7_REPOP_HEIGHT.
+## Any other kind on a lifted body adds its push to the arc (it still lands
+## into a knockdown). A new reaction replaces the current one and cancels the
+## fighter's own move (so a hit on an armored tell must not call this). Held
+## and downed bodies are left to Carry / the ragdoll. Emits
+## GameEvents.react_started(self, kind, info.attacker).
+func react(kind: StringName, direction: Vector3, push: float, stun: float, info: HitInfo = null) -> void:
+	if is_dead() or is_held():
+		return
+	if not REACT_KINDS.has(kind):
+		push_warning("Fighter.react: unknown kind %s" % kind)
+		return
+	var dir := Vector3(direction.x, 0.0, direction.z)
+	if dir.length_squared() < 1e-6:
+		dir = -get_forward()
+	dir = dir.normalized()
+	var bone: StringName = info.hit_bone if info != null else Bones.CHEST
+	var attacker: Node3D = info.attacker if info != null else null
+	if is_down():
+		ragdoll.flinch(dir, bone, 0.5)  # already falling: a nudge, no new state
+		return
+	push = maxf(push, 0.0)
+	stun = maxf(stun, 0.0)
+	if is_lifted():
+		_react_attacker = attacker
+		if kind == &"repop" or kind == &"lift":
+			if _repops >= Tuning.R7_JUGGLE_MAX:
+				knockdown(dir, bone)  # past the juggle cap: no re-pop, the body falls
+				return
+			_repops += 1
+			_pop(Tuning.R7_REPOP_HEIGHT, dir, push, true)
+			GameEvents.react_started.emit(self, &"repop", attacker)
+		else:
+			_pop(0.0, dir, push, true)
+			GameEvents.react_started.emit(self, kind, attacker)
+		return
+	_end_react_pose()
+	if combat:
+		combat.on_reaction(HitInfo.Reaction.STAGGER, 0.0)  # cancels its move and buffered press
+	clear_forced_velocity()
+	if rig:
+		rig.position = _rig_rest_pos
+	_react_dir = dir
+	_react_attacker = attacker
+	_react_t = 0.0
+	_turn_rate = 0.0
+	_slide_v0 = 0.0
+	if kind == &"lift" or kind == &"repop":
+		var h := Tuning.R7_LIFT_HEIGHT
+		if kind == &"repop":
+			h = Tuning.R7_REPOP_HEIGHT
+		elif info != null and info.lift_height > 0.0:
+			h = info.lift_height
+		_react_kind = &"lift"
+		_react_left = 0.0
+		_repops = 0
+		_lift_g = 2.0 * Tuning.R7_LIFT_HEIGHT / (Tuning.R7_LIFT_PEAK_TIME * Tuning.R7_LIFT_PEAK_TIME)
+		_lift_floor = global_position.y
+		_lift_vy = 0.0
+		_lift_hv = Vector3.ZERO
+		velocity = Vector3.ZERO
+		_pop(h, dir, push, false)
+		_set_arms_loose(true)
+		_play_react_pose(&"lift", 0.0, 0)
+		GameEvents.react_started.emit(self, &"lift", attacker)
+		return
+	_react_kind = kind
+	_react_left = stun
+	_slide_time = maxf(stun * Tuning.R7_PUSH_SLIDE_SHARE, 1e-3)
+	_slide_v0 = 2.0 * push / _slide_time
+	_slide_steps = push >= Tuning.R7_PUSH_STEP_FROM - 1e-4
+	var side := 0
+	if kind == &"spin":
+		# The head and shoulders turn away with the hook: toward the side the
+		# hit travels (yaw + turns left); straight on, to the right.
+		var right := global_basis.x
+		var lat := dir.dot(Vector3(right.x, 0.0, right.z).normalized())
+		side = 1 if lat > 0.1 or absf(lat) <= 0.1 else -1
+		_turn_rate = -float(side) * deg_to_rad(REACT_SPIN_TURN) / _slide_time
+	_play_react_pose(kind, stun, side)
+	GameEvents.react_started.emit(self, kind, attacker)
+
+## The current reaction state: &"" | &"snap" | &"spin" | &"fold" | &"lift" |
+## &"buckle" | &"push" | &"down" (knocked down, launched, getting up or dead).
+## A re-popped body still reports &"lift".
+func get_react_state() -> StringName:
+	if is_down():
+		return &"down"
+	return _react_kind
+
+## Own seconds left in the current reaction (0 when none). Lift: the time to
+## land from the arc as it is now.
+func get_react_time_left() -> float:
+	if _react_kind == &"":
+		return 0.0
+	if _react_kind == &"lift":
+		var h := maxf(global_position.y - _lift_floor, 0.0)
+		return (_lift_vy + sqrt(_lift_vy * _lift_vy + 2.0 * _lift_g * h)) / maxf(_lift_g, 0.01)
+	return maxf(_react_left, 0.0)
+
+func is_reacting() -> bool:
+	return _react_kind != &""
+
+## Popped up by a lift (the controlled arc, not a ragdoll launch).
+func is_lifted() -> bool:
+	return _react_kind == &"lift"
+
+## Re-pops so far in the current lift (0 when not lifted). Tests, debug.
+func get_repops() -> int:
+	return _repops if is_lifted() else 0
+
+## Who caused the current reaction (the last hit's attacker; null when none).
+func get_react_attacker() -> Node3D:
+	if _react_kind == &"" or not is_instance_valid(_react_attacker):
+		return null
+	return _react_attacker
+
+## Feet above the floor the lift started from (0 when not lifted).
+func get_lift_height() -> float:
+	return maxf(global_position.y - _lift_floor, 0.0) if is_lifted() else 0.0
+
+## End the current reaction now, with no knockdown (knockdown, launch, death,
+## a grab; tests). Safe to call any time.
+func clear_react() -> void:
+	if _react_kind == &"":
+		return
+	_end_react_pose()
+	_set_arms_loose(false)
+	_react_kind = &""
+	_react_left = 0.0
+	_react_t = 0.0
+	_slide_v0 = 0.0
+	_turn_rate = 0.0
+	_lift_vy = 0.0
+	_lift_hv = Vector3.ZERO
+	_repops = 0
+	_react_attacker = null
+
+## One tick of the reaction (own time; never called during hitstop). true when
+## it moved the capsule (the caller skips normal movement).
+func _tick_react(delta: float) -> bool:
+	if is_dead() or is_down() or is_held():
+		clear_react()
+		return false
+	var pdt := own_delta(delta)
+	var factor := own_time_factor()
+	var free := not (ragdoll and ragdoll.is_simulating())  # an older-tier ragdoll reaction moves the host itself
+	if _react_kind == &"lift":
+		if free:
+			_move_lift(pdt, factor)
+		return free
+	var t0 := _react_t
+	_react_t += pdt
+	_react_left -= pdt
+	if free:
+		_move_slide(t0, pdt, factor)
+	if _react_left <= 1e-6:
+		clear_react()
+	return free
+
+## The push slide: v(t) = v0 (1 - t / T) along the hit for T = the slide time,
+## integrated exactly over the tick, so it covers `push` at any tick rate.
+func _move_slide(t0: float, pdt: float, factor: float) -> void:
+	var hv := Vector3.ZERO
+	if _slide_v0 > 0.0 and t0 < _slide_time and pdt > 0.0:
+		var t1 := minf(t0 + pdt, _slide_time)
+		var d := _slide_v0 * ((t1 - t0) - (t1 * t1 - t0 * t0) / (2.0 * _slide_time))
+		hv = _react_dir * (d / pdt)
+		if _turn_rate != 0.0:
+			rotation.y = wrapf(rotation.y + _turn_rate * (t1 - t0), -PI, PI)
+	_move_capsule(hv, pdt, factor)
+	if animator:
+		var legs := hv if _slide_steps else Vector3.ZERO
+		animator.set_locomotion(global_basis.inverse() * legs, Tuning.WALK_SPEED)
+
+## The lift arc: own-time gravity _lift_g, integrated exactly (trapezoid).
+## Landing (floor, falling) turns into a knockdown along the last hit.
+func _move_lift(pdt: float, factor: float) -> void:
+	_lift_since_pop += pdt
+	var vy := _lift_vy
+	var vy_end := vy - _lift_g * pdt
+	velocity = Vector3(_lift_hv.x, 0.5 * (vy + vy_end), _lift_hv.z) * factor
+	move_and_slide()
+	velocity /= factor
+	_lift_vy = vy_end
+	if is_on_ceiling() and _lift_vy > 0.0:
+		_lift_vy = 0.0
+	if animator:
+		animator.set_locomotion(Vector3.ZERO, Tuning.WALK_SPEED)
+	if is_on_floor() and _lift_vy <= 0.0 and _lift_since_pop >= LIFT_LAND_GRACE:
+		velocity = Vector3(_lift_hv.x, 0.0, _lift_hv.z)
+		knockdown(_react_dir, Bones.CHEST)  # nothing followed: the body lands into a knockdown
+
+## Pop the lifted body: it rises `rise` m from where it is now (a rising body
+## keeps its speed if that is more); `push` m along `dir` spreads over the
+## remaining air time (added to the drift when `add`, else replacing it).
+func _pop(rise: float, dir: Vector3, push: float, add: bool) -> void:
+	if rise > 0.0:
+		var vy := sqrt(2.0 * _lift_g * rise)
+		_lift_vy = maxf(_lift_vy, vy) if add else vy
+		_lift_since_pop = 0.0
+	var h := maxf(global_position.y - _lift_floor, 0.0)
+	var t_air := (_lift_vy + sqrt(_lift_vy * _lift_vy + 2.0 * _lift_g * h)) / maxf(_lift_g, 0.01)
+	var drift := dir * (push / maxf(t_air, 0.05))
+	_lift_hv = _lift_hv + drift if add else drift
+
+## An older-tier reaction (enemy hits, bodies, props) on a lifted body brings
+## it down: a knockdown. true when it did.
+func _lift_interrupted(direction: Vector3) -> bool:
+	if not is_lifted():
+		return false
+	knockdown(direction, Bones.CHEST)
+	return true
+
+## Loose arms for the lift (partial physics on both arm chains, held until restored).
+func _set_arms_loose(on: bool) -> void:
+	if ragdoll == null or on == _arms_loose:
+		return
+	_arms_loose = on
+	if on:
+		ragdoll.limp_chain(LIFT_ARMS, LIFT_ARM_LIMP, 0.0)
+	else:
+		ragdoll.restore_chain(LIFT_ARMS)
+
+## P's react_<kind> pose, else the first fallback the library has. Snap, spin
+## and push play as timed moves over `stun`; fold, buckle and lift hold until
+## the reaction ends. `side` (spin): 1 = turning right, which plays P's mirrored
+## react_spin_r (the torso leads the turn).
+func _play_react_pose(kind: StringName, stun: float, side: int) -> void:
+	if animator == null:
+		return
+	var ids: Array[StringName] = [StringName("react_" + String(kind))]
+	for id: StringName in REACT_POSE_FALLBACK.get(kind, []):
+		ids.append(id)
+	if kind == &"spin" and side > 0:
+		ids.insert(0, &"react_spin_r")
+		ids.erase(&"stumble_side_r")
+		ids.insert(2, &"stumble_side_r")
+	var hold := kind == &"fold" or kind == &"buckle" or kind == &"lift"
+	for id in ids:
+		if hold and (PoseLibrary.HOLDS.has(id) or PoseLibrary.POSES.has(id)):
+			animator.hold_pose(id, REACT_POSE_BLEND)
+			_react_hold = id
+			return
+		if PoseLibrary.has_move(id):
+			animator.play_timed(id, maxf(stun if not hold else get_react_time_left(), 0.1))
+			return
+
+func _end_react_pose() -> void:
+	if _react_hold != &"" and animator and get_state() == RagdollController.State.ANIMATED:
+		animator.release_pose(REACT_POSE_RELEASE)
+	_react_hold = &""
