@@ -14,6 +14,11 @@ override.cfg
 *.app/
 *.exe
 
+# Raw Mixamo downloads: only the baked anim/clips/*.json is committed
+# (tools/bake_mixamo.py; Mixamo terms don't allow redistributing the files)
+*.fbx
+*.fbx.import
+
 # Test and soak logs
 _logs/
 *.log

@@ -139,7 +139,7 @@ func _ready() -> void:
 	get_tree().quit(0 if _ok else 1)
 
 func _contact_pose(id: StringName) -> PoseLibrary.Pose:
-	for k in PoseLibrary.MOVES[id]["keys"]:
+	for k in PoseLibrary.move_def(id)["keys"]:
 		if int(k[0]) == 1:
 			return PoseLibrary.get_pose(k[2])
 	return null

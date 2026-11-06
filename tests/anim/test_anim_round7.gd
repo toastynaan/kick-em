@@ -62,7 +62,18 @@ func _ready() -> void:
 		runs[id] = await _run_strike(h, id, rt)
 		await _frames(50)
 	_check_contacts(runs, stance)
-	_check_heavies(runs)
+	# The sketch cross / hook (F4 A/B trial) sink as low as the heavies: the
+	# heavy vs light rule is checked against the original light strikes until
+	# the sketch poses are adopted (and the heavies deepened) or dropped.
+	var light := runs.duplicate()
+	if Tuning.debug_sketch_strikes:
+		_print_sketch_vs_heavies(runs)
+		Tuning.debug_sketch_strikes = false
+		for id: StringName in PoseLibrary.SKETCH_MOVES:
+			light[id] = await _run_strike(h, id, rt)
+			await _frames(50)
+		Tuning.debug_sketch_strikes = true
+	_check_heavies(light)
 	await _check_reactions(h, stance, rt)
 	await _check_other_moves(h, stance, rt)
 	_check("live output inside the limits (+%.0f deg) through every Round 7 move" % RUNTIME_TOL,
@@ -124,12 +135,28 @@ func _check_ids() -> void:
 		for pn in PoseLibrary.HOLDS[id]["poses"]:
 			if not PoseLibrary.POSES.has(pn):
 				bad_keys.append("hold %s:%s" % [id, pn])
+	# Sketch strikes: same ids as MOVES strikes, real poses, a contact key.
+	for id in PoseLibrary.SKETCH_MOVES:
+		if not PoseLibrary.ROUND7_STRIKE_IDS.has(id):
+			bad_keys.append("sketch %s: not a Round 7 strike" % id)
+		var sketch_contact := false
+		for k in PoseLibrary.SKETCH_MOVES[id]["keys"]:
+			if not PoseLibrary.POSES.has(k[2]):
+				bad_keys.append("sketch %s:%s" % [id, k[2]])
+			if int(k[0]) == 1 and typeof(k[1]) == TYPE_FLOAT and float(k[1]) == 0.0:
+				sketch_contact = true
+		if not sketch_contact:
+			bad_keys.append("sketch %s: no contact key" % id)
 	_check("every Round 7 key / hold names a pose; strikes have a contact key", bad_keys.is_empty(), str(bad_keys))
 
 func _check_static_limits() -> void:
 	var names: Array = []
 	for id in PoseLibrary.ROUND7_MOVE_IDS:
 		for k in PoseLibrary.MOVES[id]["keys"]:
+			if not names.has(k[2]):
+				names.append(k[2])
+	for id in PoseLibrary.SKETCH_MOVES:
+		for k in PoseLibrary.SKETCH_MOVES[id]["keys"]:
 			if not names.has(k[2]):
 				names.append(k[2])
 	for id in PoseLibrary.ROUND7_HOLD_IDS:
@@ -245,6 +272,13 @@ func _check_contacts(runs: Dictionary, stance: Dictionary) -> void:
 	for i in cr["contact"] + 1:
 		catch_z = minf(catch_z, float(cr["s"][i]["lfist"].z))
 	_check("counter: the left hand shoots out to catch (z <= -0.5) before the right lands", catch_z <= -0.5, "left hand z %.2f" % catch_z)
+
+func _print_sketch_vs_heavies(runs: Dictionary) -> void:
+	for pair in [[&"cross", &"heavy_cross", "rfist"], [&"hook", &"heavy_hook", "lfist"]]:
+		var lw := _windup(runs[pair[0]], pair[2])
+		var hw := _windup(runs[pair[1]], pair[2])
+		print("    sketch %s vs %s: fist back %.2f vs %.2f m, hips %.2f vs %.2f m, turn %.0f vs %.0f deg (info)" % [
+			pair[0], pair[1], lw.x, hw.x, lw.y, hw.y, _turn_range(runs[pair[0]]), _turn_range(runs[pair[1]])])
 
 func _check_heavies(runs: Dictionary) -> void:
 	for pair in [[&"jab", &"heavy_jab", "lfist"], [&"cross", &"heavy_cross", "rfist"], [&"hook", &"heavy_hook", "lfist"]]:

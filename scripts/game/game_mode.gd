@@ -122,6 +122,7 @@ func _ready() -> void:
 	add_to_group(&"game_mode")
 	CameraRig.load_settings()        # mouse sensitivity / invert Y from user://settings.cfg
 	GameMenus.load_debug_settings()  # the player's upgrades (speed cap, ram, teleport, pursuit) and the F3 overlay
+	Tuning.debug_clip_anims = true   # Mixamo clip trial: on in play (F5 flips it); tests keep the procedural default
 	menus = GameMenus.new()
 	menus.name = "Menus"
 	add_child(menus)

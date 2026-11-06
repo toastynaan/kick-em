@@ -307,6 +307,8 @@ static var debug_launch_step := 1.0   ## Round 8: charged launches start at c >=
 static var debug_air_hits := 4        ## Round 8: air hits that hang per air combo (4 .. 6)
 static var debug_start_focus := 1.0   ## SUPERSEDED (Round 7 removed the Focus meter); unread
 static var debug_overlay := false     ## debug overlay (HUD)
+static var debug_sketch_strikes := true ## F4: cross / hook / uppercut play PoseLibrary.SKETCH_MOVES (false: the originals)
+static var debug_clip_anims := false  ## F5: Mixamo clips (PoseLibrary.CLIP_MOVES, IDLE_CLIP) replace their procedural moves (GameMode turns it on)
 
 # --- Power score P (Strikes and body reactions) -------------------------------
 ## P = base x CHARGE_MULT[level] + speed_bonus + counter_bonus + finisher_bonus.
@@ -874,6 +876,13 @@ const R8_CHARGE_WALK_MULT := 0.5      ## walk speed while charging
 const R8_CHARGE_LUNGE := Vector2(3.0, 6.0)  ## m the release may glide: at c = 0, at c = 1
 const R8_RELEASE_STARTUP := 5.0       ## frames from the release (after any glide) to the first active frame
 const R8_CHARGED_EXTRA_RECOVERY := 6.0 ## frames added to the tap's recovery for a charged strike
+## A tapped roundhouse on a target whose guard isn't broken staggers it back on
+## its feet instead of knocking it down (a broken guard still goes down): the
+## push reaction over "stun" s with the tap's push, the spine, head and arms
+## "physics" ragdoll, kicked back at "dv" m/s (the arms 60%; faster than the
+## slide, so the torso snaps back instead of lagging into a fold), back to the
+## animation over "fade" s.
+const ROUNDHOUSE_STAGGER := {"stun": 0.8, "physics": 0.8, "fade": 0.6, "dv": 5.0}
 ## Upgrade maxima (pause menu > Debug; the Duel uses all of them).
 const R8_UPGRADE_MAX := {"speed_cap": 12.0, "ram_level": 3, "teleport": true, "pursuit_max": 3,
 	"charge_full": 0.5, "pressure_mult": 2.0, "launch_step": 0.5, "air_hits": 6}

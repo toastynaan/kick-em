@@ -191,6 +191,7 @@ var _react_t := 0.0                  ## since the reaction started
 var _react_dir := Vector3.ZERO       ## flat hit direction (attacker -> victim)
 var _react_attacker: Node3D
 var _react_hold: StringName = &""    ## held pose id (fold, buckle, lift); &"" = a timed move
+var _react_bone: StringName = &"Chest"  ## bone the current reaction's hit landed on
 var _slide_v0 := 0.0                 ## m/s at the start of the push slide
 var _slide_time := 0.0               ## s the slide lasts
 var _slide_steps := false            ## push >= R7_PUSH_STEP_FROM: the legs step with the slide
@@ -1335,6 +1336,10 @@ func react(kind: StringName, direction: Vector3, push: float, stun: float, info:
 		_turn_rate = -float(side) * deg_to_rad(REACT_SPIN_TURN) / _slide_time
 	if kind == &"flinch":
 		_flinch_bone(dir, bone)
+	_react_bone = bone
+	if info != null and info.get_meta(&"stagger", false):
+		_react_bone = Bones.CHEST   # the body stagger (stagger-back clip), not a head-hit push
+		_stagger_body(dir)
 	_play_react_pose(kind, stun, side)
 	GameEvents.react_started.emit(self, kind, attacker)
 
@@ -1525,6 +1530,8 @@ func _play_react_pose(kind: StringName, stun: float, side: int) -> void:
 	var ids: Array[StringName] = [StringName("react_" + String(kind))]
 	for id: StringName in REACT_POSE_FALLBACK.get(kind, []):
 		ids.append(id)
+	if kind == &"push" and _react_bone == Bones.HEAD:
+		ids.insert(0, &"react_push_head")   # a Mixamo head-hit clip (F5); has_move() is false otherwise
 	if kind == &"spin" and side > 0:
 		ids.insert(0, &"react_spin_r")
 		ids.erase(&"stumble_side_r")
@@ -1533,6 +1540,10 @@ func _play_react_pose(kind: StringName, stun: float, side: int) -> void:
 	if kind == &"fold" and stun < fold_quick_max():
 		hold = false
 	for id in ids:
+		if hold and PoseLibrary.plays_clip(id):
+			# A Mixamo clip (F5) plays through once over the reaction instead of holding.
+			animator.play_timed(id, maxf(get_react_time_left(), 0.1))
+			return
 		if hold and (PoseLibrary.HOLDS.has(id) or PoseLibrary.POSES.has(id)):
 			animator.hold_pose(id, REACT_POSE_BLEND)
 			_react_hold = id
@@ -1554,6 +1565,28 @@ func _end_react_pose() -> void:
 	_react_hold = &""
 
 # --- Round 8 reactions --------------------------------------------------------------
+## A staggering hit on a fighter that stays on its feet (CombatController's
+## roundhouse stagger): the spine, head and arms go Tuning.ROUNDHOUSE_STAGGER
+## "physics" ragdoll through RagdollController.limp_chain (the legs keep the
+## push's stumble steps) and take its "dv" along `dir` (the arms 60%, as
+## RagdollController.stagger), back to the animation over "fade".
+func _stagger_body(dir: Vector3) -> void:
+	if ragdoll == null or rig == null or ragdoll.is_full_ragdoll() \
+			or get_state() == RagdollController.State.GETUP:
+		return
+	var r: Dictionary = Tuning.ROUNDHOUSE_STAGGER
+	ragdoll.limp_chain(RagdollController.STAGGER_CHAIN, float(r["physics"]), float(r["fade"]))
+	var dv := float(r["dv"])
+	for b: StringName in RagdollController.STAGGER_CHAIN:
+		var pb := rig.get_physical_bone(b)
+		if pb == null or rig.is_bone_severed(b):
+			continue
+		var k := 1.0 if b in [Bones.SPINE, Bones.CHEST, Bones.HEAD] else 0.6
+		var rid := pb.get_rid()
+		var lv: Vector3 = PhysicsServer3D.body_get_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, lv + dir * dv * k)
+		PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_SLEEPING, false)
+
 ## The flinch's physical hit: the struck bone's chain (RagdollController.hit_chain)
 ## goes Tuning.REACT_FLINCH "physics" for its "fade" through
 ## RagdollController.limp_chain, so the fighter stays animated and in control;

@@ -1556,6 +1556,60 @@ const POSES := {
 		"lfist": Vector3(-0.18, 1.34, -0.28), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.22, 1.28, -0.08), "relbow": Vector3(0.6, -1, 0.4),
 		"lul": Vector3(82, 0, -6), "lll": Vector3(-122, 0, 0), "lf": Vector3(-20, 0, 0),
 		"rul": Vector3(50, 0, 4), "rll": Vector3(-14, 0, 0), "rf": Vector3(15, 0, 0)},
+	# =========================================================================
+	# Sketch strikes (SKETCH_MOVES): impact-sheet silhouettes. Low hips, a wide
+	# stance that opens BACKWARD (the target stands ~0.77 m away after a
+	# glide), the torso leaning past the hips so back foot -> hips -> fist reads
+	# as one line, the head tucked. Fists land where the originals do.
+	# =========================================================================
+	# --- Cross: sink and coil onto the rear leg, then the rear heel drives the
+	# hips and shoulders through; the lead fist snaps back to the chin. ---
+	&"cross_sk_load": {"pos": Vector3(0, -0.16, 0.08), "hips": Vector3(-2, -34, 0), "spine": Vector3(-6, -4, 0),
+		"chest": Vector3(-2, -28, 0), "head": Vector3(16, 56, 0),
+		"lfist": Vector3(-0.06, 1.40, -0.42), "lelbow": Vector3(-0.5, -1, 0.1), "rfist": Vector3(0.22, 1.34, 0.04), "relbow": Vector3(0.7, -0.8, 0.6),
+		"lankle": Vector3(-0.13, 0.08, -0.30), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.18, 0.08, 0.30), "rknee": Vector3(0.25, 0, -1)},
+	&"cross_sk_hit": {"pos": Vector3(0, -0.19, 0.09), "hips": Vector3(-16, 28, 0), "spine": Vector3(-10, 0, 0),
+		"chest": Vector3(-6, 26, 0), "head": Vector3(36, -54, 0),
+		"lfist": Vector3(-0.10, 1.36, -0.08), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(0.04, 1.42, -0.76), "relbow": Vector3(0.8, -0.6, 0.2),
+		"lankle": Vector3(-0.13, 0.08, -0.34), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.16, 0.12, 0.58), "rfp": -38.0},
+	&"cross_sk_follow": {"pos": Vector3(0, -0.20, 0.06), "hips": Vector3(-18, 34, 0), "spine": Vector3(-12, 2, 0),
+		"chest": Vector3(-8, 26, 0), "head": Vector3(38, -60, 0),
+		"lfist": Vector3(-0.12, 1.34, -0.06), "lelbow": Vector3(-0.6, -1, 0.3), "rfist": Vector3(-0.04, 1.36, -0.84), "relbow": Vector3(0.9, -0.4, 0.2),
+		"lankle": Vector3(-0.13, 0.08, -0.34), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.15, 0.15, 0.58), "rfp": -48.0},
+	# --- Hook: dip toward the lead side with the lead arm cocked wide, then the
+	# whole torso whips right; the elbow stays at shoulder height. ---
+	&"hook_sk_load": {"pos": Vector3(-0.03, -0.17, 0.03), "hips": Vector3(-6, 14, 0), "spine": Vector3(-10, 8, 8),
+		"chest": Vector3(-6, 22, 0), "head": Vector3(10, -40, -6),
+		"lfist": Vector3(-0.48, 1.36, -0.10), "lelbow": Vector3(-1, 0.3, 0.4), "rfist": Vector3(0.10, 1.38, -0.20), "relbow": Vector3(0.5, -1, 0.4),
+		"lankle": Vector3(-0.16, 0.08, -0.30), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.20, 0.08, 0.30), "rknee": Vector3(0.3, 0, -1)},
+	&"hook_sk_hit": {"pos": Vector3(0.02, -0.12, -0.04), "hips": Vector3(-6, -18, 0), "spine": Vector3(-6, -8, -4),
+		"chest": Vector3(-4, -16, 0), "head": Vector3(10, 40, 0),
+		"lfist": Vector3(0.02, 1.44, -0.62), "lelbow": Vector3(-1, 0.3, 0.0), "rfist": Vector3(0.12, 1.38, -0.16), "relbow": Vector3(0.5, -1, 0.4),
+		"lankle": Vector3(-0.16, 0.10, -0.32), "lknee": Vector3(-0.2, 0, -1), "lfp": -10.0,
+		"rankle": Vector3(0.20, 0.12, 0.32), "rknee": Vector3(0.2, 0, -1), "rfp": -30.0},
+	&"hook_sk_follow": {"pos": Vector3(0.03, -0.14, -0.05), "hips": Vector3(-6, -28, 0), "spine": Vector3(-8, -14, -6),
+		"chest": Vector3(-6, -18, 0), "head": Vector3(12, 54, 0),
+		"lfist": Vector3(0.30, 1.40, -0.50), "lelbow": Vector3(-0.5, 0.3, -1), "rfist": Vector3(0.16, 1.30, -0.08), "relbow": Vector3(0.6, -1, 0.5),
+		"lankle": Vector3(-0.16, 0.10, -0.32), "lknee": Vector3(-0.2, 0, -1), "lfp": -14.0,
+		"rankle": Vector3(0.20, 0.15, 0.32), "rknee": Vector3(0.2, 0, -1), "rfp": -40.0},
+	# --- Uppercut: drop deep with the rear fist by the thigh, then drive up
+	# off the rear foot; the body rises with the fist and ends on the toes. ---
+	&"upc_sk_load": {"pos": Vector3(0, -0.30, 0.04), "hips": Vector3(-12, -24, 0), "spine": Vector3(-18, -6, 0),
+		"chest": Vector3(-8, -20, 8), "head": Vector3(34, 32, 0),
+		"lfist": Vector3(-0.10, 1.22, -0.32), "lelbow": Vector3(-0.5, -1, 0.2), "rfist": Vector3(0.24, 0.90, -0.04), "relbow": Vector3(0.5, -1, 0.6),
+		"lankle": Vector3(-0.15, 0.08, -0.30), "lknee": Vector3(-0.3, 0, -1), "rankle": Vector3(0.20, 0.08, 0.28), "rknee": Vector3(0.3, 0, -1)},
+	&"upc_sk_hit": {"pos": Vector3(0, -0.15, -0.03), "hips": Vector3(-6, 16, 0), "spine": Vector3(-8, 4, 0),
+		"chest": Vector3(-2, 22, -6), "head": Vector3(14, -36, 0),
+		"lfist": Vector3(-0.12, 1.34, -0.16), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.06, 1.42, -0.48), "relbow": Vector3(0.3, -1, -0.7),
+		"lankle": Vector3(-0.15, 0.08, -0.30), "lknee": Vector3(-0.2, 0, -1), "rankle": Vector3(0.18, 0.12, 0.26), "rfp": -30.0},
+	&"upc_sk_rise": {"pos": Vector3(0, -0.03, -0.08), "hips": Vector3(0, 22, 0), "spine": Vector3(4, 2, 0),
+		"chest": Vector3(2, 28, -6), "head": Vector3(-4, -38, 0),
+		"lfist": Vector3(-0.14, 1.34, -0.12), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.03, 1.64, -0.42), "relbow": Vector3(0.3, -1, -0.8),
+		"lankle": Vector3(-0.15, 0.08, -0.30), "rankle": Vector3(0.17, 0.16, 0.22), "rfp": -42.0},
+	&"upc_sk_follow": {"pos": Vector3(0, 0.02, -0.09), "hips": Vector3(4, 26, 0), "spine": Vector3(12, 2, 0),
+		"chest": Vector3(6, 30, -6), "head": Vector3(-18, -38, 0),
+		"lfist": Vector3(-0.16, 1.30, -0.10), "lelbow": Vector3(-0.5, -1, 0.4), "rfist": Vector3(0.0, 1.88, -0.28), "relbow": Vector3(0.3, -1, -0.8),
+		"lankle": Vector3(-0.15, 0.09, -0.30), "lfp": -8.0, "rankle": Vector3(0.16, 0.22, 0.18), "rfp": -55.0},
 }
 
 const MOVES := {
@@ -1949,6 +2003,60 @@ const ROUND9_AIR_IDS: Array[StringName] = [&"air_axe"]
 ## on a lifted body: the leg-kick load is held while charging).
 const CHARGE_LOAD_SHARED := {&"axe_kick": &"heavy_leg_kick_load"}
 
+## Mixamo clip moves (res://anim/clips, tools/bake_mixamo.py), played instead
+## of the MOVES entry while Tuning.debug_clip_anims is on (F5 flips it).
+## "clip": baked clip id, or "clips": variants (one at random per play);
+## "from" / "to": the seconds of the clip to play (from = the impact);
+## "mirror": left/right swapped; "settle": play_timed share for the blend
+## back; "light": [s, id] plays CLIP_MOVES[id] when play_timed gets less than
+## s; "contact" (+ "active"): a strike on play_move frames (the contact frame
+## lands on the first active frame); "seg": 2 = the clip over the recovery
+## (block_hit's play_move). A clip-only id (not in MOVES) takes "steps" etc.
+## from MOVES["like"]. Moves with stumble "steps" run the legs while sliding.
+## Ids by reaction (Fighter._play_react_pose): fold = charged gut punch (Hit To
+## Body under 1.1 s, Big Stomach Hit from there; a tapped fold stays the
+## procedural half-keel); push = front kick / charged jab or cross
+## (react_push_head when the head was hit); snap = tapped uppercut; spin =
+## tapped hook (react_spin_r: hit from the other side).
+const CLIP_MOVES := {
+	&"react_fold": {"clip": &"big_stomach_hit", "from": 0.1, "light": [1.1, &"react_fold_light"]},
+	&"react_fold_light": {"clip": &"hit_to_body", "from": 0.1},
+	&"react_push": {"clip": &"stagger_back", "from": 0.05, "to": 1.3},
+	&"react_push_head": {"clips": [&"head_hit", &"big_hit_to_head"], "from": 0.05, "to": 1.05, "like": &"react_push"},
+	&"react_snap": {"clip": &"medium_hit_to_head", "from": 0.05, "to": 0.6},
+	&"react_spin": {"clip": &"big_hit_to_head_2", "from": 0.05, "to": 0.6},
+	&"react_spin_r": {"clip": &"big_hit_to_head_2", "from": 0.05, "to": 0.6, "mirror": true},
+	&"block_hit": {"clip": &"center_block", "from": 0.05, "to": 0.8, "seg": 2},
+	&"roundhouse": {"clip": &"roundhouse_kick", "from": 0.25, "contact": 0.733, "active": 0.1},
+	# The charged release: from its held load (CLIP_HOLDS) the wind-up keys up
+	# to the load's frame are skipped, so the clip runs on from the hold.
+	&"heavy_roundhouse": {"clip": &"roundhouse_kick", "from": 0.25, "contact": 0.733, "active": 0.1},
+}
+## Holds whose pose is a clip frame while debug_clip_anims is on: the HOLDS
+## entry with "poses" = [the frame at "at" s]. The roundhouse charge holds the
+## clip's coil (0.33 s: hips wound back, both feet still down).
+const CLIP_HOLDS := {
+	&"heavy_roundhouse_load": {"clip": &"roundhouse_kick", "at": 0.333},
+}
+## The idle clip of the standing locomotion, and the sprint's upper body
+## (phase-locked to the procedural legs) (PoseAnimator, debug_clip_anims).
+const IDLE_CLIP := &"fight_idle"
+const RUN_CLIP := &"fast_run"
+
+## Sketch strikes (impact-sheet reference): the same ids and contact timing
+## as MOVES, played instead of them while Tuning.debug_sketch_strikes is on
+## (F4 flips it in game to compare). "run_dip": share of the strike's hip dip
+## kept while the legs run (PoseAnimator default 0.3; these dip ~0.2 m, and
+## more would pull the hips below the sprint stride's reach).
+const SKETCH_MOVES := {
+	&"cross": {"legs": &"free", "run_dip": 0.12, "keys": [[0, 0.45, &"cross_sk_load"], [1, 0.0, &"cross_sk_hit", &"snap"], [1, 1.0, &"cross_sk_hit"],
+		[2, 0.2, &"cross_sk_follow", &"snap"], [2, 0.6, &"stance"]]},
+	&"hook": {"legs": &"free", "run_dip": 0.12, "keys": [[0, 0.5, &"hook_sk_load"], [1, 0.0, &"hook_sk_hit", &"snap"], [1, 1.0, &"hook_sk_hit"],
+		[2, 0.2, &"hook_sk_follow", &"snap"], [2, 0.6, &"stance"]]},
+	&"uppercut": {"keys": [[0, 0.5, &"upc_sk_load"], [1, 0.0, &"upc_sk_hit", &"snap"], [1, 1.0, &"upc_sk_rise", &"linear"],
+		[2, 0.25, &"upc_sk_follow", &"snap"], [2, 0.65, &"stance"]]},
+}
+
 ## Every move id (older rounds, Round 5, Round 7, Round 8 and Round 9).
 static func all_move_ids() -> Array[StringName]:
 	var out: Array[StringName] = ALL_MOVE_IDS.duplicate()
@@ -2003,13 +2111,172 @@ static func warm() -> void:
 	for id in MOVES:
 		for k in MOVES[id]["keys"]:
 			get_pose(k[2])
+	for id in CLIP_MOVES:   # load every baked clip variant now, not on the first hit
+		var cfg: Dictionary = CLIP_MOVES[id]
+		for cid: StringName in cfg.get("clips", [cfg.get("clip", &"")]):
+			var ck := "%s|%s" % [id, cid]
+			if not _clip_defs.has(ck):
+				_clip_defs[ck] = _build_clip_def(id, cid, cfg)
 
 static func has_pose(pose_name: StringName) -> bool:
 	return POSES.has(pose_name)
 
 ## True if play_move() knows this move id.
 static func has_move(id: StringName) -> bool:
-	return MOVES.has(id)
+	return MOVES.has(id) or (Tuning.debug_clip_anims and CLIP_MOVES.has(id) and not clip_move_def(id).is_empty())
+
+## The definition play_move() / play_timed() use for `id`: a CLIP_MOVES clip
+## while Tuning.debug_clip_anims is on, SKETCH_MOVES' while
+## Tuning.debug_sketch_strikes is on, else MOVES'.
+static func move_def(id: StringName) -> Dictionary:
+	if Tuning.debug_clip_anims and CLIP_MOVES.has(id):
+		var cd := clip_move_def(id)
+		if not cd.is_empty():
+			return cd
+	if Tuning.debug_sketch_strikes and SKETCH_MOVES.has(id):
+		return SKETCH_MOVES[id]
+	return MOVES.get(id, {})
+
+## The hold_pose() definition for `id`: HOLDS', with a CLIP_HOLDS frame as
+## its pose while Tuning.debug_clip_anims is on.
+static func hold_def(id: StringName) -> Dictionary:
+	if Tuning.debug_clip_anims and CLIP_HOLDS.has(id):
+		var ck := "hold|%s" % id
+		if not _clip_defs.has(ck):
+			var cfg: Dictionary = CLIP_HOLDS[id]
+			var clip := get_clip(cfg["clip"])
+			var d: Dictionary = {}
+			if clip != null:
+				d = HOLDS[id].duplicate()
+				var i := clampi(roundi(float(cfg["at"]) * clip.fps), 0, clip.poses.size() - 1)
+				d["poses"] = [clip_pose_name(cfg["clip"], i)]
+			_clip_defs[ck] = d
+		if not (_clip_defs[ck] as Dictionary).is_empty():
+			return _clip_defs[ck]
+	return HOLDS[id]
+
+## True if `id` plays a Mixamo clip right now (CLIP_MOVES, debug_clip_anims).
+static func plays_clip(id: StringName) -> bool:
+	return Tuning.debug_clip_anims and CLIP_MOVES.has(id) and not clip_move_def(id).is_empty()
+
+# --- Mixamo clips -----------------------------------------------------------------
+## Baked clips (tools/bake_mixamo.py writes res://anim/clips/<id>.json).
+const CLIP_DIR := "res://anim/clips/"
+
+## A baked clip: one Pose per frame (every bone, hips offset), and the ankle
+## and knee positions per frame [left, right] (character space, height 1).
+class Clip:
+	var fps := 30.0
+	var poses: Array[Pose] = []
+	var ankles: Array = []
+	var knees: Array = []
+
+static var _clips := {}
+static var _clip_defs := {}
+
+## The clip `id` (loaded once; its frames are also poses named
+## "clip/<id>/<frame>"), or null when it was not baked.
+static func get_clip(id: StringName) -> Clip:
+	if _clips.has(id):
+		return _clips[id]
+	var c: Clip = null
+	var path := CLIP_DIR + String(id) + ".json"
+	var data = JSON.parse_string(FileAccess.get_file_as_string(path)) if FileAccess.file_exists(path) else null
+	if data is Dictionary:
+		c = Clip.new()
+		c.fps = float(data.get("fps", 30.0))
+		var n := 0
+		for fr: Dictionary in data["frames"]:
+			var p := Pose.new()
+			p.rot.resize(HumanoidRig.BONE_COUNT)
+			var r: Array = fr["r"]
+			for i in HumanoidRig.BONE_COUNT:
+				var q := Quaternion(r[i * 4], r[i * 4 + 1], r[i * 4 + 2], r[i * 4 + 3]).normalized()
+				p.rot[i] = q if i == 0 else clamp_joint(Bones.ALL[i], q)
+			p.has_pos = true
+			p.pos = _vec3(fr["p"])
+			p.hips_yaw = (p.rot[0] as Quaternion).get_euler().y
+			p.defines_legs = [true, true]
+			c.poses.append(p)
+			c.ankles.append([_vec3(fr["la"]), _vec3(fr["ra"])])
+			c.knees.append([_vec3(fr["lk"]), _vec3(fr["rk"])])
+			_cache[clip_pose_name(id, n)] = p
+			n += 1
+	else:
+		push_warning("PoseLibrary: no baked clip %s" % path)
+	_clips[id] = c
+	return c
+
+static func clip_pose_name(id: StringName, frame: int) -> StringName:
+	return StringName("clip/%s/%d" % [id, frame])
+
+static func _vec3(a: Array) -> Vector3:
+	return Vector3(a[0], a[1], a[2])
+
+## A CLIP_MOVES entry as a move: the first frame snaps in within 0.05 s (like
+## every reaction), then one linear key per frame from "from" to "to" over
+## the active segment. play_timed stretches it to the stun; "quick" carries
+## over from MOVES (a short fold stays the procedural half-keel).
+## "clips" (several variants) picks one at random per play.
+static func clip_move_def(id: StringName) -> Dictionary:
+	var cfg: Dictionary = CLIP_MOVES[id]
+	var clips: Array = cfg.get("clips", [cfg.get("clip", &"")])
+	var cid: StringName = clips.pick_random()
+	var ck := "%s|%s" % [id, cid]
+	if not _clip_defs.has(ck):
+		_clip_defs[ck] = _build_clip_def(id, cid, cfg)
+	return _clip_defs[ck]
+
+static func _build_clip_def(id: StringName, cid: StringName, cfg: Dictionary) -> Dictionary:
+	var clip := get_clip(cid)
+	if clip == null:
+		return {}
+	var last := clip.poses.size() - 1
+	var at := func(s: float) -> int: return clampi(roundi(s * clip.fps), 0, last)
+	var i0: int = at.call(float(cfg.get("from", 0.0)))
+	var i1: int = maxi(at.call(float(cfg.get("to", last / clip.fps))), i0 + 1)
+	var suffix := "#m" if cfg.get("mirror", false) else ""
+	var pn := func(i: int) -> StringName: return StringName(String(clip_pose_name(cid, i)) + suffix)
+	var keys: Array = []
+	var def := {}
+	if cfg.has("contact"):
+		# A strike on play_move frames: the clip up to "contact" over the
+		# startup (from the current pose), the contact frame on the first active
+		# frame, "active" s of clip over the active frames, the rest over 85% of
+		# the recovery (the last 15% blends back to the locomotion).
+		var ic: int = clampi(at.call(float(cfg["contact"])), i0 + 1, i1 - 1)
+		var ia: int = clampi(ic + roundi(float(cfg.get("active", 0.1)) * clip.fps), ic + 1, i1)
+		for i in range(i0 + 1, ic):
+			keys.append([0, float(i - i0) / float(ic - i0), pn.call(i), &"linear"])
+		keys.append([1, 0.0, pn.call(ic), &"linear"])
+		for i in range(ic + 1, ia + 1):
+			keys.append([1, float(i - ic) / float(ia - ic), pn.call(i), &"linear"])
+		for i in range(ia + 1, i1 + 1):
+			keys.append([2, 0.85 * float(i - ia) / float(maxi(i1 - ia, 1)), pn.call(i), &"linear"])
+	elif int(cfg.get("seg", 1)) == 2:
+		# A hit on the guard (play_move with a short startup / active): in at
+		# once, the clip over 85% of the recovery, then back to the guard.
+		keys.append([0, 1.0, pn.call(i0), &"snap"])
+		keys.append([1, 1.0, pn.call(i0)])
+		for i in range(i0 + 1, i1 + 1):
+			keys.append([2, 0.85 * float(i - i0) / float(i1 - i0), pn.call(i), &"linear"])
+	else:
+		# A reaction on play_timed: the first frame within 0.05 s, the clip over
+		# the active segment, "settle" s back to the locomotion.
+		keys.append([0, Vector2(1.0, 0.05), pn.call(i0), &"snap"])
+		for i in range(i0 + 1, i1 + 1):
+			keys.append([1, float(i - i0) / float(i1 - i0), pn.call(i), &"linear"])
+		def["timed"] = Vector3(0.05, (i1 - i0) / clip.fps, float(cfg.get("settle", 0.15)))
+	def["keys"] = keys
+	var base: Dictionary = MOVES.get(id, MOVES.get(cfg.get("like", &""), {}))
+	for k in ["quick", "steps", "step_dir", "legs", "keep_hold"]:
+		if base.has(k):
+			def[k] = base[k]
+	if def.has("steps"):
+		def["legs"] = &"free"   # sliding: the stumble steps take the legs, the clip the body
+	if cfg.has("light"):
+		def["light"] = cfg["light"]
+	return def
 
 ## Compiled pose by name; "<name>#m" is the left/right mirror.
 static func get_pose(pose_name: StringName) -> Pose:

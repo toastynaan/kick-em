@@ -729,6 +729,17 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed(&"debug"):
 		toggle_debug()
 		get_viewport().set_input_as_handled()
+	elif event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_F4:
+		# F4 (dev A/B, not a Controls action so the F1 panel keeps its size):
+		# the sketch strike poses vs the originals, from the next strike on.
+		Tuning.debug_sketch_strikes = not Tuning.debug_sketch_strikes
+		pop_text("SKETCH POSES" if Tuning.debug_sketch_strikes else "ORIGINAL POSES")
+		get_viewport().set_input_as_handled()
+	elif event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_F5:
+		# F5 (dev A/B): Mixamo clips (fold reaction, fight idle) vs the procedural ones.
+		Tuning.debug_clip_anims = not Tuning.debug_clip_anims
+		pop_text("MIXAMO CLIPS" if Tuning.debug_clip_anims else "PROCEDURAL ANIMS")
+		get_viewport().set_input_as_handled()
 
 func _update_player_bars(t: float, dt: float) -> void:
 	if player == null or not is_instance_valid(player):

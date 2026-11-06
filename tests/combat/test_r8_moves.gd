@@ -42,8 +42,13 @@ func _want(id: StringName, c: float) -> Dictionary:
 	var row: Dictionary = Tuning.R8_MOVES[id]
 	if c < 0.0:
 		var t: Dictionary = row["tap"]
-		return {"react": t["react"], "push": float(t["push"]), "stun": float(t["stun"]), "lift": 0.0,
+		var tw := {"react": t["react"], "push": float(t["push"]), "stun": float(t["stun"]), "lift": 0.0,
 			"speed": 0.0, "angle": 0.0, "sideways": false}
+		if id == &"roundhouse":
+			# Tuning.ROUNDHOUSE_STAGGER: on an unbroken guard the tap staggers (a push on its feet).
+			tw["react"] = &"push"
+			tw["stun"] = float(Tuning.ROUNDHOUSE_STAGGER["stun"])
+		return tw
 	var ch: Dictionary = row["charged"]
 	var l := func(k: String) -> float: return lerpf((ch[k] as Vector2).x, (ch[k] as Vector2).y, c) if ch.has(k) else 0.0
 	var w := {"react": ch["react"], "push": l.call("push"), "stun": l.call("stun"), "lift": l.call("lift"),

@@ -135,6 +135,10 @@ func _trial(id: StringName, state: StringName, arch: StringName, c := -1.0) -> H
 	var want_react: StringName = pay.get("react", e["react"])
 	var want_push := float(pay.get("push", e["push"])) * (Tuning.R7_HEAVY_PUSH_MULT if heavy else 1.0)
 	var want_stun := float(pay.get("stun", e["stun"])) * (Tuning.R7_HEAVY_STUN_MULT if heavy else 1.0)
+	if id == &"roundhouse" and c < 0.0 and pay.is_empty():
+		# Tuning.ROUNDHOUSE_STAGGER: a tapped roundhouse with no payoff staggers (a push on its feet).
+		want_react = &"push"
+		want_stun = float(Tuning.ROUNDHOUSE_STAGGER["stun"]) * (Tuning.R7_HEAVY_STUN_MULT if heavy else 1.0)
 	var want_lift := 0.0
 	if want_react == &"lift":
 		want_lift = float(pay.get("lift", e.get("lift", Tuning.R7_LIFT_HEIGHT)))

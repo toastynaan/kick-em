@@ -197,6 +197,10 @@ var _foot_poles: Array[Vector3] = [Vector3(-0.12, 0, -1), Vector3(0.12, 0, -1)]
 var _base_yaw := 0.0
 var _stance_feet: Array[Vector3] = []
 var _stance: PoseLibrary.Pose
+var _idle_clip: PoseLibrary.Clip   # Fight Idle (Tuning.debug_clip_anims); null when not baked
+var _idle_phase := 0.0             # s into the idle loop at _time 0
+var _run_clip: PoseLibrary.Clip    # Fast Run (sprint upper body); null when not baked
+var _run_stance_frame := 0.0       # its left-foot mid-stance frame (= _phase PI)
 # Styles and overlay (Round 5)
 var _style: StringName = &"walk"
 var _eff_style: StringName = &"walk"
@@ -257,6 +261,7 @@ var _keys: Array = []          # each: [time, kind(0 pose,1 snapshot,2 base), Po
 var _move_startup := 0.0
 var _move_mirror := false
 var _move_legs_free := false
+var _move_run_dip := 0.3        # share of the move's hip dip kept while the legs run (def "run_dip")
 var _move_steps := 0
 var _move_step_dir := Vector3.ZERO
 var _strike_pose: StringName = &""   # pose name of the first active key (aim reference)
@@ -293,6 +298,11 @@ func setup(p_rig: HumanoidRig) -> void:
 	rig = p_rig
 	PoseLibrary.warm()
 	_stance = PoseLibrary.get_pose(&"stance")
+	_idle_clip = PoseLibrary.get_clip(PoseLibrary.IDLE_CLIP)
+	_run_clip = PoseLibrary.get_clip(PoseLibrary.RUN_CLIP)
+	if _run_clip != null:
+		_run_stance_frame = _stance_frame(_run_clip)
+	_idle_phase = randf() * 30.0  # fighters don't bounce in step
 	var sd: Dictionary = PoseLibrary.POSES[&"stance"]
 	_stance_feet = [sd["lankle"] as Vector3, sd["rankle"] as Vector3]
 	_crouch = PoseLibrary.get_pose(&"crouch")
@@ -557,10 +567,10 @@ func get_locomotion_phase() -> float:
 func _play(move_id: StringName, startup: float, active: float, recovery: float, def_override: Dictionary = {}) -> void:
 	var def: Dictionary = def_override
 	if def.is_empty():
-		if not PoseLibrary.MOVES.has(move_id):
+		if not PoseLibrary.has_move(move_id):
 			push_warning("PoseAnimator: unknown move %s" % move_id)
 			return
-		def = PoseLibrary.MOVES[move_id]
+		def = PoseLibrary.move_def(move_id)
 	startup = maxf(startup, 0.0)
 	active = maxf(active, 0.0)
 	recovery = maxf(recovery, 0.0)
@@ -581,6 +591,7 @@ func _play(move_id: StringName, startup: float, active: float, recovery: float, 
 	_move_mirror = mirror
 	_move_startup = startup
 	_move_legs_free = def.get("legs", &"") == &"free"
+	_move_run_dip = float(def.get("run_dip", 0.3))
 	_move_steps = int(def.get("steps", 0))
 	_move_step_dir = def.get("step_dir", Vector3.ZERO)
 	if mirror:
@@ -646,13 +657,19 @@ func _play(move_id: StringName, startup: float, active: float, recovery: float, 
 ## play_timed without the `locked` check (RagdollController: fast get-up, stumbles).
 func _play_timed(pose_id: StringName, duration: float) -> void:
 	duration = maxf(duration, 0.0)
-	if PoseLibrary.MOVES.has(pose_id):
-		var def: Dictionary = PoseLibrary.MOVES[pose_id]
+	if PoseLibrary.has_move(pose_id):
+		var def: Dictionary = PoseLibrary.move_def(pose_id)
 		# Round 8: a short play of a move with a "quick" variant plays the
 		# variant's keys under the same id (react_fold -> the half-keel).
 		var quick: Array = def.get("quick", [])
+		var light: Array = def.get("light", [])
 		if not quick.is_empty() and duration < float(quick[0]) and PoseLibrary.MOVES.has(quick[1]):
 			def = PoseLibrary.MOVES[quick[1]]
+		elif not light.is_empty() and duration < float(light[0]):
+			# A clip move's lighter clip for a shorter play (CLIP_MOVES "light").
+			var ld := PoseLibrary.clip_move_def(light[1])
+			if not ld.is_empty():
+				def = ld
 		var sp: Vector3 = def.get("timed", PoseLibrary.TIMED_SPLIT)
 		var sum := maxf(sp.x + sp.y + sp.z, 0.0001)
 		var st := duration * sp.x / sum
@@ -672,7 +689,7 @@ func _play_timed(pose_id: StringName, duration: float) -> void:
 func _hold(pose_id: StringName, blend_time: float) -> void:
 	var def: Dictionary
 	if PoseLibrary.HOLDS.has(pose_id):
-		def = PoseLibrary.HOLDS[pose_id]
+		def = PoseLibrary.hold_def(pose_id)
 	elif PoseLibrary.POSES.has(pose_id):
 		def = {"poses": [pose_id]}
 	else:
@@ -863,7 +880,7 @@ func _evaluate(dt: float) -> void:
 			# Running under an upper-body strike: the hips ride the locomotion
 			# (a little of the strike's dip stays for weight).
 			pose_rot[HIPS_I] = _layer_rot[HIPS_I].slerp(pose_rot[HIPS_I], move_leg_w)
-			var hy := lerpf(_layer_pos.y, hips_offset.y, move_leg_w + (1.0 - move_leg_w) * 0.3)
+			var hy := lerpf(_layer_pos.y, hips_offset.y, move_leg_w + (1.0 - move_leg_w) * _move_run_dip)
 			hips_offset = _layer_pos.lerp(hips_offset, move_leg_w)
 			hips_offset.y = hy
 		if _move_t >= _move_end - 0.000001:
@@ -1246,6 +1263,34 @@ func _style_walk(o: Loco, speed: float, dir: Vector3, cw: float, rate: float) ->
 			var cq = _crouch.rot[i]
 			if cq != null:
 				o.rot[i] = PoseLibrary.jslerp(i, o.rot[i], cq, cw)
+	var idle_w := (1.0 - k) * (1.0 - cw) * (1.0 - _air_w)
+	if _idle_clip != null and Tuning.debug_clip_anims and idle_w > 0.0:
+		_blend_idle_clip(o, idle_w)
+
+## Fight Idle (Mixamo clip, looping on the animator's own time): torso, arms,
+## hips and the planted feet / knees of the standing idle, by `w` (1 standing
+## still, 0 from walking speed, in a crouch or in the air).
+func _blend_idle_clip(o: Loco, w: float) -> void:
+	var c := _idle_clip
+	var n := c.poses.size() - 1   # the last frame repeats the first
+	var ft := fposmod((_time + _idle_phase) * c.fps, float(n))
+	var i := int(ft)
+	var f := ft - i
+	var a: PoseLibrary.Pose = c.poses[i]
+	var b: PoseLibrary.Pose = c.poses[i + 1]
+	for j in range(1, LEG_START):
+		o.rot[j] = PoseLibrary.jslerp(j, o.rot[j], PoseLibrary.jslerp(j, a.rot[j], b.rot[j], f), w)
+	o.rot[0] = o.rot[0].slerp((a.rot[0] as Quaternion).slerp(b.rot[0], f), w)
+	o.yaw = lerp_angle(o.yaw, lerp_angle(a.hips_yaw, b.hips_yaw, f), w)
+	o.pos = o.pos.lerp(a.pos.lerp(b.pos, f), w)
+	for side in 2:
+		var ankle: Vector3 = (c.ankles[i][side] as Vector3).lerp(c.ankles[i + 1][side], f)
+		var knee: Vector3 = (c.knees[i][side] as Vector3).lerp(c.knees[i + 1][side], f)
+		o.feet[side] = o.feet[side].lerp(ankle, w)
+		o.pitch[side] = lerpf(o.pitch[side], 0.0, w)
+		var bend := Vector3(knee.x - ankle.x, 0.0, knee.z - ankle.z)
+		if bend.length_squared() > 0.0001:
+			o.poles[side] = o.poles[side].lerp(bend.normalized(), w)
 
 ## Sprint (wall = 0), or a wall run (wall = -1 wall on the left, +1 right):
 ## forward lean, long stride with a short ground contact, a high heel
@@ -1315,6 +1360,37 @@ func _style_sprint(o: Loco, speed: float, dir: Vector3, wall: int) -> void:
 	o.rot[7] = Quaternion.from_euler(Vector3(deg_to_rad(8.0 + amp * sph), 0, deg_to_rad(rz)))
 	o.rot[8] = Quaternion(Vector3.RIGHT, deg_to_rad(88.0 + 16.0 * sph))
 	o.rot[9] = Quaternion.IDENTITY
+	if wall == 0 and _run_clip != null and Tuning.debug_clip_anims:
+		_blend_run_clip(o)
+
+## Fast Run (Mixamo clip): pelvis, torso, head and arm pump, locked to the
+## procedural legs' phase (the clip's left-foot mid-stance on _phase = PI);
+## the feet, poles and hips height stay procedural (they plant at any speed).
+func _blend_run_clip(o: Loco) -> void:
+	var c := _run_clip
+	var n := c.poses.size() - 1   # the last frame repeats the first
+	var ft := fposmod(_run_stance_frame + (_phase - PI) / TAU * n, float(n))
+	var i := int(ft)
+	var f := ft - i
+	var a: PoseLibrary.Pose = c.poses[i]
+	var b: PoseLibrary.Pose = c.poses[i + 1]
+	o.rot[0] = (a.rot[0] as Quaternion).slerp(b.rot[0], f)
+	for j in range(1, LEG_START):
+		o.rot[j] = PoseLibrary.jslerp(j, a.rot[j], b.rot[j], f)
+
+## Frame (fractional) of a run clip's left-foot mid-stance: the middle of the
+## frames whose left ankle is within 2 cm of its lowest.
+static func _stance_frame(c: PoseLibrary.Clip) -> float:
+	var lo := INF
+	for k in c.ankles.size():
+		lo = minf(lo, (c.ankles[k][0] as Vector3).y)
+	var sum := 0.0
+	var cnt := 0
+	for k in c.ankles.size() - 1:
+		if (c.ankles[k][0] as Vector3).y < lo + 0.02:
+			sum += k
+			cnt += 1
+	return sum / maxf(cnt, 1.0)
 
 ## Carrying a body: heavier bounce and a counter-lean against the load.
 func _carry_adjust(o: Loco, speed: float) -> void:

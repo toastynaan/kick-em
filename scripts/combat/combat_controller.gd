@@ -3220,6 +3220,8 @@ func _react_r7(info: HitInfo) -> void:
 	var pdir: Vector3 = info.get_meta(&"push_dir", info.hit_direction)
 	match info.react:
 		&"knockdown":
+			if _roundhouse_stagger(info):
+				return
 			fighter.knockdown(pdir, info.hit_bone)
 			var hop := float(info.get_meta(&"hop", 0.0))
 			if hop > 0.0 and fighter.ragdoll != null:
@@ -3245,6 +3247,26 @@ func _react_r7(info: HitInfo) -> void:
 			if not _react_kind_ok(fighter, kind):
 				kind = R8_REACT_FALLBACK.get(kind, kind)  # flinch -> snap until H's react knows it
 			fighter.react(kind, flat, info.push, info.stun, info)
+
+## A tapped roundhouse on a guard that isn't broken (Tuning.ROUNDHOUSE_STAGGER):
+## a push on its feet with meta "stagger" (Fighter.react: the upper body goes
+## partly ragdoll, the stagger-back clip with F5) instead of the knockdown.
+## A payoff (on a fold / buckle) still knocks down. true when it staggered.
+func _roundhouse_stagger(info: HitInfo) -> bool:
+	if info.move_id != &"roundhouse" or info.charged or info.payoff or is_broken() \
+			or fighter.is_lifted() or fighter.is_held():
+		return false
+	var sdir: Vector3 = info.get_meta(&"push_dir", info.get_meta(&"strike_dir", info.hit_direction))
+	var flat := Vector3(sdir.x, 0.0, sdir.z)
+	flat = flat.normalized() if flat.length_squared() > 1e-4 else info.hit_direction
+	# The hit reports what happened (hit_landed listeners: HUD, FX, the overlay).
+	info.react = &"push"
+	info.tier = REACT_TIER[&"push"]
+	info.stun = float(Tuning.ROUNDHOUSE_STAGGER["stun"]) * (Tuning.R7_HEAVY_STUN_MULT if fighter.is_heavy() else 1.0) \
+		* float(info.get_meta(&"decay", 1.0))
+	info.set_meta(&"stagger", true)
+	fighter.react(&"push", flat, info.push, info.stun, info)
+	return true
 
 ## Round 9: the charged hook's spin (meta "spin_rate", rad/s) on the body
 ## just knocked down or launched (agent H's Fighter.add_spin).

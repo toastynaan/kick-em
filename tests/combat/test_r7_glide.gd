@@ -97,7 +97,7 @@ func run() -> void:
 	p = _player()
 	var kd := spawn(&"grunt", p.global_position + Vector3(0, 0, -1.2), Vector3.BACK)
 	await ticks(15)
-	p.combat.play_move(&"roundhouse", kd)
+	p.combat.play_move(&"heavy_hook", kd)  # a knockdown (a tapped roundhouse only staggers a fresh guard)
 	await wait_until(func() -> bool: return not hits_on(kd).is_empty(), 1.0)
 	check(p.combat.get_combat_target() == null and kd.is_down(), "a target knocked down is no combat target")
 
